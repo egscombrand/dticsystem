@@ -1,0 +1,3 @@
+{
+  "/api/internal/orders/[id]/telegram/preview/route": "app/api/internal/orders/[id]/telegram/preview/route.js"
+}

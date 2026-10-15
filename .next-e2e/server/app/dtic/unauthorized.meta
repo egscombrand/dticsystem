@@ -1,0 +1,41 @@
+{
+  "status": 200,
+  "headers": {
+    "link": "</_next/static/media/797e433ab948586e-s.p.0r6juujl39pe6.woff2>; rel=preload; as=\"font\"; crossorigin=\"\"; type=\"font/woff2\", </_next/static/media/caa3a2e1cccd8315-s.p.0wgildi0cnwt9.woff2>; rel=preload; as=\"font\"; crossorigin=\"\"; type=\"font/woff2\"",
+    "x-nextjs-stale-time": "300",
+    "x-nextjs-prerender": "1",
+    "x-next-cache-tags": "_N_T_/layout,_N_T_/dtic/layout,_N_T_/dtic/unauthorized/layout,_N_T_/dtic/unauthorized/page,_N_T_/dtic/unauthorized"
+  },
+  "segmentPaths": [
+    "/_tree",
+    "/_full",
+    "/dtic/unauthorized/__PAGE__"
+  ],
+  "prefetchHints": {
+    "hints": 49216,
+    "slots": {
+      "children": {
+        "hints": 49248,
+        "slots": {
+          "children": {
+            "hints": 49248,
+            "slots": {
+              "children": {
+                "hints": 49312,
+                "slots": null
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "routeCache": {
+    "key": "/route-cache/APP_PAGE/38e192bfba275ba84507bc6ccfbe1f30e4bff8c94db5dae05d73aeb7e2f512fb/$/dtic/unauthorized",
+    "owner": {
+      "kind": "APP_PAGE",
+      "sourceRoute": "/dtic/unauthorized/page"
+    },
+    "isFallback": false
+  }
+}

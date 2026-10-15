@@ -1,0 +1,3 @@
+{
+  "/api/dtic/auth/logout/route": "app/api/dtic/auth/logout/route.js"
+}

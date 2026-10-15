@@ -1,0 +1,3 @@
+{
+  "/api/internal/telegram-brands/[brandId]/test/route": "app/api/internal/telegram-brands/[brandId]/test/route.js"
+}

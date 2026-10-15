@@ -1,0 +1,531 @@
+{
+  "version": 3,
+  "pages404": true,
+  "appType": "app",
+  "caseSensitive": false,
+  "basePath": "",
+  "redirects": [
+    {
+      "source": "/:path+/",
+      "destination": "/:path+",
+      "internal": true,
+      "priority": true,
+      "statusCode": 308,
+      "regex": "^(?:/((?:[^/]+?)(?:/(?:[^/]+?))*))/$"
+    },
+    {
+      "source": "/ajukan",
+      "destination": "/",
+      "statusCode": 307,
+      "regex": "^(?!/_next)/ajukan(?:/)?$"
+    },
+    {
+      "source": "/dashboard",
+      "destination": "/dtic/dashboard",
+      "statusCode": 307,
+      "regex": "^(?!/_next)/dashboard(?:/)?$"
+    },
+    {
+      "source": "/orders",
+      "destination": "/dtic/orders",
+      "statusCode": 307,
+      "regex": "^(?!/_next)/orders(?:/)?$"
+    },
+    {
+      "source": "/orders/:path*",
+      "destination": "/dtic/orders/:path*",
+      "statusCode": 307,
+      "regex": "^(?!/_next)/orders(?:/((?:[^/]+?)(?:/(?:[^/]+?))*))?(?:/)?$"
+    },
+    {
+      "source": "/workboard",
+      "destination": "/dtic/workboard",
+      "statusCode": 307,
+      "regex": "^(?!/_next)/workboard(?:/)?$"
+    },
+    {
+      "source": "/calendar",
+      "destination": "/dtic/calendar",
+      "statusCode": 307,
+      "regex": "^(?!/_next)/calendar(?:/)?$"
+    },
+    {
+      "source": "/settings",
+      "destination": "/dtic/settings",
+      "statusCode": 307,
+      "regex": "^(?!/_next)/settings(?:/)?$"
+    },
+    {
+      "source": "/settings/:path*",
+      "destination": "/dtic/settings/:path*",
+      "statusCode": 307,
+      "regex": "^(?!/_next)/settings(?:/((?:[^/]+?)(?:/(?:[^/]+?))*))?(?:/)?$"
+    }
+  ],
+  "headers": [],
+  "onMatchHeaders": [],
+  "rewrites": {
+    "beforeFiles": [],
+    "afterFiles": [],
+    "fallback": []
+  },
+  "dynamicRoutes": [
+    {
+      "page": "/api/internal/attachments/[id]",
+      "regex": "^/api/internal/attachments/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/api/internal/attachments/(?<nxtPid>[^/]+?)(?:/)?$"
+    },
+    {
+      "page": "/api/internal/brands/[id]",
+      "regex": "^/api/internal/brands/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/api/internal/brands/(?<nxtPid>[^/]+?)(?:/)?$"
+    },
+    {
+      "page": "/api/internal/menu/[key]",
+      "regex": "^/api/internal/menu/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPkey": "nxtPkey"
+      },
+      "namedRegex": "^/api/internal/menu/(?<nxtPkey>[^/]+?)(?:/)?$"
+    },
+    {
+      "page": "/api/internal/orders/[id]",
+      "regex": "^/api/internal/orders/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/api/internal/orders/(?<nxtPid>[^/]+?)(?:/)?$"
+    },
+    {
+      "page": "/api/internal/orders/[id]/assignees",
+      "regex": "^/api/internal/orders/([^/]+?)/assignees(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/api/internal/orders/(?<nxtPid>[^/]+?)/assignees(?:/)?$"
+    },
+    {
+      "page": "/api/internal/orders/[id]/client-info",
+      "regex": "^/api/internal/orders/([^/]+?)/client\\-info(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/api/internal/orders/(?<nxtPid>[^/]+?)/client\\-info(?:/)?$"
+    },
+    {
+      "page": "/api/internal/orders/[id]/notes",
+      "regex": "^/api/internal/orders/([^/]+?)/notes(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/api/internal/orders/(?<nxtPid>[^/]+?)/notes(?:/)?$"
+    },
+    {
+      "page": "/api/internal/orders/[id]/status",
+      "regex": "^/api/internal/orders/([^/]+?)/status(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/api/internal/orders/(?<nxtPid>[^/]+?)/status(?:/)?$"
+    },
+    {
+      "page": "/api/internal/orders/[id]/telegram",
+      "regex": "^/api/internal/orders/([^/]+?)/telegram(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/api/internal/orders/(?<nxtPid>[^/]+?)/telegram(?:/)?$"
+    },
+    {
+      "page": "/api/internal/orders/[id]/telegram/preview",
+      "regex": "^/api/internal/orders/([^/]+?)/telegram/preview(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/api/internal/orders/(?<nxtPid>[^/]+?)/telegram/preview(?:/)?$"
+    },
+    {
+      "page": "/api/internal/settings/[entity]",
+      "regex": "^/api/internal/settings/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPentity": "nxtPentity"
+      },
+      "namedRegex": "^/api/internal/settings/(?<nxtPentity>[^/]+?)(?:/)?$"
+    },
+    {
+      "page": "/api/internal/settings/[entity]/[id]",
+      "regex": "^/api/internal/settings/([^/]+?)/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPentity": "nxtPentity",
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/api/internal/settings/(?<nxtPentity>[^/]+?)/(?<nxtPid>[^/]+?)(?:/)?$"
+    },
+    {
+      "page": "/api/internal/telegram-brands/[brandId]",
+      "regex": "^/api/internal/telegram\\-brands/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPbrandId": "nxtPbrandId"
+      },
+      "namedRegex": "^/api/internal/telegram\\-brands/(?<nxtPbrandId>[^/]+?)(?:/)?$"
+    },
+    {
+      "page": "/api/internal/telegram-brands/[brandId]/history",
+      "regex": "^/api/internal/telegram\\-brands/([^/]+?)/history(?:/)?$",
+      "routeKeys": {
+        "nxtPbrandId": "nxtPbrandId"
+      },
+      "namedRegex": "^/api/internal/telegram\\-brands/(?<nxtPbrandId>[^/]+?)/history(?:/)?$"
+    },
+    {
+      "page": "/api/internal/telegram-brands/[brandId]/test",
+      "regex": "^/api/internal/telegram\\-brands/([^/]+?)/test(?:/)?$",
+      "routeKeys": {
+        "nxtPbrandId": "nxtPbrandId"
+      },
+      "namedRegex": "^/api/internal/telegram\\-brands/(?<nxtPbrandId>[^/]+?)/test(?:/)?$"
+    },
+    {
+      "page": "/api/internal/telegram-brands/[brandId]/verify",
+      "regex": "^/api/internal/telegram\\-brands/([^/]+?)/verify(?:/)?$",
+      "routeKeys": {
+        "nxtPbrandId": "nxtPbrandId"
+      },
+      "namedRegex": "^/api/internal/telegram\\-brands/(?<nxtPbrandId>[^/]+?)/verify(?:/)?$"
+    },
+    {
+      "page": "/api/internal/users/[id]",
+      "regex": "^/api/internal/users/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/api/internal/users/(?<nxtPid>[^/]+?)(?:/)?$"
+    },
+    {
+      "page": "/api/internal/users/[id]/password",
+      "regex": "^/api/internal/users/([^/]+?)/password(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/api/internal/users/(?<nxtPid>[^/]+?)/password(?:/)?$"
+    },
+    {
+      "page": "/dtic/orders/[id]",
+      "regex": "^/dtic/orders/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/dtic/orders/(?<nxtPid>[^/]+?)(?:/)?$",
+      "prefetchSegmentDataRoutes": [
+        {
+          "destination": "/dtic/orders/[id].segments/dtic/!KHBhbmVsKQ/orders/$d$id$segment",
+          "source": "^/dtic/orders/(?<nxtPid>[^/]+?)\\.segments/dtic/!KHBhbmVsKQ/orders/\\$d\\$id(?<segment>/__PAGE__\\.segment\\.rsc|\\.segment\\.rsc)(?:/)?$",
+          "routeKeys": {
+            "nxtPid": "nxtPid"
+          }
+        }
+      ]
+    },
+    {
+      "page": "/dtic/orders/[id]/edit",
+      "regex": "^/dtic/orders/([^/]+?)/edit(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/dtic/orders/(?<nxtPid>[^/]+?)/edit(?:/)?$",
+      "prefetchSegmentDataRoutes": [
+        {
+          "destination": "/dtic/orders/[id]/edit.segments/dtic/!KHBhbmVsKQ/orders/$d$id/edit$segment",
+          "source": "^/dtic/orders/(?<nxtPid>[^/]+?)/edit\\.segments/dtic/!KHBhbmVsKQ/orders/\\$d\\$id/edit(?<segment>/__PAGE__\\.segment\\.rsc|\\.segment\\.rsc)(?:/)?$",
+          "routeKeys": {
+            "nxtPid": "nxtPid"
+          }
+        }
+      ]
+    },
+    {
+      "page": "/dtic/settings/[entity]",
+      "regex": "^/dtic/settings/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPentity": "nxtPentity"
+      },
+      "namedRegex": "^/dtic/settings/(?<nxtPentity>[^/]+?)(?:/)?$",
+      "prefetchSegmentDataRoutes": [
+        {
+          "destination": "/dtic/settings/[entity].segments/dtic/!KHBhbmVsKQ/settings/$d$entity$segment",
+          "source": "^/dtic/settings/(?<nxtPentity>[^/]+?)\\.segments/dtic/!KHBhbmVsKQ/settings/\\$d\\$entity(?<segment>/__PAGE__\\.segment\\.rsc|\\.segment\\.rsc)(?:/)?$",
+          "routeKeys": {
+            "nxtPentity": "nxtPentity"
+          }
+        }
+      ]
+    }
+  ],
+  "staticRoutes": [
+    {
+      "page": "/",
+      "regex": "^/(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/(?:/)?$"
+    },
+    {
+      "page": "/_global-error",
+      "regex": "^/_global\\-error(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/_global\\-error(?:/)?$"
+    },
+    {
+      "page": "/_not-found",
+      "regex": "^/_not\\-found(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/_not\\-found(?:/)?$"
+    },
+    {
+      "page": "/api/dtic/auth/login",
+      "regex": "^/api/dtic/auth/login(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/dtic/auth/login(?:/)?$"
+    },
+    {
+      "page": "/api/dtic/auth/logout",
+      "regex": "^/api/dtic/auth/logout(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/dtic/auth/logout(?:/)?$"
+    },
+    {
+      "page": "/api/internal/audit",
+      "regex": "^/api/internal/audit(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/internal/audit(?:/)?$"
+    },
+    {
+      "page": "/api/internal/display/orders",
+      "regex": "^/api/internal/display/orders(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/internal/display/orders(?:/)?$"
+    },
+    {
+      "page": "/api/internal/integrations/telegram",
+      "regex": "^/api/internal/integrations/telegram(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/internal/integrations/telegram(?:/)?$"
+    },
+    {
+      "page": "/api/internal/integrations/telegram/check",
+      "regex": "^/api/internal/integrations/telegram/check(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/internal/integrations/telegram/check(?:/)?$"
+    },
+    {
+      "page": "/api/internal/integrations/telegram/retry",
+      "regex": "^/api/internal/integrations/telegram/retry(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/internal/integrations/telegram/retry(?:/)?$"
+    },
+    {
+      "page": "/api/internal/integrations/telegram/test",
+      "regex": "^/api/internal/integrations/telegram/test(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/internal/integrations/telegram/test(?:/)?$"
+    },
+    {
+      "page": "/api/internal/integrations/telegram/test-order",
+      "regex": "^/api/internal/integrations/telegram/test\\-order(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/internal/integrations/telegram/test\\-order(?:/)?$"
+    },
+    {
+      "page": "/api/internal/menu",
+      "regex": "^/api/internal/menu(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/internal/menu(?:/)?$"
+    },
+    {
+      "page": "/api/internal/menu/reset",
+      "regex": "^/api/internal/menu/reset(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/internal/menu/reset(?:/)?$"
+    },
+    {
+      "page": "/api/internal/site",
+      "regex": "^/api/internal/site(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/internal/site(?:/)?$"
+    },
+    {
+      "page": "/api/internal/telegram/worker/tick",
+      "regex": "^/api/internal/telegram/worker/tick(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/internal/telegram/worker/tick(?:/)?$"
+    },
+    {
+      "page": "/api/internal/telegram-brands",
+      "regex": "^/api/internal/telegram\\-brands(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/internal/telegram\\-brands(?:/)?$"
+    },
+    {
+      "page": "/api/internal/users",
+      "regex": "^/api/internal/users(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/internal/users(?:/)?$"
+    },
+    {
+      "page": "/api/public/orders",
+      "regex": "^/api/public/orders(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/public/orders(?:/)?$"
+    },
+    {
+      "page": "/api/public/tracking",
+      "regex": "^/api/public/tracking(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/public/tracking(?:/)?$"
+    },
+    {
+      "page": "/dtic",
+      "regex": "^/dtic(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dtic(?:/)?$"
+    },
+    {
+      "page": "/dtic/calendar",
+      "regex": "^/dtic/calendar(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dtic/calendar(?:/)?$"
+    },
+    {
+      "page": "/dtic/dashboard",
+      "regex": "^/dtic/dashboard(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dtic/dashboard(?:/)?$"
+    },
+    {
+      "page": "/dtic/display",
+      "regex": "^/dtic/display(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dtic/display(?:/)?$"
+    },
+    {
+      "page": "/dtic/distribusi",
+      "regex": "^/dtic/distribusi(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dtic/distribusi(?:/)?$"
+    },
+    {
+      "page": "/dtic/login",
+      "regex": "^/dtic/login(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dtic/login(?:/)?$"
+    },
+    {
+      "page": "/dtic/orders",
+      "regex": "^/dtic/orders(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dtic/orders(?:/)?$"
+    },
+    {
+      "page": "/dtic/settings",
+      "regex": "^/dtic/settings(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dtic/settings(?:/)?$"
+    },
+    {
+      "page": "/dtic/settings/audit",
+      "regex": "^/dtic/settings/audit(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dtic/settings/audit(?:/)?$"
+    },
+    {
+      "page": "/dtic/settings/integrations",
+      "regex": "^/dtic/settings/integrations(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dtic/settings/integrations(?:/)?$"
+    },
+    {
+      "page": "/dtic/settings/integrations/brands",
+      "regex": "^/dtic/settings/integrations/brands(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dtic/settings/integrations/brands(?:/)?$"
+    },
+    {
+      "page": "/dtic/settings/menu",
+      "regex": "^/dtic/settings/menu(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dtic/settings/menu(?:/)?$"
+    },
+    {
+      "page": "/dtic/settings/users",
+      "regex": "^/dtic/settings/users(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dtic/settings/users(?:/)?$"
+    },
+    {
+      "page": "/dtic/settings/website",
+      "regex": "^/dtic/settings/website(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dtic/settings/website(?:/)?$"
+    },
+    {
+      "page": "/dtic/unauthorized",
+      "regex": "^/dtic/unauthorized(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dtic/unauthorized(?:/)?$"
+    },
+    {
+      "page": "/dtic/workboard",
+      "regex": "^/dtic/workboard(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dtic/workboard(?:/)?$"
+    },
+    {
+      "page": "/dtic/workload",
+      "regex": "^/dtic/workload(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dtic/workload(?:/)?$"
+    },
+    {
+      "page": "/favicon.ico",
+      "regex": "^/favicon\\.ico(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/favicon\\.ico(?:/)?$"
+    },
+    {
+      "page": "/riwayat",
+      "regex": "^/riwayat(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/riwayat(?:/)?$"
+    }
+  ],
+  "dataRoutes": [],
+  "rsc": {
+    "header": "rsc",
+    "varyHeader": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch",
+    "prefetchHeader": "next-router-prefetch",
+    "didPostponeHeader": "x-nextjs-postponed",
+    "contentTypeHeader": "text/x-component",
+    "suffix": ".rsc",
+    "prefetchSegmentHeader": "next-router-segment-prefetch",
+    "prefetchSegmentSuffix": ".segment.rsc",
+    "prefetchSegmentDirSuffix": ".segments",
+    "clientParamParsing": true,
+    "dynamicRSCPrerender": true
+  },
+  "rewriteHeaders": {
+    "pathHeader": "x-nextjs-rewritten-path",
+    "queryHeader": "x-nextjs-rewritten-query"
+  },
+  "ppr": {
+    "chain": {
+      "headers": {
+        "next-resume": "1"
+      }
+    }
+  }
+}

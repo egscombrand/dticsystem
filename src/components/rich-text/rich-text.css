@@ -1,0 +1,51 @@
+/*
+ * Gaya konten rich text — dipakai editor (Tiptap) dan tampilan baca (RichTextView)
+ * sehingga daftar/perataan terlihat sama di keduanya. Diimpor langsung oleh kedua
+ * komponen agar selalu termuat bersamanya. Sengaja CSS biasa (bukan CSS module):
+ * aturan turbopack "*.css" di next.config.ts mengganti nama file sehingga CSS module
+ * tidak terdeteksi. Kelas diberi awalan dtic-rich agar tidak bentrok.
+ */
+.dtic-rich p {
+  margin: 0 0 0.5em;
+  min-height: 1.5em;
+}
+.dtic-rich ul,
+.dtic-rich ol {
+  margin: 0 0 0.5em;
+  padding-left: 1.5rem;
+}
+.dtic-rich ul {
+  list-style: disc outside;
+}
+.dtic-rich ol {
+  list-style: decimal outside;
+}
+.dtic-rich ul ul {
+  list-style-type: circle;
+}
+.dtic-rich ol ol {
+  list-style-type: lower-alpha;
+}
+.dtic-rich li {
+  display: list-item;
+  padding-left: 0.125rem;
+}
+.dtic-rich li > p {
+  margin: 0 0 0.125em;
+}
+.dtic-rich li::marker {
+  color: var(--color-ink-2);
+}
+.dtic-rich > :last-child {
+  margin-bottom: 0;
+}
+
+/* Placeholder Tiptap: atribut data-placeholder hanya dipasang pada paragraf kosong. */
+.dtic-rich-editor > p[data-placeholder]:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  color: #9aa1ad;
+  pointer-events: none;
+  white-space: pre-line;
+}

@@ -1,0 +1,134 @@
+@import "tailwindcss";
+
+/*
+ * DTIC System — token desain light mode (tampilan utama & satu-satunya di Langkah 1).
+ */
+@theme {
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+
+  --color-canvas: #f6f7f9;
+  --color-surface: #ffffff;
+  --color-subtle: #f9fafb;
+  --color-line: #e5e7eb;
+  --color-line-strong: #d4d8de;
+
+  --color-ink: #1f2937;
+  --color-ink-2: #4b5563;
+  --color-ink-3: #6b7280;
+
+  --color-navy: #13233f;
+  --color-teal: #0f766e;
+  --color-accent: #0f766e;
+  --color-accent-hover: #115e59;
+  --color-accent-soft: #e7f5f3;
+  --color-accent-ring: #5eead4;
+
+  --color-ok: #15803d;
+  --color-ok-soft: #ecfdf3;
+  --color-warn: #b45309;
+  --color-warn-soft: #fff7e8;
+  --color-bad: #b42318;
+  --color-bad-soft: #fef2f1;
+  --color-info: #4338ca;
+  --color-info-soft: #eef2ff;
+
+  --shadow-card: 0 1px 2px rgb(16 24 40 / 0.04), 0 1px 3px rgb(16 24 40 / 0.03);
+  --shadow-pop: 0 12px 32px -8px rgb(16 24 40 / 0.18), 0 2px 6px rgb(16 24 40 / 0.06);
+}
+
+:root {
+  color-scheme: light;
+}
+
+html {
+  background: var(--color-canvas);
+}
+
+body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+dialog::backdrop {
+  background: rgb(15 23 42 / 0.35);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Layar display: kemunculan order baru (dihormati jika pengguna meminta gerak dikurangi). */
+@keyframes fadein {
+  from {
+    opacity: 0.3;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .animate-\[fadein_0\.6s_ease-out\] {
+    animation: none;
+  }
+}
+
+/* Running text layar display: bergeser ke kiri sejauh satu salinan teks (salinan kedua identik, loop mulus). */
+.display-ticker {
+  will-change: transform;
+  animation: display-ticker 30s linear infinite;
+}
+@keyframes display-ticker {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .display-ticker {
+    animation: none;
+  }
+}
+
+/* Dialog konfirmasi pengajuan (native <dialog>): masuk & keluar halus. Gerak dikurangi = tanpa transisi. */
+.dtic-dialog {
+  opacity: 0;
+  transform: translateY(8px) scale(0.98);
+  transition: opacity 160ms ease-out, transform 160ms ease-out;
+}
+.dtic-dialog[open] {
+  opacity: 1;
+  transform: none;
+}
+.dtic-dialog[data-state="closing"] {
+  opacity: 0;
+  transform: translateY(6px) scale(0.98);
+}
+@starting-style {
+  .dtic-dialog[open] {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dtic-dialog {
+    transition: none;
+  }
+}
+
