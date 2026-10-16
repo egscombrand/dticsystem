@@ -64,9 +64,13 @@ alter table public.notification_outbox add column if not exists chat_id text che
 alter table public.notification_outbox add column if not exists event_type text;
 alter table public.notification_outbox add column if not exists error_code integer;
 
+-- 'pic_changed' disertakan di sini juga (bukan hanya di migrasi 20261015000000_pic_management.sql yang
+-- menggantikannya) karena pada database yang event_type-nya sudah memakai nilai itu (ditambahkan ad hoc
+-- lebih dulu), definisi yang lebih sempit ini akan ditolak sebagai check_violation sebelum migrasi
+-- berikutnya sempat menggantikannya. Hasil akhir sama; ini hanya mencegah kegagalan pada langkah antara.
 alter table public.notification_outbox drop constraint if exists notification_outbox_event_type_check;
 alter table public.notification_outbox add constraint notification_outbox_event_type_check
-  check (event_type is null or event_type in ('new_order', 'status_changed', 'waiting_confirmation', 'completed', 'on_hold', 'cancelled'));
+  check (event_type is null or event_type in ('new_order', 'status_changed', 'waiting_confirmation', 'completed', 'on_hold', 'cancelled', 'pic_changed'));
 
 -- Status 'skipped' = tidak dikirim karena alasan tercatat (tanpa grup, grup nonaktif, jenis dimatikan).
 alter table public.notification_outbox drop constraint if exists notification_outbox_status_v2_check;

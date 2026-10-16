@@ -91,8 +91,10 @@ const PALETTE: Record<Theme, { root: string; panel: string; card: string; muted:
 const STATUS_PILL: Record<DisplayItem["status"], { dark: string; light: string }> = {
   submitted: { dark: "bg-[#374151] text-[#e5e7eb]", light: "bg-[#e5e7eb] text-[#111827]" },
   assigned: { dark: "bg-[#1e3a8a] text-[#bfdbfe]", light: "bg-[#dbeafe] text-[#1e3a8a]" },
-  in_progress: { dark: "bg-[#4c1d95] text-[#ddd6fe]", light: "bg-[#ede9fe] text-[#4c1d95]" },
-  pending_confirmation: { dark: "bg-[#7c2d12] text-[#fed7aa]", light: "bg-[#ffedd5] text-[#7c2d12]" },
+  in_progress: { dark: "bg-[#1e40af] text-[#dbeafe]", light: "bg-[#dbeafe] text-[#1e40af]" },
+  pending_confirmation: { dark: "bg-[#4c1d95] text-[#ddd6fe]", light: "bg-[#ede9fe] text-[#4c1d95]" },
+  internal_revision: { dark: "bg-[#7f1d1d] text-[#fecaca]", light: "bg-[#fee2e2] text-[#7f1d1d]" },
+  awaiting_requester: { dark: "bg-[#134e4a] text-[#99f6e4]", light: "bg-[#ccfbf1] text-[#134e4a]" },
   on_hold: { dark: "bg-[#713f12] text-[#fde68a]", light: "bg-[#fef9c3] text-[#713f12]" },
   completed: { dark: "bg-[#064e3b] text-[#a7f3d0]", light: "bg-[#d1fae5] text-[#064e3b]" },
   cancelled: { dark: "bg-[#27272a] text-[#71717a]", light: "bg-[#e4e4e7] text-[#52525b]" },

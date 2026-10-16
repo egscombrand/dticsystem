@@ -2,7 +2,7 @@
 
 import { AlertCircle, CheckCircle2, UserPlus } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { PicPanelDialog } from "@/components/assignments/pic-panel-dialog";
 import { Button } from "@/components/ui/button";
 import type { Assignee, MemberOption } from "@/lib/types";
@@ -33,9 +33,9 @@ export function AssignmentField({
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<Status>({ kind: "idle" });
   // PIC terbaru dari respons server setelah simpan, agar panel tidak menampilkan data lama sebelum refresh selesai.
-  const [saved, setSaved] = useState<Assignee[] | null>(null);
-  useEffect(() => setSaved(null), [assignees]);
-  const shown = saved ?? assignees;
+  // Hasil simpan hanya berlaku selama daftar `assignees` dari server belum berganti (refresh membawa data baru).
+  const [saved, setSaved] = useState<{ base: Assignee[]; list: Assignee[] } | null>(null);
+  const shown = saved && saved.base === assignees ? saved.list : assignees;
 
   return (
     <div className="flex flex-col gap-2">
@@ -82,7 +82,7 @@ export function AssignmentField({
           workloads={workloads}
           onSaved={(text, ids) => {
             const pool = [...assignees, ...members.map((m) => ({ id: m.id, name: m.name, division: m.division, isActive: m.isActive }))];
-            setSaved(ids.map((id) => pool.find((a) => a.id === id)).filter((a): a is Assignee => Boolean(a)));
+            setSaved({ base: assignees, list: ids.map((id) => pool.find((a) => a.id === id)).filter((a): a is Assignee => Boolean(a)) });
             setOpen(false);
             setStatus({ kind: "saved", text });
             router.refresh(); // perbarui detail, riwayat, dan daftar dari server

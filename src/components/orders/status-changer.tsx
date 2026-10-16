@@ -13,7 +13,7 @@ import type { Transition } from "@/lib/workflow";
  * Tombol perubahan status. Daftar aksi dihitung server (allowedTransitions) sesuai pelaku;
  * server tetap memeriksa ulang setiap permintaan.
  */
-export function StatusChanger({ orderId, status, actions }: { orderId: string; status: OrderStatus; actions: Transition[] }) {
+export function StatusChanger({ orderId, status, actions, compact }: { orderId: string; status: OrderStatus; actions: Transition[]; compact?: boolean }) {
   const router = useRouter();
   const [note, setNote] = useState("");
   const [pending, setPending] = useState(false);
@@ -42,6 +42,7 @@ export function StatusChanger({ orderId, status, actions }: { orderId: string; s
   }
 
   if (actions.length === 0) {
+    if (compact) return null;
     return (
       <div className="flex flex-col gap-2">
         <p className="text-sm text-ink-2">Status saat ini: <span className="font-medium">{STATUS_META[status].label}</span></p>
@@ -52,10 +53,10 @@ export function StatusChanger({ orderId, status, actions }: { orderId: string; s
 
   return (
     <div className="flex flex-col gap-3">
-      <p className="text-sm text-ink-2">Status saat ini: <span className="font-medium">{STATUS_META[status].label}</span></p>
+      {!compact && <p className="text-sm text-ink-2">Status saat ini: <span className="font-medium">{STATUS_META[status].label}</span></p>}
       <div className="flex flex-wrap gap-2">
         {actions.map((t) => (
-          <Button key={t.to + t.action} variant={t.to === "cancelled" ? "danger" : "secondary"} size="sm" disabled={pending} onClick={() => (t.note.required ? setActive(t) : void run(t))}>
+          <Button key={t.to + t.action} variant={t.to === "cancelled" ? "danger" : compact && t.to === "in_progress" ? "primary" : "secondary"} size={compact && t.to === "in_progress" ? "md" : "sm"} className={compact && t.to === "in_progress" ? "w-full justify-center" : undefined} disabled={pending} onClick={() => (t.note.required ? setActive(t) : void run(t))}>
             {t.action}
           </Button>
         ))}

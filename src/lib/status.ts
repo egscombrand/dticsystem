@@ -5,17 +5,20 @@
  * Aturan status awal: pengajuan baru selalu "assigned" (Siap Dikerjakan) karena pemohon wajib
  * memilih PIC. "submitted" (Pengajuan Masuk) hanya untuk data historis yang belum punya PIC.
  */
-export const ORDER_STATUSES = ["submitted", "assigned", "in_progress", "pending_confirmation", "on_hold", "completed", "cancelled"] as const;
+export const ORDER_STATUSES = ["submitted", "assigned", "in_progress", "pending_confirmation", "internal_revision", "awaiting_requester", "on_hold", "completed", "cancelled"] as const;
 
 export type OrderStatus = (typeof ORDER_STATUSES)[number];
 
-export type StatusTone = "neutral" | "accent" | "info" | "warning" | "success" | "danger" | "muted";
+export type StatusTone = "neutral" | "accent" | "info" | "warning" | "success" | "danger" | "muted" | "violet";
 
 export const STATUS_META: Record<OrderStatus, { label: string; tone: StatusTone; description: string }> = {
   submitted: { label: "Pengajuan Masuk", tone: "neutral", description: "Pengajuan tersimpan dan belum memiliki PIC (data lama)." },
   assigned: { label: "Siap Dikerjakan", tone: "accent", description: "PIC sudah dipilih pemohon; tugas siap dikerjakan." },
   in_progress: { label: "Sedang Dikerjakan", tone: "info", description: "Staff sedang mengerjakan request." },
-  pending_confirmation: { label: "Menunggu Konfirmasi", tone: "warning", description: "Hasil sudah diserahkan dan menunggu konfirmasi." },
+  // Kode lama dipertahankan demi kompatibilitas data; maknanya: hasil menunggu pemeriksaan (QC) Manager.
+  pending_confirmation: { label: "Menunggu QC Manager", tone: "violet", description: "Hasil diserahkan dan menunggu pemeriksaan QC Manager." },
+  internal_revision: { label: "Perlu Revisi Internal", tone: "danger", description: "Manager meminta perbaikan sebelum hasil dapat dilanjutkan." },
+  awaiting_requester: { label: "Menunggu Masukan Pemohon", tone: "warning", description: "Hasil sudah dikirim ke pemohon; menunggu tanggapan." },
   on_hold: { label: "Ditunda", tone: "warning", description: "Pekerjaan dihentikan sementara (alasan tercatat)." },
   completed: { label: "Selesai", tone: "success", description: "Hasil dikonfirmasi dan request ditutup." },
   cancelled: { label: "Dibatalkan", tone: "muted", description: "Request dibatalkan (alasan tercatat)." },
@@ -87,7 +90,7 @@ export function isOverdue(deadlineAt: Date | string, status: OrderStatus, now: D
 
 /** Warna badge yang valid (dipakai juga untuk level prioritas dari database). */
 export function isStatusTone(value: unknown): value is StatusTone {
-  return typeof value === "string" && ["neutral", "accent", "info", "warning", "success", "danger", "muted"].includes(value);
+  return typeof value === "string" && ["neutral", "accent", "info", "warning", "success", "danger", "muted", "violet"].includes(value);
 }
 
 /** Status yang masih berjalan (belum selesai/dibatalkan). */

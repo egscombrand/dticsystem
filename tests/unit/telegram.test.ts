@@ -46,16 +46,15 @@ describe("format pesan request pekerjaan baru (bahasa Indonesia)", () => {
 
   it("memuat bagian template berbahasa Indonesia dengan data database", () => {
     const text = buildOrderMessage(data, BASE_URL);
-    expect(text).toContain("🚀 <b>REQUEST PEKERJAAN BARU</b>");
-    expect(text).toContain("📌 <b>RINGKASAN PEKERJAAN</b>");
-    expect(text).toContain("Nomor Order: DTIC-2026-0001");
+    expect(text).toContain("🔔 <b>REQUEST PEKERJAAN BARU</b>");
+    expect(text).toContain("Nomor Order: <b>DTIC-2026-0001</b>");
     expect(text).toContain("Status: SIAP DIKERJAKAN");
     expect(text).toContain("Jenis Pekerjaan: Poster");
     expect(text).toContain("Prioritas: Normal");
-    expect(text).toContain("Tenggat Waktu:");
+    expect(text).toContain("Tenggat: ");
     expect(text).toContain("📎 Lampiran: 2 file");
-    expect(text).toContain("👤 Diajukan oleh: Ani &lt;script&gt; · Marketing");
-    expect(text).toContain("🔗 Buka Detail Pekerjaan: https://dtic.example/dtic/orders/11111111-1111-4111-8111-111111111111");
+    expect(text).toContain("👤 Pemohon: Ani &lt;script&gt; · Marketing");
+    expect(text).toContain('<a href="https://dtic.example/dtic/orders/11111111-1111-4111-8111-111111111111">Buka Detail Pekerjaan</a>');
     expect(text).toContain("📣 <b>TINDAKAN SELANJUTNYA</b>");
     expect(text).toContain("DTIC Nexus · Notifikasi Otomatis");
   });
@@ -76,7 +75,7 @@ describe("format pesan request pekerjaan baru (bahasa Indonesia)", () => {
   it("tanpa PIC ditulis 'Belum ada PIC'; field kosong 'Belum diisi'; tanpa lampiran 'Tidak ada'", () => {
     const text = buildOrderMessage({ ...data, picInfos: [], title: "", priorityName: null, attachmentCount: 0 }, null);
     expect(text).toContain("• Belum ada PIC");
-    expect(text).toContain("Judul: Belum diisi");
+    expect(text).toContain("Judul: <b>Belum diisi</b>");
     expect(text).toContain("Prioritas: Belum diisi");
     expect(text).toContain("📎 Lampiran: Tidak ada");
   });
@@ -86,11 +85,11 @@ describe("format pesan request pekerjaan baru (bahasa Indonesia)", () => {
   });
   it("waktu pengajuan memakai zona WIB (Asia/Jakarta)", () => {
     // 08:30 UTC = 15:30 WIB
-    expect(buildOrderMessage(data, null)).toMatch(/Tenggat Waktu: .*15[.:]59|20 Okt/);
+    expect(buildOrderMessage(data, null)).toMatch(/Tenggat: .*15[.:]59|20 Okt/);
   });
   it("menyaring HTML dari input (judul dan nama pemohon)", () => {
     const text = buildOrderMessage(data, null);
-    expect(text).toContain("Judul: Poster &lt;b&gt;Promo&lt;/b&gt;");
+    expect(text).toContain("Judul: <b>Poster &lt;b&gt;Promo&lt;/b&gt;</b>");
     expect(text).not.toContain("<script>");
     expect(text).not.toContain("<b>Promo</b>");
   });
@@ -252,5 +251,41 @@ describe("format pesan perubahan distribusi pekerjaan (PIC)", () => {
     const text = buildPicChangeMessage({ ...data, reason: null, actorName: null, teamName: null }, null);
     expect(text).toContain("Poster &lt;Seminar&gt; &amp; Lingkungan");
     expect(text).not.toMatch(/Alasan:|Diubah oleh:|Kategori:|Lihat Pekerjaan:/);
+  });
+});
+
+describe("template order: tindakan selanjutnya dan tautan berlabel", () => {
+  const d = {
+    id: "11111111-1111-4111-8111-111111111111",
+    orderNumber: "DTIC-2026-00007",
+    status: "assigned" as const,
+    title: "Desain Poster",
+    teamName: "Graphic Design",
+    designType: "Poster",
+    brandName: "LSP PLI",
+    priorityName: "Normal",
+    deadlineAt: new Date("2026-10-20T16:59:00Z"),
+    brief: "Brief uji",
+    attachmentCount: 0,
+    requesterName: "Ani",
+    department: "Marketing",
+    picInfos: [{ fullName: "Fathin Maqbulloh Sawiji", displayName: null, username: null, userId: null, status: "not_linked" as const }],
+  } as unknown as Parameters<typeof buildOrderMessage>[0];
+  it("langkah bernomor menjelaskan cara membuka detail dan login", () => {
+    const text = buildOrderMessage(d, "https://dtic.example");
+    expect(text).toContain("1. <a href=");
+    expect(text).toContain("perlu login akun DTIC");
+    expect(text).toContain("2. Periksa brief, tenggat, dan lampiran.");
+    expect(text).toContain("3. Mulai pengerjaan sesuai status dan alur kerja yang berlaku.");
+  });
+  it("tanpa URL publik tidak ada tautan dan tidak ada URL localhost", () => {
+    const text = buildOrderMessage(d, null);
+    expect(text).not.toContain("<a href");
+    expect(text).toContain("Buka sistem DTIC Connect lalu cari nomor order");
+    expect(text).not.toMatch(/localhost|127\.0\.0\.1/);
+  });
+  it("URL dengan tanda kutip tidak merusak atribut href", () => {
+    const text = buildOrderMessage(d, "https://dtic.example/x\"onmouseover=1");
+    expect(text).not.toContain("\"onmouseover=1\">");
   });
 });

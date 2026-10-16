@@ -23,7 +23,7 @@ describe("isOverdue", () => {
 describe("label & kode status", () => {
   it("label status baru berbahasa Indonesia", () => {
     expect(statusLabel("assigned")).toBe("Siap Dikerjakan");
-    expect(statusLabel("pending_confirmation")).toBe("Menunggu Konfirmasi");
+    expect(statusLabel("pending_confirmation")).toBe("Menunggu QC Manager");
     expect(statusLabel("cancelled")).toBe("Dibatalkan");
   });
   it("kode status lama tetap bisa dibaca di riwayat (diberi label '(lama)')", () => {

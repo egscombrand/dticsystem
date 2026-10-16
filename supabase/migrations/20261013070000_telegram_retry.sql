@@ -19,7 +19,13 @@ alter table public.notification_outbox add column if not exists error_kind text;
 
 do $$
 begin
-  if not exists (select 1 from pg_constraint where conname = 'notification_outbox_status_v2_check' and conrelid = 'public.notification_outbox'::regclass) then
+  -- v2 hanya ditambahkan bila belum ada DAN belum digantikan oleh versi yang lebih baru (v3/v4, migrasi
+  -- 20261014000000/20261014020000). Tanpa pengecualian ini, pada database yang statusnya sudah memakai nilai
+  -- lebih baru (mis. 'skipped', 'awaiting_destination' — ditambahkan v4) migrasi ini gagal dengan
+  -- check_violation karena v2 lebih sempit daripada data yang sudah ada. v2 toh langsung digantikan v3 lalu v4
+  -- oleh migrasi berikutnya, jadi melewatinya di sini tidak mengubah hasil akhir.
+  if not exists (select 1 from pg_constraint where conname = 'notification_outbox_status_v2_check' and conrelid = 'public.notification_outbox'::regclass)
+     and not exists (select 1 from pg_constraint where conname in ('notification_outbox_status_v3_check', 'notification_outbox_status_v4_check') and conrelid = 'public.notification_outbox'::regclass) then
     alter table public.notification_outbox add constraint notification_outbox_status_v2_check
       check (status in ('pending', 'processing', 'retrying', 'sent', 'failed'));
   end if;

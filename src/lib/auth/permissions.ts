@@ -29,6 +29,10 @@ export const CAPABILITIES = {
   "orders.manage_pic": ["super_admin", "manager"],
   /** Mengubah status (aturan transisi di src/lib/workflow.ts). Staff hanya pada order miliknya; Manager memantau saja. */
   "orders.status": ["super_admin", "staff"],
+  /** Menetapkan kebijakan QC pekerjaan dan memutuskan QC (setujui / minta revisi). PIC tidak dapat memutuskan QC hasilnya sendiri. */
+  "orders.qc": ["super_admin", "manager"],
+  /** Aksi alur QC & komunikasi (ajukan QC, catat pengiriman/masukan, selesaikan). Aturan per aksi: src/lib/qc.ts. */
+  "orders.workflow": ["super_admin", "manager", "staff"],
   /** Mengelola data master (brand, divisi, member, jenis order, prioritas). */
   "master.manage": ["super_admin"],
   /** Melihat daftar anggota DTIC (read-only untuk manager). */

@@ -2,17 +2,19 @@
  * Aturan transisi status (MURNI, dipakai server & UI, diuji unit). Server SELALU memeriksa ulang:
  * status baru dari frontend tidak pernah dipercaya begitu saja.
  *
- *   assigned ──mulai──▶ in_progress ──serahkan──▶ pending_confirmation ──konfirmasi──▶ completed
- *                         │   ▲                        │
- *                  tunda  ▼   │ lanjutkan               └──minta revisi──▶ in_progress
- *                       on_hold
- *   (submitted|assigned|in_progress|on_hold|pending_confirmation) ──batalkan──▶ cancelled
+ * Transisi SEDERHANA (tabel di bawah, lewat POST /status):
+ *   assigned ──mulai──▶ in_progress ◀──lanjutkan── on_hold ◀──tunda── in_progress
+ *   internal_revision ──mulai perbaikan──▶ in_progress
+ *   (status aktif) ──batalkan──▶ cancelled
+ * Transisi YANG BERKAITAN DENGAN QC & PENGIRIMAN tidak ada di tabel ini; hanya lewat aksi alur QC
+ * (src/lib/qc.ts, POST /workflow) yang memeriksa kebijakan QC pekerjaan:
+ *   Ajukan QC → pending_confirmation (Menunggu QC Manager) → Setujui QC / Minta Revisi (internal_revision)
+ *   Kirim ke Pemohon (catat pengiriman) → awaiting_requester → Catat Masukan → (revisi → in_progress) → Selesaikan
  *
  * Pelaku:
  *   - PIC (Staff yang ditugaskan): mulai, tunda, lanjutkan, serahkan hasil — hanya order miliknya.
- *   - Super Admin: semua transisi di atas + konfirmasi selesai, minta revisi, batalkan,
- *     dan "submitted → assigned" (data lama setelah PIC ditetapkan).
- *   - Manager: tidak mengubah status (memantau saja).
+ *   - Super Admin: semua transisi di atas + batalkan dan "submitted → assigned" (data lama setelah PIC ditetapkan).
+ *   - Manager: tidak mengubah status lewat tabel ini; keputusan QC & kebijakan lewat alur QC.
  * completed & cancelled adalah status akhir; membuka kembali belum didukung.
  */
 import type { Role } from "@/lib/auth/permissions";
@@ -41,14 +43,15 @@ export const TRANSITIONS: readonly Transition[] = [
   { from: "assigned", to: "in_progress", action: "Mulai kerjakan", actor: "pic", note: optional("Catatan (opsional)"), notify: true },
   { from: "in_progress", to: "on_hold", action: "Tunda pekerjaan", actor: "pic", note: required("Alasan penundaan"), notify: true },
   { from: "on_hold", to: "in_progress", action: "Lanjutkan pekerjaan", actor: "pic", note: optional("Catatan (opsional)"), notify: false },
-  { from: "in_progress", to: "pending_confirmation", action: "Serahkan hasil untuk konfirmasi", actor: "pic", note: optional("Catatan hasil (opsional)"), notify: true },
-  { from: "pending_confirmation", to: "completed", action: "Konfirmasi selesai", actor: "super_admin", note: optional("Catatan (opsional)"), notify: true },
-  { from: "pending_confirmation", to: "in_progress", action: "Minta revisi", actor: "super_admin", note: required("Catatan revisi"), notify: true },
+  { from: "internal_revision", to: "in_progress", action: "Perbaiki hasil", actor: "pic", note: optional("Catatan (opsional)"), notify: false },
   { from: "submitted", to: "assigned", action: "Tandai siap dikerjakan", actor: "super_admin", note: optional("Catatan (opsional)"), notify: false, requiresAssignee: true },
-  ...(["submitted", "assigned", "in_progress", "on_hold", "pending_confirmation"] as const).map(
+  ...(["submitted", "assigned", "in_progress", "internal_revision", "awaiting_requester", "on_hold", "pending_confirmation"] as const).map(
     (from): Transition => ({ from, to: "cancelled", action: "Batalkan request", actor: "super_admin", note: required("Alasan pembatalan"), notify: true }),
   ),
 ];
+
+/** Status yang hanya dapat dicapai lewat aksi alur QC (menghindari pintasan lewat request status). */
+const QC_ONLY_TARGETS: readonly OrderStatus[] = ["pending_confirmation", "awaiting_requester", "internal_revision"];
 
 export type Actor = { role: Role; isAssignee: boolean };
 
@@ -74,6 +77,9 @@ export type TransitionCheck =
 /** Validasi lengkap satu permintaan perubahan status. */
 export function checkTransition(input: { from: OrderStatus; to: OrderStatus; actor: Actor; note: string | null; hasAssignee: boolean }): TransitionCheck {
   const t = findTransition(input.from, input.to);
+  if (!t && (QC_ONLY_TARGETS.includes(input.to) || input.from === "pending_confirmation" || input.to === "completed")) {
+    return { ok: false, status: 409, message: "Perubahan ini dilakukan lewat alur QC & komunikasi (Ajukan QC, Setujui QC, Kirim ke Pemohon, Selesaikan Pekerjaan), bukan lewat tombol status." };
+  }
   if (!t) return { ok: false, status: 409, message: "Perubahan status ini tidak diizinkan dari status saat ini." };
   if (!canPerform(t, input.actor)) {
     return {

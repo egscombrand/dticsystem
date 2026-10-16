@@ -1,5 +1,5 @@
 import { orderScopeFor, requireSession } from "@/lib/server/auth";
-import { AlarmClock, CheckCircle2, ClipboardList, Clock3, Inbox, Layers, MessageSquareText, PauseCircle, XCircle } from "lucide-react";
+import { AlarmClock, CheckCircle2, ClipboardList, Clock3, Inbox, Layers, MessageSquareText, Hourglass, PauseCircle, Undo2, XCircle } from "lucide-react";
 import type { Metadata } from "next";
 import { connection } from "next/server";
 import { Suspense } from "react";
@@ -69,11 +69,13 @@ async function DashboardContent({ searchParams }: { searchParams: PageProps<"/dt
 
       <DashboardFilterBar brands={brands} fromKey={range.fromKey} toKey={range.toKey} brandId={brandId} todayKey={todayKey} />
 
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 sm:gap-4">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-5 sm:gap-4">
         <StatCard label="Total order" value={stats.total} icon={Layers} hint="Semua status" href={listLink({})} />
         <StatCard label="Siap Dikerjakan" value={stats.byStatus.assigned} icon={Inbox} tone="accent" hint="Belum dimulai PIC" href={listLink({ status: "assigned" })} />
         <StatCard label="Sedang Dikerjakan" value={stats.byStatus.in_progress} icon={Clock3} tone="info" hint="Termasuk revisi" href={listLink({ status: "in_progress" })} />
-        <StatCard label="Menunggu Konfirmasi" value={stats.byStatus.pending_confirmation} icon={MessageSquareText} tone="warning" hint="Hasil sudah diserahkan" href={listLink({ status: "pending_confirmation" })} />
+        <StatCard label="Menunggu QC Manager" value={stats.byStatus.pending_confirmation} icon={MessageSquareText} tone="accent" hint="Hasil menunggu pemeriksaan" href={listLink({ status: "pending_confirmation" })} />
+        <StatCard label="Perlu Revisi Internal" value={stats.byStatus.internal_revision} icon={Undo2} tone="danger" hint="Diminta Manager" href={listLink({ status: "internal_revision" })} />
+        <StatCard label="Menunggu Masukan Pemohon" value={stats.byStatus.awaiting_requester} icon={Hourglass} tone="warning" hint="Hasil sudah dikirim" href={listLink({ status: "awaiting_requester" })} />
         <StatCard label="Ditunda" value={stats.byStatus.on_hold} icon={PauseCircle} tone="warning" hint="Ada alasan penundaan" href={listLink({ status: "on_hold" })} />
         <StatCard label="Selesai" value={stats.byStatus.completed} icon={CheckCircle2} tone="success" hint="Sudah dikonfirmasi" href={listLink({ status: "completed" })} />
         <StatCard label="Dibatalkan" value={stats.byStatus.cancelled} icon={XCircle} tone="neutral" hint="Alasan tercatat" href={listLink({ status: "cancelled" })} />

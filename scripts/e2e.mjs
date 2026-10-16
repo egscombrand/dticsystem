@@ -7,7 +7,7 @@ import { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
@@ -142,6 +142,7 @@ const app = spawn("node_modules/.bin/next", ["start", "-p", String(APP_PORT), "-
     DB_POOL_MAX: "1",
     STORAGE_DRIVER: "local",
     LOCAL_STORAGE_DIR: uploadDir,
+    RESULT_UPLOAD_MAX_MB: "1",
     SESSION_COOKIE_SECURE: "false",
     SUBMIT_RATE_LIMIT_MAX: "3",
     SUBMIT_RATE_LIMIT_WINDOW_SECONDS: "600",
@@ -239,6 +240,22 @@ const internal = (url, method, body, headers = {}, cookie = ADMIN) =>
     headers: { Cookie: cookie, Origin: BASE, "Content-Type": "application/json", "X-DTIC-Request": "1", ...headers },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+
+// Pengajuan QC wajib menyertakan tautan hasil; `link: null` sengaja dipakai untuk menguji penolakan.
+const workflow = (id, body, cookie = ADMIN) =>
+  internal(`/api/internal/orders/${id}/workflow`, "POST", {
+    requestKey: randomUUID(),
+    // Bawaan uji: hasil diserahkan di luar DTIC Nexus (tanpa upload). Tes metode lain mengisi `method` sendiri.
+    ...(body.action === "submit_qc" && !("method" in body) ? { method: "external", channel: "direct", note: "Uji: hasil diserahkan langsung" } : {}),
+    ...body,
+  }, {}, cookie);
+/** Alur penyerahan lengkap: ajukan ke Manager → setujui → catat pengiriman → selesaikan. */
+async function finishViaQc(id, cookie = ADMIN) {
+  for (const body of [{ action: "submit_qc" }, { action: "approve_qc" }, { action: "record_delivery", confirmSent: true, stage: "final" }, { action: "complete" }]) {
+    const r = await workflow(id, body, cookie);
+    assert.equal(r.status, 200, `${body.action}: ${await r.clone().text()}`);
+  }
+}
 
 const page = async (url, auth = true) => {
   const r = await fetch(`${BASE}${url}`, { headers: auth ? { Cookie: ADMIN } : {} });
@@ -348,7 +365,7 @@ try {
       assert.ok(appLog.includes("[telegram-worker] berjalan setiap 500 ms"), "worker dimulai oleh instrumentation server");
       await db`update telegram_brand_channels set is_active = false where brand_id is null`;
       const r = await submit(orderForm(brands[4].id).fd); // brand tanpa grup
-      assert.equal(r.status, 202, await r.clone().text());
+      assert.equal(r.status, 201, await r.clone().text());
       const { orderNumber } = await r.json();
       const statusOf = async () => (await db`select n.status, n.attempts from notification_outbox n join orders o on o.id = n.order_id where o.order_number = ${orderNumber}`)[0];
       await new Promise((resolve) => setTimeout(resolve, 2000)); // ±4 tick worker tanpa tujuan
@@ -375,7 +392,7 @@ try {
   await test("halaman utama / = form pengajuan client, publik tanpa login, memuat brand aktif", async () => {
     const { status, html } = await page("/", false);
     assert.equal(status, 200);
-    assert.match(html, /Satu pintu untuk semua kebutuhan kreatif dan IT Anda\./);
+    assert.match(html, /Ajukan Pekerjaan/);
     assert.match(html, /DTIC Connect/);
     assert.match(html, /One Portal for Creative/);
     assert.match(html, /href="\/riwayat"/, "navigasi Riwayat Request");
@@ -597,12 +614,13 @@ try {
     assert.equal(r.status, 200, await r.clone().text());
     r = await internal(`/api/internal/orders/${order1.id}/status`, "POST", { status: "in_progress" });
     assert.equal((await r.json()).changed, false);
-    r = await internal(`/api/internal/orders/${order1.id}/status`, "POST", { status: "pending_confirmation" });
-    assert.equal(r.status, 200);
-    r = await internal(`/api/internal/orders/${order1.id}/status`, "POST", { status: "completed" });
-    assert.equal(r.status, 200);
+    // Status QC/pengiriman/selesai tidak dapat dicapai lewat endpoint status (tanpa pintasan).
+    for (const to of ["pending_confirmation", "awaiting_requester", "completed"]) {
+      assert.equal((await internal(`/api/internal/orders/${order1.id}/status`, "POST", { status: to })).status, 409, `status ${to} lewat endpoint status`);
+    }
+    await finishViaQc(order1.id);
     const hist = await db`select previous_status, new_status, notes, changed_by from order_status_history where order_id = ${order1.id} order by changed_at, id`;
-    assert.deepEqual(hist.map((h) => h.new_status), ["assigned", "in_progress", "pending_confirmation", "completed"]);
+    assert.deepEqual(hist.map((h) => h.new_status), ["assigned", "in_progress", "pending_confirmation", "in_progress", "awaiting_requester", "completed"]);
     assert.equal(hist[1].notes, "Mulai dikerjakan");
     assert.ok(hist.slice(1).every((h) => h.changed_by), "setiap perubahan mencatat pelaku");
     const [o] = await db`select status, completed_at from orders where id = ${order1.id}`;
@@ -986,35 +1004,23 @@ try {
     ctx.on("weberror", (e) => pageErrors.push(e.error().message));
     let browserOrder;
     try {
+      // Langkah form: kategori dipilih dari kartu; lanjut dengan tombol "Lanjutkan" (validasi per langkah).
+      const pickTeam = (p, name) => p.getByRole("button", { name: new RegExp(`^${name}`) }).click();
+      const nextStep = (p) => p.getByRole("button", { name: "Lanjutkan", exact: true }).click();
       await test("form client: Brand Pemohon + bullet/numbered list + format teks via tombol editor → tersimpan", async () => {
         const p = await ctx.newPage();
         await p.goto(`${BASE}/`);
-        assert.match(await p.locator('label[for="brandId"]').innerText(), /^Brand Pemohon/);
+        assert.match((await p.locator('label[for="brandId"]').textContent()) ?? "", /^Brand Pemohon/);
+        await pickTeam(p, "IT System Management");
+        await pickTeam(p, "Graphic Design"); // kategori berganti → pilihan jenis dikosongkan
+        assert.equal(await p.locator("#designTypeId option", { hasText: "Poster" }).count(), 1, "jenis pekerjaan mengikuti kategori");
+        await p.selectOption("#designTypeId", { label: "Poster" });
+        await nextStep(p);
         await p.fill("#requesterName", "Uji Browser");
         await p.fill("#title", "Judul Uji Browser");
         await p.selectOption("#brandId", { label: "LSP PLI" });
         await p.fill("#department", "Sertifikasi");
         await p.fill("#requesterWhatsapp", "0812-3456-7890");
-        await p.selectOption("#teamId", { label: "Graphic Design" });
-        const panel = p.getByTestId("team-panel");
-        await panel.waitFor();
-        for (const n of ["Gilar Dwi Rahayu", "Fathin Maqbulloh Sawiji"]) {
-          const box = panel.getByRole("checkbox", { name: n });
-          assert.ok(await box.isVisible(), `pilihan ${n}`);
-          assert.equal(await box.isChecked(), false, `${n} tidak dicentang otomatis`);
-        }
-        assert.equal(await panel.getByRole("checkbox").count(), 2, "hanya anggota tim Graphic Design");
-        await panel.getByRole("checkbox", { name: "Gilar Dwi Rahayu" }).check();
-        await p.selectOption("#teamId", { label: "IT System Management" });
-        assert.ok(await panel.getByRole("checkbox", { name: "Luthfi Imam Tauchid Faried Akbar" }).isVisible(), "panel tim berubah mengikuti kategori");
-        assert.equal(await panel.getByRole("checkbox", { checked: true }).count(), 0, "pilihan dikosongkan saat kategori berganti");
-        assert.equal(await p.locator("#designTypeId option", { hasText: "Poster" }).count(), 0, "jenis pekerjaan mengikuti kategori");
-        assert.equal(await p.locator("#sizePreset").count(), 0, "ukuran tidak ditanyakan untuk pekerjaan non-desain");
-        await p.selectOption("#teamId", { label: "Graphic Design" });
-        await panel.getByRole("checkbox", { name: "Gilar Dwi Rahayu" }).check();
-        await panel.getByRole("checkbox", { name: "Fathin Maqbulloh Sawiji" }).check();
-        assert.match(await p.getByTestId("pic-summary").innerText(), /Dipilih: Gilar Dwi Rahayu, Fathin Maqbulloh Sawiji/, "ringkasan anggota terpilih");
-        await p.selectOption("#designTypeId", { label: "Poster" });
         await p.selectOption("#sizePreset", "A3");
         const ed = p.locator("#brief");
         await ed.waitFor();
@@ -1068,9 +1074,17 @@ try {
         await p.keyboard.press("Shift+Home");
         await p.getByRole("button", { name: "Daftar berpoin", exact: true }).click();
         assert.equal(await ed.locator("ul > li").count(), 5, "baris terpilih menjadi bullet");
+        await nextStep(p); // langkah Tim & deadline
+        const panel = p.getByTestId("team-panel");
+        await panel.waitFor();
+        assert.equal(await panel.getByRole("checkbox", { checked: true }).count(), 0, "PIC tidak dicentang otomatis");
+        await panel.getByRole("checkbox", { name: "Gilar Dwi Rahayu" }).check();
+        await panel.getByRole("checkbox", { name: "Fathin Maqbulloh Sawiji" }).check();
+        assert.match(await p.getByTestId("pic-summary").innerText(), /Dipilih: Gilar Dwi Rahayu, Fathin Maqbulloh Sawiji/, "ringkasan anggota terpilih");
         await p.fill("#deadline", wibDate(10));
         assert.equal(await p.locator("#picId").count(), 0, "tidak ada pilihan PIC manual");
-        await p.getByRole("button", { name: "Kirim pengajuan", exact: true }).click();
+        await nextStep(p); // langkah Tinjau
+        await p.getByRole("button", { name: "Kirim Pengajuan", exact: true }).click();
         const confirmDlg = p.getByRole("dialog", { name: "Konfirmasi Pengajuan" });
         await confirmDlg.waitFor({ state: "visible", timeout: 10000 });
         await confirmDlg.getByRole("button", { name: "Ya, Kirim Pengajuan", exact: true }).click();
@@ -1097,28 +1111,87 @@ try {
       // ---- konfirmasi "Kirim pengajuan" (browser)
       const fillMinimalForm = async (p, requester) => {
         await p.goto(`${BASE}/`);
+        await pickTeam(p, "Graphic Design");
+        await p.selectOption("#designTypeId", { label: "Poster" });
+        await nextStep(p);
         await p.fill("#requesterName", requester);
         await p.fill("#title", `Judul ${requester}`);
         await p.selectOption("#brandId", { label: "LSP PLI" });
         await p.fill("#department", "Sertifikasi");
         await p.fill("#requesterWhatsapp", "0812-3456-7890");
-        await p.selectOption("#teamId", { label: "Graphic Design" });
-        await p.getByTestId("team-panel").getByRole("checkbox", { name: "Gilar Dwi Rahayu" }).check();
-        await p.selectOption("#designTypeId", { label: "Poster" });
         await p.selectOption("#sizePreset", "A3");
         await p.locator("#brief").click();
         await p.keyboard.type("Brief konfirmasi uji");
+        await nextStep(p);
+        await p.getByTestId("team-panel").getByRole("checkbox", { name: "Gilar Dwi Rahayu" }).check();
         await p.fill("#deadline", wibDate(10));
+        await nextStep(p); // langkah Tinjau: tombol "Kirim pengajuan" tersedia
       };
+      // Bukti visual langkah form (screenshot dari aplikasi yang berjalan, data uji).
+      await test("form langkah: screenshot tiap langkah (desktop & mobile) tersimpan untuk pemeriksaan visual", async () => {
+        const dir = process.env.E2E_SHOT_DIR ?? path.join(os.tmpdir(), "dtic-form-shots");
+        await mkdir(dir, { recursive: true });
+        const p = await ctx.newPage();
+        await p.setViewportSize({ width: 1280, height: 900 });
+        await p.goto(`${BASE}/`);
+        await pickTeam(p, "Graphic Design");
+        await p.screenshot({ path: path.join(dir, "1-kategori.png"), fullPage: true });
+        await p.selectOption("#designTypeId", { label: "Poster" });
+        await nextStep(p);
+        await p.fill("#requesterName", "Ani Lestari");
+        await p.fill("#title", "Desain Poster Seminar Lingkungan 2026");
+        await p.selectOption("#brandId", { label: "LSP PLI" });
+        await p.fill("#department", "Marketing");
+        await p.fill("#requesterWhatsapp", "081234567890");
+        await p.selectOption("#sizePreset", "A3");
+        await p.locator("#brief").click();
+        await p.keyboard.type("Poster seminar lingkungan, tema hijau, logo wajib.");
+        await p.fill("#driveUrl", "https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-panjang-sekali?usp=sharing");
+        await p.screenshot({ path: path.join(dir, "2-detail.png"), fullPage: true });
+        await nextStep(p);
+        await p.getByTestId("team-panel").getByRole("checkbox", { name: "Gilar Dwi Rahayu" }).check();
+        await p.getByTestId("team-panel").getByRole("checkbox", { name: "Fathin Maqbulloh Sawiji" }).check();
+        await p.fill("#deadline", wibDate(10));
+        await p.screenshot({ path: path.join(dir, "3-tim-deadline.png"), fullPage: true });
+        await nextStep(p);
+        await p.getByTestId("review-hero").waitFor();
+        assert.ok((await p.getByTestId("review-hero").innerText()).includes("Desain Poster Seminar Lingkungan 2026"), "judul di kartu ringkasan");
+        assert.equal(await p.getByRole("list", { name: "PIC terpilih" }).getByRole("listitem").count(), 2, "dua PIC sebagai item terpisah");
+        assert.match(await p.getByTestId("review-brief").innerText(), /Poster seminar lingkungan/, "brief terpisah dari judul");
+        assert.match(await p.getByTestId("review-completeness").innerText(), /5 dari 5 kelompok wajib terisi/);
+        await p.waitForTimeout(600); // animasi masuk kartu selesai sebelum screenshot
+        await p.screenshot({ path: path.join(dir, "4-tinjau.png"), fullPage: true });
+        await p.getByRole("button", { name: "Kembali untuk Mengedit", exact: true }).click();
+        assert.equal(await p.inputValue("#deadline"), wibDate(10), "kembali tanpa kehilangan isian");
+        await nextStep(p);
+        await p.setViewportSize({ width: 390, height: 844 });
+        await p.waitForTimeout(300);
+        const overflow = await p.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+        await p.waitForTimeout(600);
+        await p.screenshot({ path: path.join(dir, "5-mobile-tinjau.png"), fullPage: true });
+        assert.equal(overflow, 0, "tidak ada overflow horizontal di mobile");
+        await p.close();
+      });
+
       const ordersNamed = async (requester) => (await db`select count(*)::int as c from orders where requester_name = ${requester}`)[0].c;
-      const submitBtn = (p) => p.getByRole("button", { name: "Kirim pengajuan", exact: true });
+      const submitBtn = (p) => p.getByRole("button", { name: "Kirim Pengajuan", exact: true });
       const confirmBtn = (p) => p.getByRole("dialog", { name: "Konfirmasi Pengajuan" }).getByRole("button", { name: "Ya, Kirim Pengajuan", exact: true });
 
       await test("judul pekerjaan (browser): kosong atau hanya spasi → pesan error di field, konfirmasi tidak terbuka", async () => {
         const p = await ctx.newPage();
-        await fillMinimalForm(p, "Judul Kosong");
+        await p.goto(`${BASE}/`);
+        await pickTeam(p, "Graphic Design");
+        await p.selectOption("#designTypeId", { label: "Poster" });
+        await nextStep(p);
+        await p.fill("#requesterName", "Judul Kosong");
         await p.fill("#title", "   ");
-        await submitBtn(p).click();
+        await p.selectOption("#brandId", { label: "LSP PLI" });
+        await p.fill("#department", "Sertifikasi");
+        await p.fill("#requesterWhatsapp", "0812-3456-7890");
+        await p.selectOption("#sizePreset", "A3");
+        await p.locator("#brief").click();
+        await p.keyboard.type("Brief uji judul");
+        await nextStep(p);
         await p.getByText("Judul pekerjaan wajib diisi.").waitFor();
         assert.equal(await p.getByRole("dialog", { name: "Konfirmasi Pengajuan" }).count(), 0, "modal tidak terbuka");
         assert.equal(await p.inputValue("#title"), "   ", "isian tetap");
@@ -1171,10 +1244,15 @@ try {
         await submitBtn(p).click();
         await p.getByRole("dialog", { name: "Konfirmasi Pengajuan" }).waitFor({ state: "visible" });
         await confirmBtn(p).click();
-        await p.getByText("Pengajuan belum tersimpan").waitFor({ timeout: 15000 });
+        // Koneksi putus: status belum pasti (bukan "belum tersimpan"). Permintaan tidak sampai ke server.
+        await p.getByText("Status pengajuan belum dapat dipastikan").waitFor({ timeout: 15000 });
         assert.equal(await p.inputValue("#requesterName"), "Konfirmasi Gagal", "isian tidak hilang");
-        assert.equal(await ordersNamed("Konfirmasi Gagal"), 0);
+        assert.equal(await ordersNamed("Konfirmasi Gagal"), 0, "server tidak menerima permintaan");
         await p.unroute("**/api/public/orders");
+        // Rekonsiliasi: belum ada pengajuan dengan kunci ini → boleh kirim ulang.
+        await p.getByRole("button", { name: "Periksa status pengajuan" }).click();
+        await p.getByText("Pengajuan belum ditemukan").waitFor({ timeout: 15000 });
+        assert.equal(await p.inputValue("#requesterName"), "Konfirmasi Gagal", "isian tidak hilang setelah pemeriksaan");
         await submitBtn(p).click();
         await p.getByRole("dialog", { name: "Konfirmasi Pengajuan" }).waitFor({ state: "visible" });
         await confirmBtn(p).click();
@@ -1495,7 +1573,7 @@ try {
   await test("tim internal mengubah status (catatan publik & internal) → riwayat publik menampilkan status baru dan waktunya", async () => {
     const r = await internal(`/api/internal/orders/${trackOrder.id}/status`, "POST", { status: "in_progress", note: "Desain mulai dikerjakan.", noteForClient: true });
     assert.equal(r.status, 200);
-    const r2 = await internal(`/api/internal/orders/${trackOrder.id}/status`, "POST", { status: "pending_confirmation", note: "Catatan internal: cek warna dengan PIC", noteForClient: false });
+    const r2 = await workflow(trackOrder.id, { action: "submit_qc", note: "Catatan internal: cek warna dengan PIC" });
     assert.equal(r2.status, 200);
     const tr = await search(trackOrder.orderNumber);
     assert.equal(tr.status, 200, "pencarian berhasil setelah perubahan");
@@ -1850,9 +1928,9 @@ try {
     assert.ok(text.includes("Uji &lt;i&gt;Tag&lt;/i&gt; &amp; Co"), "nama pemohon di-escape");
     assert.ok(!text.includes("<i>Tag"), "tidak ada HTML pemohon yang lolos");
     assert.ok(text.includes("\nStatus: SIAP DIKERJAKAN\n"), "status template");
-    assert.ok(text.includes("🚀 <b>REQUEST PEKERJAAN BARU</b>"), "judul template");
-    assert.ok(text.includes(`Nomor Order: ${orderNumber}`), "nomor order di template");
-    assert.ok(/👨‍💻 <b>PETUGAS BERTANGGUNG JAWAB<\/b>\n• .+/.test(text), "PIC terpilih dari database");
+    assert.ok(text.includes("🔔 <b>REQUEST PEKERJAAN BARU</b>"), "judul template");
+    assert.ok(text.includes(orderNumber), "nomor order di template");
+    assert.ok(/👨‍💻 <b>PIC<\/b>\n• .+/.test(text), "PIC terpilih dari database");
     assert.ok(!/WhatsApp|62812/.test(text), "nomor WhatsApp tidak tampil di grup");
     assert.ok(!/localhost|127\.0\.0\.1/.test(text), "localhost tidak dikirim sebagai tautan di production");
     assert.ok(text.includes("📎 Lampiran: Tidak ada"), "lampiran dari database (nol)");
@@ -1890,8 +1968,8 @@ try {
   const rowOf = async (orderNumber) =>
     (await db`select n.status, n.attempts, n.max_attempts, n.error_kind, n.last_error, extract(epoch from (n.next_attempt_at - now())) as secs_until
       from notification_outbox n join orders o on o.id = n.order_id where o.order_number = ${orderNumber} and n.kind = 'order_created' and n.event_ref = ''`)[0];
-  const okSends = (orderNumber) => tg.calls.filter((c) => c.mode === "ok" && c.body.text.includes(`Nomor Order: ${orderNumber}`)).length;
-  const failedSends = (orderNumber) => tg.calls.filter((c) => c.mode !== "ok" && c.body.text.includes(`Nomor Order: ${orderNumber}`)).length;
+  const okSends = (orderNumber) => tg.calls.filter((c) => c.mode === "ok" && c.body.text.includes(orderNumber)).length;
+  const failedSends = (orderNumber) => tg.calls.filter((c) => c.mode !== "ok" && c.body.text.includes(orderNumber)).length;
   const drainOld = async () => {
     tg.mode = "ok";
     tg.queue.length = 0;
@@ -1902,9 +1980,9 @@ try {
     await drainOld();
     tg.mode = "500";
     const r = await submit(orderForm(brand1).fd);
-    assert.equal(r.status, 202, "tersimpan, tetapi belum dianggap terkirim selama Telegram belum mengonfirmasi");
-    const { orderNumber, stage } = await r.json();
-    assert.equal(stage, "notification_pending");
+    assert.equal(r.status, 201, "tersimpan (201); status Telegram dibaca terpisah");
+    const { orderNumber, notification } = await r.json();
+    assert.notEqual(notification?.state, "sent", "belum dianggap terkirim selama Telegram belum mengonfirmasi");
     await waitFor(async () => (await rowOf(orderNumber))?.status === "retrying", "dijadwalkan ulang");
     assert.equal((await rowOf(orderNumber)).error_kind, "transient");
     await tickUntil(async () => (await rowOf(orderNumber))?.status === "failed", "habis 5 percobaan");
@@ -2066,7 +2144,7 @@ try {
       const { orderNumber } = await r.json();
       assert.deepEqual((await teamOf(orderNumber)).names, ["Fathin Maqbulloh Sawiji", "Gilar Dwi Rahayu"]);
       assert.equal((await db`select count(*)::int as c from orders`)[0].c, before + 1, "tidak ada order per PIC");
-      const msgs = tg.calls.filter((c) => c.body.text.includes(`Nomor Order: ${orderNumber}`));
+      const msgs = tg.calls.filter((c) => c.body.text.includes(orderNumber));
       assert.equal(msgs.length, 1, "satu notifikasi per order");
       assert.ok(msgs[0].body.text.includes("Gilar Dwi Rahayu") && msgs[0].body.text.includes("Fathin Maqbulloh Sawiji"), "semua PIC di pesan");
       assert.ok(msgs[0].body.text.includes("Kategori / Tim: Graphic Design"));
@@ -2157,7 +2235,7 @@ try {
       const [row] = await db`select id, title, brief from orders where order_number = ${orderNumber}`;
       assert.equal(row.title, title, "judul dari field, bukan dari deskripsi");
       assert.ok(row.brief.startsWith("Poster Promo Akhir Tahun"), "deskripsi tidak berubah");
-      assert.ok(tg.calls.some((c) => c.body.text.includes(`Nomor Order: ${orderNumber}`) && c.body.text.includes(`Judul: ${title}`)), "Telegram memuat judul");
+      assert.ok(tg.calls.some((c) => c.body.text.includes(orderNumber) && c.body.text.includes(`Judul: <b>${title}</b>`)), "Telegram memuat judul");
       assert.ok((await page(`/dtic/orders/${row.id}`)).html.includes(title), "tampil di detail order");
       assert.ok((await page("/dtic/orders")).html.includes(title), "tampil di daftar order");
     });
@@ -2166,7 +2244,7 @@ try {
   // ---------------------------------------------------------------- Telegram global (satu grup untuk semua brand)
   {
     const bRows = await db`select id, name from brands order by sort_order`;
-    const chatsFor = (orderNumber) => tg.calls.filter((c) => c.body.text.includes(`Nomor Order: ${orderNumber}`)).map((c) => c.body.chat_id);
+    const chatsFor = (orderNumber) => tg.calls.filter((c) => c.body.text.includes(orderNumber)).map((c) => c.body.chat_id);
     const ALL_EVENTS = { new_order: true, status_changed: true, waiting_confirmation: true, completed: true, on_hold: true, cancelled: true, pic_changed: true };
     const G = "/api/internal/telegram-brands/default";
     const putGlobal = (patch = {}, cookie = ADMIN) => internal(G, "PUT", { isActive: true, events: ALL_EVENTS, ...patch }, {}, cookie);
@@ -2187,7 +2265,7 @@ try {
       for (const [b, n] of numbers) {
         await waitFor(async () => (await rowFor(n))?.status === "sent", "terkirim");
         assert.deepEqual(chatsFor(n), [TG_CHAT], `${b.name} → grup global`);
-        assert.ok(tg.calls.find((c) => c.body.text.includes(`Nomor Order: ${n}`)).body.text.includes(b.name), "brand dicantumkan di pesan");
+        assert.ok(tg.calls.find((c) => c.body.text.includes(n)).body.text.includes(b.name), "brand dicantumkan di pesan");
       }
     });
 
@@ -2215,9 +2293,9 @@ try {
       assert.equal((await putGlobal({ isActive: false })).status, 200);
       const before = await countOrders();
       const r = await submit(orderForm(bRows[2].id).fd);
-      assert.equal(r.status, 202, await r.clone().text());
+      assert.equal(r.status, 201, await r.clone().text());
       const body = await r.json();
-      assert.equal(body.stage, "no_destination");
+      assert.equal(body.notification?.state, "no_destination");
       assert.equal((await rowFor(body.orderNumber)).status, "awaiting_destination");
       assert.equal(chatsFor(body.orderNumber).length, 0, "tidak ada klaim terkirim");
       const on = await putGlobal();
@@ -2245,10 +2323,10 @@ try {
       assert.ok(!appLog.includes(TG_TOKEN), "token tidak dicatat");
     });
 
-    await test("jenis 'pengajuan baru' dimatikan: pengajuan tersimpan (202) dan dilewati dengan alasan", async () => {
+    await test("jenis 'pengajuan baru' dimatikan: pengajuan tersimpan (201) dan dilewati dengan alasan", async () => {
       assert.equal((await putGlobal({ events: { ...ALL_EVENTS, new_order: false } })).status, 200);
       const r = await submit(orderForm(bRows[0].id).fd);
-      assert.equal(r.status, 202);
+      assert.equal(r.status, 201);
       const body = await r.json();
       assert.equal((await rowFor(body.orderNumber)).status, "skipped");
       assert.match((await rowFor(body.orderNumber)).last_error, /dinonaktifkan/);
@@ -2343,7 +2421,7 @@ try {
       const r = await submit(orderForm(bRows[2].id).fd);
       assert.equal(r.status, 201, await r.clone().text());
       const forumOrder = (await r.json()).orderNumber;
-      const sent = tg.calls.filter((c) => c.body.text.includes(`Nomor Order: ${forumOrder}`));
+      const sent = tg.calls.filter((c) => c.body.text.includes(forumOrder));
       assert.equal(sent.length, 1);
       assert.equal(sent[0].body.chat_id, "-1001234567333");
       assert.equal(sent[0].body.message_thread_id, 52942, "masuk ke topik, bukan General");
@@ -2358,7 +2436,7 @@ try {
     await test("putuskan grup global: notifikasi tertunda kembali Menunggu Tujuan; disambung & diaktifkan → terkirim sekali", async () => {
       tg.mode = "500";
       const r = await submit(orderForm(bRows[1].id).fd);
-      assert.equal(r.status, 202);
+      assert.equal(r.status, 201);
       const { orderNumber } = await r.json();
       tg.mode = "ok";
       const d = await internal(G, "DELETE");
@@ -2369,7 +2447,7 @@ try {
       assert.equal((await verifyGlobal("https://t.me/c/1234567890/1")).status, 200);
       assert.equal((await putGlobal()).status, 200);
       await tickUntil(async () => (await rowFor(orderNumber))?.status === "sent", "terkirim setelah disambung");
-      assert.equal(tg.calls.filter((c) => c.mode === "ok" && c.body.text.includes(`Nomor Order: ${orderNumber}`)).length, 1, "tepat satu pesan sukses");
+      assert.equal(tg.calls.filter((c) => c.mode === "ok" && c.body.text.includes(orderNumber)).length, 1, "tepat satu pesan sukses");
     });
 
     await test("kirim ulang tanpa tujuan: Menunggu Tujuan, klik lagi tidak menggandakan; setelah aktif → satu pesan, tanpa order baru", async () => {
@@ -2407,7 +2485,7 @@ try {
     });
   }
 
-  const telegramSent = (orderNumber) => tg.calls.filter((c) => c.body.text.includes(`Nomor Order: ${orderNumber}`)).length;
+  const telegramSent = (orderNumber) => tg.calls.filter((c) => c.body.text.includes(orderNumber)).length;
   const newOrderSent = async () => {
     const r = await submit(orderForm(brand1).fd);
     const { orderNumber } = await r.json();
@@ -2497,7 +2575,7 @@ try {
     const { orderNumber } = await r.json();
     assert.ok((await db`select count(*)::int as c from order_assignments a join orders o on o.id = a.order_id where a.member_id = ${gilarId} and o.status not in ('completed','cancelled')`)[0].c === before + 1, "pekerjaan baru menambah beban PIC");
     await new Promise((res) => setTimeout(res, 1500));
-    assert.ok(tg.calls.length > calls && tg.calls.some((c) => c.body.text.includes(`Nomor Order: ${orderNumber}`)), "notifikasi Telegram terkirim");
+    assert.ok(tg.calls.length > calls && tg.calls.some((c) => c.body.text.includes(orderNumber)), "notifikasi Telegram terkirim");
   });
 
   // ---- Insiden produksi DTIC-2026-00007: tambah Gilar ke pekerjaan milik Fathin.
@@ -2557,7 +2635,7 @@ try {
     assert.equal(msgs.length, 1, "tepat satu notifikasi perubahan");
     const text = msgs[0].body.text;
     for (const part of ["Operasi: Penambahan PIC", "PIC lama tetap ditugaskan.", `Diubah oleh: ${managerName}`, "Alasan: Kolaborasi desain", "• Gilar Dwi Rahayu"]) assert.ok(text.includes(part), part);
-    assert.equal(tg.calls.filter((c) => c.body.text.includes(`Nomor Order: ${o.order_number}`) && c.body.text.includes("REQUEST PEKERJAAN BARU")).length, 1, "notifikasi pekerjaan baru tidak dikirim ulang");
+    assert.equal(tg.calls.filter((c) => c.body.text.includes(o.order_number) && c.body.text.includes("REQUEST PEKERJAAN BARU")).length, 1, "notifikasi pekerjaan baru tidak dikirim ulang");
   });
 
   await test("Kelola PIC: pindah Fathin → Gilar tercatat 'move'; Telegram gagal tidak membatalkan; retry tidak menggandakan notifikasi", async () => {
@@ -2653,6 +2731,766 @@ try {
     const r = await pageRaw(`/dtic/calendar?view=list&date=${from}`, staffCookie);
     assert.equal(r.status, 200);
     assert.equal(calCount(await r.text()), mine, "staff hanya melihat pekerjaan miliknya");
+  });
+
+  await test("Koneksi database: 30 request paralel ke halaman multi-query semuanya 200 (tanpa EMAXCONN / kehabisan koneksi)", async () => {
+    const urls = ["/dtic/distribusi", "/dtic/workload", "/dtic/orders", "/dtic/calendar?view=list", "/dtic/dashboard", "/dtic/settings/users"];
+    const jobs = Array.from({ length: 30 }, (_, i) => page(urls[i % urls.length], true));
+    const results = await Promise.all(jobs);
+    const bad = results.map((r, i) => [urls[i % urls.length], r.status]).filter(([, st]) => st !== 200);
+    assert.deepEqual(bad, [], "semua respons 200");
+    assert.equal(appLog.includes("EMAXCONN") || appLog.includes("max clients"), false, "tidak ada error batas klien di log");
+  });
+
+  // ---- Pengajuan: penyimpanan dan notifikasi dipisah; idempotensi; rekonsiliasi status.
+  const countOrders = async () => (await db`select count(*)::int as c from orders`)[0].c;
+  await test("pengajuan: Telegram berhasil → 201 dengan notification.sent; isi pesan memuat tautan berlabel dan langkah tindakan", async () => {
+    tg.mode = "ok";
+    const before = await countOrders();
+    const fd = orderForm(brand1, { designTypeId: TYPES["Poster"], title: "Judul Uji Notifikasi Berhasil" }).fd;
+    const r = await submit(fd);
+    assert.equal(r.status, 201, await r.clone().text());
+    const body = await r.json();
+    assert.equal(body.notification.state, "sent");
+    assert.equal(body.title, "Judul Uji Notifikasi Berhasil");
+    assert.equal(await countOrders(), before + 1);
+    const msg = tg.calls.find((c) => c.body.text.includes(body.orderNumber));
+    assert.ok(msg, "pesan Telegram terkirim");
+    // URL lokal (http, loopback) tidak pernah dijadikan tautan produksi: pesan memakai instruksi tanpa tautan.
+    assert.ok(!msg.body.text.includes("<a href="), "tanpa tautan dari URL lokal");
+    assert.ok(msg.body.text.includes("Buka sistem DTIC Connect lalu cari nomor order"), "instruksi pengganti tautan");
+    for (const step of ["1. ", "2. Periksa brief, tenggat, dan lampiran.", "3. Mulai pengerjaan"]) assert.ok(msg.body.text.includes(step), step);
+    assert.ok(!/localhost|127\.0\.0\.1/.test(msg.body.text), "tanpa URL lokal");
+  });
+
+  await test("pengajuan: Telegram gagal → pekerjaan tetap tersimpan (201), notification bukan 'sent', dan tidak membuat pekerjaan ganda", async () => {
+    tg.mode = "500";
+    const before = await countOrders();
+    const r = await submit(orderForm(brand1, { title: "Judul Uji Telegram Gagal" }).fd);
+    assert.equal(r.status, 201, await r.clone().text());
+    const body = await r.json();
+    assert.notEqual(body.notification.state, "sent");
+    assert.equal(await countOrders(), before + 1, "tepat satu pekerjaan");
+    tg.mode = "ok";
+  });
+
+  await test("pengajuan: kunci yang sama dikirim ulang → 200, nomor sama, tanpa pekerjaan baru", async () => {
+    tg.mode = "ok";
+    const key = randomUUID();
+    const first = await submit(orderForm(brand1, { submissionKey: key, title: "Judul Uji Idempoten" }).fd);
+    assert.equal(first.status, 201, await first.clone().text());
+    const a = await first.json();
+    const before = await countOrders();
+    const again = await submit(orderForm(brand1, { submissionKey: key, title: "Judul Uji Idempoten" }).fd);
+    assert.equal(again.status, 200);
+    const b = await again.json();
+    assert.equal(b.orderNumber, a.orderNumber);
+    assert.equal(b.duplicate, true);
+    assert.equal(await countOrders(), before, "tidak ada pekerjaan baru");
+    assert.equal(tg.calls.filter((c) => c.body.text.includes(a.orderNumber)).length, 1, "tidak ada notifikasi ganda");
+  });
+
+  await test("pengajuan: dua permintaan identik bersamaan → tepat satu pekerjaan", async () => {
+    const key = randomUUID();
+    const before = await countOrders();
+    const [x, y] = await Promise.all([
+      submit(orderForm(brand1, { submissionKey: key, title: "Judul Uji Paralel" }).fd),
+      submit(orderForm(brand1, { submissionKey: key, title: "Judul Uji Paralel" }).fd),
+    ]);
+    const statuses = [x.status, y.status].sort();
+    assert.ok(statuses.every((st) => st === 200 || st === 201), `status ${statuses}`);
+    assert.equal(await countOrders(), before + 1, "tepat satu pekerjaan dari dua permintaan");
+  });
+
+  await test("pengajuan: pemeriksaan status (rekonsiliasi) menemukan pengajuan tersimpan; kunci acak → 404; kunci rusak → 400", async () => {
+    const key = randomUUID();
+    const r = await submit(orderForm(brand1, { submissionKey: key, title: "Judul Uji Rekonsiliasi" }).fd);
+    assert.ok(r.status === 201 || r.status === 200);
+    const { orderNumber } = await r.json();
+    const found = await fetch(`${BASE}/api/public/orders/status?key=${key}`);
+    assert.equal(found.status, 200);
+    const fb = await found.json();
+    assert.equal(fb.orderNumber, orderNumber);
+    assert.equal(fb.title, "Judul Uji Rekonsiliasi");
+    assert.equal(fb.id, undefined, "id internal tidak dikembalikan");
+    assert.equal((await fetch(`${BASE}/api/public/orders/status?key=${randomUUID()}`)).status, 404);
+    assert.equal((await fetch(`${BASE}/api/public/orders/status?key=bukan-uuid`)).status, 400);
+  });
+
+  // ---- Tenggat: jam dari pemohon (WIB) dan perubahan oleh Manager dengan alasan & audit.
+  await test("tenggat pemohon: tanggal + jam WIB disimpan tepat; jam kosong = 23.59 WIB", async () => {
+    const withTime = await submit(orderForm(brand1, { deadline: wibDate(4), deadlineTime: "09:30", title: "Judul Uji Jam Tenggat" }).fd);
+    assert.equal(withTime.status, 201, await withTime.clone().text());
+    const { orderNumber } = await withTime.json();
+    assert.equal((await db`select deadline_at from orders where order_number = ${orderNumber}`)[0].deadline_at.toISOString(), `${wibDate(4)}T02:30:00.000Z`, "09:30 WIB");
+    const noTime = await submit(orderForm(brand1, { deadline: wibDate(4), title: "Judul Uji Tanpa Jam" }).fd);
+    assert.equal(noTime.status, 201);
+    const { orderNumber: n2 } = await noTime.json();
+    assert.equal((await db`select deadline_at from orders where order_number = ${n2}`)[0].deadline_at.toISOString(), `${wibDate(4)}T16:59:00.000Z`, "akhir hari 23.59 WIB");
+  });
+
+  await test("Ubah tenggat: Manager → tenggat berubah, status tetap, audit mencatat lama/baru/alasan/pelaku", async () => {
+    const created = await submit(orderForm(brand1, { title: "Judul Uji Ubah Tenggat" }).fd);
+    const { orderNumber } = await created.json();
+    const [before] = await db`select id, status, deadline_at from orders where order_number = ${orderNumber}`;
+    const r = await internal(`/api/internal/orders/${before.id}/deadline`, "PUT", { deadlineDate: wibDate(10), deadlineTime: "15:00", reason: "Klien minta diundur" }, {}, MGR);
+    assert.equal(r.status, 200, await r.clone().text());
+    const [after] = await db`select status, deadline_at from orders where id = ${before.id}`;
+    assert.equal(after.deadline_at.toISOString(), `${wibDate(10)}T08:00:00.000Z`, "15:00 WIB");
+    assert.equal(after.status, before.status, "status tidak berubah");
+    const [audit] = await db`select detail from auth_audit_log where action = 'order_deadline_changed' and detail->>'orderId' = ${before.id} order by id desc limit 1`;
+    assert.equal(audit.detail.reason, "Klien minta diundur");
+    assert.equal(audit.detail.previousDeadline, before.deadline_at.toISOString());
+    assert.equal(audit.detail.newDeadline, after.deadline_at.toISOString());
+    assert.equal(audit.detail.actorName, (await db`select full_name from app_users where email = 'manager@dtic.example'`)[0].full_name);
+    const detail = await (await pageRaw(`/dtic/orders/${before.id}`, MGR)).text();
+    assert.ok(detail.includes("Ubah tenggat"), "Manager melihat tombol ubah tenggat");
+  });
+
+  await test("Ubah tenggat: staff ditolak; alasan pendek ditolak; pekerjaan selesai ditolak; tanpa perubahan tidak ada audit", async () => {
+    const created = await submit(orderForm(brand1, { title: "Judul Uji Tolak Tenggat" }).fd);
+    const { orderNumber } = await created.json();
+    const [o] = await db`select id, deadline_at from orders where order_number = ${orderNumber}`;
+    const staffCookie = await login("staff@dtic.example", "StaffUji2026");
+    assert.equal((await internal(`/api/internal/orders/${o.id}/deadline`, "PUT", { deadlineDate: wibDate(12), reason: "Staff mencoba ubah" }, {}, staffCookie)).status, 403);
+    assert.equal((await internal(`/api/internal/orders/${o.id}/deadline`, "PUT", { deadlineDate: wibDate(12), reason: "abc" }, {}, MGR)).status, 422);
+    const same = await internal(`/api/internal/orders/${o.id}/deadline`, "PUT", { deadlineDate: o.deadline_at.toISOString().slice(0, 10), deadlineTime: "23:59", reason: "Tanpa perubahan sama sekali" }, {}, MGR);
+    assert.equal((await same.json()).changed, false);
+    await db`update orders set status = 'completed', completed_at = now() where id = ${o.id}`;
+    assert.equal((await internal(`/api/internal/orders/${o.id}/deadline`, "PUT", { deadlineDate: wibDate(15), reason: "Pekerjaan sudah selesai" }, {}, MGR)).status, 409);
+    const detail = await (await pageRaw(`/dtic/orders/${o.id}`, MGR)).text();
+    assert.ok(!detail.includes("Ubah tenggat"), "pekerjaan selesai tidak menampilkan tombol");
+  });
+
+  await test("Detail Pekerjaan (browser): Tugas Saya untuk PIC, brief, dokumen, riwayat; screenshot desktop & mobile", async () => {
+    const chromePath = process.env.CHROME_PATH ?? "/usr/bin/google-chrome";
+    const { chromium } = await import("playwright-core");
+    const browser = await chromium.launch({ executablePath: chromePath, headless: true });
+    try {
+      // Gambar lampiran nyata (PNG dari Chrome), bukan data contoh hardcoded di UI.
+      const art = await browser.newPage({ viewport: { width: 480, height: 320 } });
+      await art.setContent(`<body style="margin:0;background:linear-gradient(135deg,#10b981,#3b82f6);font:bold 40px sans-serif;color:#fff;display:grid;place-items:center;height:100vh">Referensi</body>`);
+      const png = await art.screenshot();
+      await art.close();
+      const [staffRow] = await db`select m.id from app_users u join dtic_members m on m.id = u.member_id where u.email = 'staff@dtic.example'`;
+      const created = await submit(orderForm(brand1, { title: "Judul Uji Detail Pekerjaan PIC", driveUrl: "https://drive.google.com/drive/folders/uji-detail" }, [
+        { name: "referensi visual.png", data: png, type: "image/png" },
+        { name: "brief tertulis.pdf", data: PDF, type: "application/pdf" },
+      ]).fd);
+      assert.equal(created.status, 201, await created.clone().text());
+      const { orderNumber } = await created.json();
+      const [o] = await db`select id from orders where order_number = ${orderNumber}`;
+      await db`insert into order_assignments (order_id, member_id) values (${o.id}, ${staffRow.id}) on conflict do nothing`;
+      const dl = await internal(`/api/internal/orders/${o.id}/deadline`, "PUT", { deadlineDate: wibDate(6), deadlineTime: "15:00", reason: "Penyesuaian jadwal acara pemohon" }, {}, MGR);
+      assert.equal(dl.status, 200, await dl.clone().text());
+
+      const dir = process.env.E2E_SHOT_DIR ?? path.join(os.tmpdir(), "dtic-form-shots");
+      await mkdir(dir, { recursive: true });
+      const view = async (cookie, file) => {
+        const c = await browser.newContext({ viewport: { width: 1366, height: 900 } });
+        const [name, value] = cookie.split("=");
+        await c.addCookies([{ name, value, url: BASE }]);
+        const p = await c.newPage();
+        await p.goto(`${BASE}/dtic/orders/${o.id}`);
+        await p.getByRole("heading", { name: "Deskripsi dari Pemohon" }).waitFor();
+        await p.waitForTimeout(600);
+        await p.screenshot({ path: path.join(dir, `${file}-desktop.png`), fullPage: true });
+        await p.setViewportSize({ width: 390, height: 844 });
+        await p.waitForTimeout(400);
+        const overflow = await p.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+        await p.screenshot({ path: path.join(dir, `${file}-mobile.png`), fullPage: true });
+        return { c, p, overflow };
+      };
+
+      const staff = await view(await login("staff@dtic.example", "StaffUji2026"), "6-detail-pic");
+      assert.equal(staff.overflow, 0, "tanpa overflow horizontal di mobile (PIC)");
+      const summary = await staff.p.getByTestId("work-summary").innerText();
+      assert.match(summary, /Anda/, "PIC melihat dirinya di daftar PIC");
+      assert.match(summary, /tidak mencatat pembagian tugas/, "multi-PIC tanpa pembagian tugas palsu");
+      const brief = await staff.p.getByTestId("brief").innerText();
+      assert.match(brief, /Diskon 20% untuk seluruh produk/, "deskripsi pemohon tampil utuh");
+      const body = await staff.p.getByTestId("work-main").innerText();
+      assert.equal(body.split("Diskon 20% untuk seluruh produk").length - 1, 1, "deskripsi tidak tampil berulang");
+      for (const gone of ["Hasil yang diharapkan", "Catatan pengerjaan dari pemohon", "Tujuan pekerjaan", "Belum diisi pemohon"]) {
+        assert.ok(!body.includes(gone), `bagian '${gone}' sudah tidak muncul`);
+      }
+      const firstSection = await staff.p.getByTestId("work-main").locator("section").first().getAttribute("data-testid");
+      assert.equal(firstSection, "brief", "Deskripsi dari Pemohon adalah bagian pertama konten");
+      const specs = await staff.p.getByTestId("specs").innerText();
+      assert.match(specs, /Jenis pekerjaan[\s\S]*Poster/);
+      assert.match(specs, /A4/);
+      await staff.p.getByRole("button", { name: "Perbesar referensi visual.png" }).click();
+      await staff.p.getByRole("dialog", { name: "referensi visual.png" }).getByRole("img", { name: "referensi visual.png" }).waitFor();
+      await staff.p.keyboard.press("Escape");
+      assert.ok(await staff.p.getByRole("img", { name: "Pratinjau referensi visual.png" }).isVisible(), "thumbnail gambar tampil");
+      const thumbOk = await staff.p.getByRole("img", { name: "Pratinjau referensi visual.png" }).evaluate((img) => img.complete && img.naturalWidth > 0);
+      assert.ok(thumbOk, "thumbnail dimuat lewat endpoint terautentikasi");
+      assert.ok(await staff.p.getByText("brief tertulis.pdf").isVisible(), "PDF terdaftar");
+      assert.ok(await staff.p.getByText("Hubungi via WhatsApp").isVisible());
+      assert.doesNotMatch(await staff.p.getByTestId("activity").innerText(), /Penyesuaian jadwal acara pemohon/, "alasan audit tidak tampil untuk staff");
+      await staff.c.close();
+
+      const admin = await view(ADMIN, "7-detail-admin");
+      assert.equal(admin.overflow, 0, "tanpa overflow horizontal di mobile (admin)");
+      assert.doesNotMatch(await admin.p.getByTestId("work-summary").innerText(), /\bAnda\b/, "Super Admin bukan PIC");
+      const act = await admin.p.getByTestId("activity").innerText();
+      assert.match(act, /Penyesuaian jadwal acara pemohon/, "riwayat deadline beserta alasan");
+      await admin.c.close();
+    } finally {
+      await browser.close();
+    }
+  });
+
+  console.log("\nPenyerahan hasil, QC, dan penyelesaian");
+  const qcOrder = async (title) => {
+    const r = await submit(orderForm(brand1, { title }).fd);
+    assert.equal(r.status, 201, await r.clone().text());
+    const { orderNumber } = await r.json();
+    const [o] = await db`select id from orders where order_number = ${orderNumber}`;
+    const [st] = await db`select m.id from app_users u join dtic_members m on m.id = u.member_id where u.email = 'staff@dtic.example'`;
+    await db`insert into order_assignments (order_id, member_id) values (${o.id}, ${st.id}) on conflict do nothing`;
+    return { id: o.id, orderNumber };
+  };
+  // Satu sesi PIC dipakai ulang (login dibatasi laju per akun).
+  let qcStaffCookie = null;
+  const qcStaff = async () => (qcStaffCookie ??= await login("staff@dtic.example", "StaffUji2026"));
+  const qcRow = async (id) => (await db`select status, qc_status from orders where id = ${id}`)[0];
+  const events = async (id, kind) =>
+    kind
+      ? await db`select * from order_workflow_events where order_id = ${id} and kind = ${kind} order by created_at, id`
+      : await db`select * from order_workflow_events where order_id = ${id} order by created_at, id`;
+  const setStatusAs = (id, status, cookie) => internal(`/api/internal/orders/${id}/status`, "POST", { status }, {}, cookie);
+
+  await test("Ke Manager: tautan wajib; menunggu pemeriksaan; PIC tidak memeriksa sendiri; persetujuan bersamaan tercatat sekali", async () => {
+    const { id } = await qcOrder("Judul Uji QC ke Manager");
+    const STAFFC = await qcStaff();
+    assert.equal((await setStatusAs(id, "in_progress", STAFFC)).status, 200);
+    assert.equal((await setStatusAs(id, "pending_confirmation", STAFFC)).status, 409, "tanpa pintasan lewat endpoint status");
+    assert.equal((await workflow(id, { action: "submit_qc", method: "in_app" }, STAFFC)).status, 422, "metode file: minimal satu file");
+    assert.equal((await workflow(id, { action: "submit_qc", method: "external", note: "Sudah dikirim" }, STAFFC)).status, 422, "metode luar aplikasi: media wajib");
+    assert.equal((await workflow(id, { action: "submit_qc", link: "ftp://x" }, STAFFC)).status, 422, "tautan http(s)");
+    let r = await workflow(id, { action: "submit_qc", link: "https://drive.example/v1", note: "Mohon dicek" }, STAFFC);
+    assert.equal(r.status, 200, await r.clone().text());
+    assert.deepEqual(await qcRow(id), { status: "pending_confirmation", qc_status: "pending" });
+    assert.equal((await workflow(id, { action: "approve_qc" }, STAFFC)).status, 403, "PIC tidak memeriksa hasilnya sendiri");
+    assert.equal((await workflow(id, { action: "record_delivery", confirmSent: true }, STAFFC)).status, 409, "tidak kirim saat menunggu Manager");
+    assert.equal((await workflow(id, { action: "complete", note: "Sudah disepakati" }, STAFFC)).status, 409, "tidak selesai saat menunggu Manager");
+    const [a, b] = await Promise.all([workflow(id, { action: "approve_qc" }, MGR), workflow(id, { action: "approve_qc" }, ADMIN)]);
+    assert.deepEqual([a.status, b.status].sort(), [200, 409], "satu berhasil, satu ditolak");
+    assert.equal((await events(id, "qc_approved")).length, 1);
+    assert.deepEqual(await qcRow(id), { status: "in_progress", qc_status: "approved" });
+    const [sub] = await events(id, "qc_submitted");
+    assert.equal(sub.link, "https://drive.example/v1", "versi yang diperiksa tercatat");
+    assert.ok(sub.actor_name && sub.created_at, "aktor & waktu");
+    // Setelah disetujui, pengiriman tercatat "setelah QC"
+    assert.equal((await workflow(id, { action: "record_delivery", confirmSent: true, link: "https://drive.example/v1" }, STAFFC)).status, 200);
+    const [dl] = await events(id, "delivery_recorded");
+    assert.equal(dl.detail.afterQc, true);
+  });
+
+  await test("Ke Manager: revisi wajib instruksi; PIC Perbaiki Hasil lalu ajukan ulang; tarik pengajuan; retry idempoten", async () => {
+    const { id } = await qcOrder("Judul Uji Revisi");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    await workflow(id, { action: "submit_qc" }, STAFFC);
+    assert.equal((await workflow(id, { action: "request_revision" }, MGR)).status, 422, "instruksi wajib");
+    const key = randomUUID();
+    assert.equal((await workflow(id, { action: "request_revision", note: "Logo terlalu kecil", requestKey: key }, MGR)).status, 200);
+    const again = await workflow(id, { action: "request_revision", note: "Logo terlalu kecil", requestKey: key }, MGR);
+    assert.equal((await again.json()).duplicate, true, "retry setelah timeout tidak menggandakan");
+    assert.equal((await events(id, "qc_revision_requested")).length, 1);
+    assert.deepEqual(await qcRow(id), { status: "internal_revision", qc_status: "revision" });
+    assert.match(await (await pageRaw(`/dtic/orders/${id}`, STAFFC)).text(), /Logo terlalu kecil/, "PIC melihat instruksi revisi");
+    assert.equal((await workflow(id, { action: "submit_qc" }, STAFFC)).status, 409, "harus Perbaiki Hasil dulu");
+    assert.equal((await workflow(id, { action: "complete", note: "Sudah disepakati" }, STAFFC)).status, 409, "PIC tidak menutup saat revisi diminta");
+    assert.equal((await setStatusAs(id, "in_progress", STAFFC)).status, 200, "Perbaiki Hasil");
+    assert.equal((await workflow(id, { action: "submit_qc" }, STAFFC)).status, 200);
+    // Manager tidak merespons: PIC menarik pengajuan, tanpa persetujuan otomatis
+    assert.equal((await workflow(id, { action: "withdraw_qc" }, STAFFC)).status, 200);
+    assert.deepEqual(await qcRow(id), { status: "in_progress", qc_status: "none" });
+    assert.equal((await events(id, "qc_approved")).length, 0, "tidak ada persetujuan palsu");
+    const dup = await db`select count(*)::int as c from (select 1 from notification_outbox where order_id = ${id} group by channel, kind, event_ref having count(*) > 1) x`;
+    assert.equal(dup[0].c, 0, "tidak ada notifikasi ganda");
+  });
+
+  await test("Langsung ke pemohon: konfirmasi wajib; status QC tidak berubah; masukan pemohon & revisi; Telegram diberi tahu (event berbeda dari QC)", async () => {
+    tg.mode = "ok";
+    const { id } = await qcOrder("Judul Uji Langsung Pemohon");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    assert.equal((await workflow(id, { action: "record_delivery", confirmSent: false }, STAFFC)).status, 422, "tanpa konfirmasi tidak tercatat");
+    assert.equal((await events(id, "delivery_recorded")).length, 0);
+    const outboxBefore = (await db`select count(*)::int as c from notification_outbox where order_id = ${id}`)[0].c;
+    let r = await workflow(id, { action: "record_delivery", confirmSent: true, stage: "draft", link: "https://drive.example/konsep", note: "Via WA" }, STAFFC);
+    assert.equal(r.status, 200, await r.clone().text());
+    assert.deepEqual(await qcRow(id), { status: "awaiting_requester", qc_status: "none" }, "QC tetap Belum Diajukan");
+    const [dl] = await events(id, "delivery_recorded");
+    assert.equal(dl.detail.afterQc, false);
+    // Notifikasi Telegram DIANTREKAN untuk penyerahan ke pemohon (sebelumnya tidak pernah diantrekan).
+    const outboxRows = await db`select kind, event_type from notification_outbox where order_id = ${id} order by created_at desc limit 1`;
+    assert.equal(outboxRows.length, outboxBefore + 1, "satu notifikasi baru diantrekan untuk penyerahan");
+    assert.equal(outboxRows[0].kind, "status_changed");
+    assert.equal(outboxRows[0].event_type, "status_changed", "event berbeda dari 'waiting_confirmation' (ajukan QC)");
+    const tgBefore = tg.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    assert.ok(tg.calls.length > tgBefore, "pesan Telegram benar-benar terkirim untuk penyerahan ke pemohon");
+    const sentText = tg.calls.at(-1).body.text;
+    assert.match(sentText, /MENUNGGU MASUKAN PEMOHON/, "pesan memuat status apa adanya");
+    assert.doesNotMatch(sentText, /disetujui|approved/i, "tidak pernah mengklaim QC disetujui hanya karena dikirim ke pemohon");
+    assert.equal((await events(id, "qc_approved")).length, 0);
+    const html = await (await pageRaw(`/dtic/orders/${id}`, STAFFC)).text();
+    assert.match(html, /Sudah Dikirim ke Pemohon/);
+    assert.match(html, /Dikirim langsung, tanpa QC Manager/);
+    assert.match(html, /Belum Diajukan/);
+    assert.equal((await workflow(id, { action: "record_feedback", needsRevision: true }, STAFFC)).status, 422);
+    r = await workflow(id, { action: "record_feedback", needsRevision: true, note: "Ganti warna latar jadi biru" }, STAFFC);
+    assert.equal(r.status, 200);
+    assert.equal((await qcRow(id)).status, "in_progress", "revisi dimulai");
+    const other = await (async () => {
+      await internal("/api/internal/users", "POST", { fullName: "Staff Tanpa Tugas QC", email: "staff-qc-other@dtic.example", role: "staff", memberId: null, password: "StaffQcOther2026" });
+      return login("staff-qc-other@dtic.example", "StaffQcOther2026");
+    })();
+    assert.equal((await workflow(id, { action: "record_delivery", confirmSent: true }, other)).status, 404, "staff lain tidak bisa memanipulasi");
+    assert.equal((await workflow(id, { action: "complete", note: "Coba tutup" }, other)).status, 404);
+  });
+
+  await test("Selesaikan Pekerjaan: kesepakatan di luar aplikasi wajib keterangan; tanpa pengiriman/persetujuan palsu; klik ganda tidak menggandakan", async () => {
+    const { id } = await qcOrder("Judul Uji Selesai di Luar Aplikasi");
+    const STAFFC = await qcStaff();
+    assert.equal((await workflow(id, { action: "complete", note: "Sudah selesai" }, STAFFC)).status, 409, "belum mulai dikerjakan");
+    await setStatusAs(id, "in_progress", STAFFC);
+    assert.equal((await workflow(id, { action: "complete" }, STAFFC)).status, 422, "keterangan wajib bila belum ada pengiriman");
+    const key = randomUUID();
+    const body = { action: "complete", note: "Penyelesaian sudah disepakati langsung dengan pemohon", requestKey: key };
+    const [r1, r2] = await Promise.all([workflow(id, body, STAFFC), workflow(id, body, STAFFC)]);
+    assert.deepEqual([r1.status, r2.status], [200, 200]);
+    assert.deepEqual([(await r1.clone().json()).duplicate, (await r2.clone().json()).duplicate].sort(), [false, true], "klik ganda → satu tersimpan");
+    assert.equal((await events(id, "completed")).length, 1);
+    assert.equal((await db`select count(*)::int as c from order_status_history where order_id = ${id} and new_status = 'completed'`)[0].c, 1);
+    assert.equal((await events(id, "delivery_recorded")).length, 0, "tidak membuat catatan pengiriman");
+    assert.equal((await events(id, "qc_approved")).length, 0, "tidak membuat persetujuan Manager");
+    const row = await qcRow(id);
+    assert.equal(row.status, "completed");
+    assert.equal(row.qc_status, "none", "status QC tetap apa adanya");
+    const [ev] = await events(id, "completed");
+    assert.equal(ev.detail.deliveryRecorded, false);
+    assert.equal(ev.summary, "Penyelesaian sudah disepakati langsung dengan pemohon");
+    assert.ok((await db`select completed_at from orders where id = ${id}`)[0].completed_at);
+    assert.equal((await workflow(id, { action: "complete", note: "lagi" }, STAFFC)).status, 409, "selesai tidak bisa diulang");
+    // Setelah pengiriman tercatat: keterangan opsional
+    const o2 = await qcOrder("Judul Uji Selesai Setelah Kirim");
+    await setStatusAs(o2.id, "in_progress", STAFFC);
+    await workflow(o2.id, { action: "record_delivery", confirmSent: true, stage: "final" }, STAFFC);
+    assert.equal((await workflow(o2.id, { action: "complete" }, STAFFC)).status, 200);
+    assert.equal((await events(o2.id, "completed"))[0].detail.deliveryRecorded, true);
+  });
+
+  const PNG_BYTES = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(200, 1)]);
+  const uploadResult = (id, file, cookie, uploadKey = randomUUID()) => {
+    const fd = new FormData();
+    fd.set("uploadKey", uploadKey);
+    fd.set("file", new Blob([file.data], { type: file.type ?? "application/octet-stream" }), file.name);
+    return fetch(`${BASE}/api/internal/orders/${id}/results`, { method: "POST", body: fd, headers: { Cookie: cookie, Origin: BASE, "X-DTIC-Request": "1" } });
+  };
+  const resultRows = async (id) => await db`select id, file_name, kind, uploaded_by, mime_type from order_attachments where order_id = ${id} and kind = 'result' order by created_at`;
+
+  await test("File hasil: unggah gambar, PDF, PSD; validasi tipe/isi/ukuran di server; retry tanpa file ganda; hak akses", async () => {
+    const { id, orderNumber } = await qcOrder("Judul Uji Upload Hasil");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    let r = await uploadResult(id, { name: "poster final.png", data: PNG_BYTES, type: "image/png" }, STAFFC);
+    assert.equal(r.status, 201, await r.clone().text());
+    const png = (await r.json()).file;
+    r = await uploadResult(id, { name: "proof.pdf", data: PDF, type: "application/pdf" }, STAFFC);
+    assert.equal(r.status, 201);
+    const pdf = (await r.json()).file;
+    r = await uploadResult(id, { name: "master.psd", data: Buffer.concat([Buffer.from("8BPS"), Buffer.alloc(100)]) }, STAFFC);
+    assert.equal(r.status, 201, "format desain PSD diterima");
+    const psd = (await r.json()).file;
+    // validasi server
+    assert.equal((await uploadResult(id, { name: "virus.exe", data: Buffer.from("MZ") }, STAFFC)).status, 422, "tipe tidak diizinkan");
+    assert.equal((await uploadResult(id, { name: "palsu.png", data: Buffer.from("bukan gambar") }, STAFFC)).status, 422, "isi tidak cocok format");
+    const big = await uploadResult(id, { name: "besar.zip", data: Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.alloc(1.2 * 1024 * 1024)]) }, STAFFC);
+    assert.ok([413, 422].includes(big.status), `file terlalu besar ditolak (HTTP ${big.status})`);
+    // retry setelah timeout dengan kunci sama → file yang sama
+    const key = randomUUID();
+    const a = await uploadResult(id, { name: "ulang.png", data: PNG_BYTES }, STAFFC, key);
+    const b = await uploadResult(id, { name: "ulang.png", data: PNG_BYTES }, STAFFC, key);
+    assert.deepEqual([a.status, b.status], [201, 200]);
+    assert.equal((await b.json()).duplicate, true);
+    assert.equal((await resultRows(id)).filter((x) => x.file_name === "ulang.png").length, 1, "tanpa file ganda");
+    const rows = await resultRows(id);
+    assert.ok(rows.every((x) => x.uploaded_by), "pengunggah tercatat");
+    // hak akses
+    assert.equal((await uploadResult(id, { name: "m.png", data: PNG_BYTES }, MGR)).status, 403, "Manager tidak mengunggah atas nama PIC");
+    const other = await login("staff-qc-other@dtic.example", "StaffQcOther2026");
+    assert.equal((await uploadResult(id, { name: "o.png", data: PNG_BYTES }, other)).status, 404, "staff lain tidak dapat mengunggah");
+    assert.equal((await fetch(`${BASE}/api/internal/attachments/${png.id}`, { headers: { Cookie: other } })).status, 404, "staff lain tidak dapat mengunduh");
+    assert.equal((await fetch(`${BASE}/api/internal/attachments/${png.id}`)).status, 401, "tanpa sesi ditolak");
+    const dl = await fetch(`${BASE}/api/internal/attachments/${pdf.id}?inline=1`, { headers: { Cookie: MGR } });
+    assert.equal(dl.status, 200, "Manager dapat membuka file hasil");
+    assert.match(dl.headers.get("content-disposition"), /^inline/);
+    const psdDl = await fetch(`${BASE}/api/internal/attachments/${psd.id}?inline=1`, { headers: { Cookie: STAFFC } });
+    assert.match(psdDl.headers.get("content-disposition"), /^attachment/, "PSD tidak dipratinjau, hanya diunduh");
+    // file hasil terpisah dari dokumen referensi pemohon
+    const html = await (await pageRaw(`/dtic/orders/${id}`, STAFFC)).text();
+    assert.match(html, /Hasil pekerjaan/);
+    assert.match(html, /poster final\.png/);
+    assert.match(html, /Pemohon tidak melampirkan dokumen/, "bahan referensi tetap kosong");
+    const tr = await (await search(orderNumber)).json();
+    assert.ok(!JSON.stringify(tr).includes("poster final"), "file hasil tidak bocor ke pelacakan publik");
+  });
+
+  await test("File hasil + QC/pengiriman/penyelesaian: file terhubung ke pengajuan; draf dapat dihapus, yang diserahkan tidak; file order lain ditolak", async () => {
+    const { id } = await qcOrder("Judul Uji Hasil ke QC");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    const f1 = (await (await uploadResult(id, { name: "v1.png", data: PNG_BYTES }, STAFFC)).json()).file;
+    const draft = (await (await uploadResult(id, { name: "coba.png", data: PNG_BYTES }, STAFFC)).json()).file;
+    const other = await qcOrder("Judul Uji Hasil Order Lain");
+    await setStatusAs(other.id, "in_progress", STAFFC);
+    const foreign = (await (await uploadResult(other.id, { name: "lain.png", data: PNG_BYTES }, STAFFC)).json()).file;
+    assert.equal((await workflow(id, { action: "submit_qc", method: "in_app", resultFileIds: [foreign.id] }, STAFFC)).status, 422, "file order lain ditolak");
+    assert.equal((await workflow(id, { action: "submit_qc", method: "in_app" }, STAFFC)).status, 422, "metode file tanpa file ditolak");
+    assert.equal((await qcRow(id)).status, "in_progress", "status tidak berubah saat pengajuan gagal");
+    let r = await workflow(id, { action: "submit_qc", method: "in_app", resultFileIds: [f1.id], note: "Tanpa Google Drive" }, STAFFC);
+    assert.equal(r.status, 200, await r.clone().text());
+    assert.equal((await qcRow(id)).qc_status, "pending");
+    const [sub] = await events(id, "qc_submitted");
+    assert.deepEqual(sub.detail.resultFileIds, [f1.id]);
+    assert.equal(sub.link, null, "Google Drive tidak diwajibkan");
+    assert.equal((await internal(`/api/internal/orders/${id}/results/${f1.id}`, "DELETE", undefined, {}, STAFFC)).status, 409, "file yang diserahkan tidak dapat dihapus");
+    assert.equal((await internal(`/api/internal/orders/${id}/results/${draft.id}`, "DELETE", undefined, {}, MGR)).status, 403, "hanya pengunggah");
+    assert.equal((await internal(`/api/internal/orders/${id}/results/${draft.id}`, "DELETE", undefined, {}, STAFFC)).status, 200, "draf dapat dihapus");
+    assert.equal((await resultRows(id)).length, 1);
+    await workflow(id, { action: "approve_qc" }, MGR);
+    const [ap] = await events(id, "qc_approved");
+    assert.deepEqual(ap.detail.resultFileIds, [f1.id], "persetujuan berlaku untuk versi yang diajukan");
+    r = await workflow(id, { action: "record_delivery", confirmSent: true, resultFileIds: [f1.id] }, STAFFC);
+    assert.equal(r.status, 200);
+    const html = await (await pageRaw(`/dtic/orders/${id}`, STAFFC)).text();
+    assert.match(html, /Sudah diserahkan ke pemohon/, "status file mengikuti peristiwa aktual");
+    // penyelesaian dengan file sebagai referensi tidak membuat pengiriman/persetujuan baru
+    const before = (await events(id)).length;
+    r = await workflow(id, { action: "complete", resultFileIds: [f1.id] }, STAFFC);
+    assert.equal(r.status, 200);
+    const after = await events(id);
+    assert.equal(after.length, before + 1);
+    assert.equal(after.at(-1).kind, "completed");
+    assert.equal((await uploadResult(id, { name: "telat.png", data: PNG_BYTES }, STAFFC)).status, 409, "pekerjaan selesai tidak menerima unggahan");
+  });
+
+  await test("Ajukan QC di luar DTIC Nexus: WhatsApp/email tanpa upload; informasi minimum; Manager minta file/akses; pilih file lama tanpa upload ulang", async () => {
+    const { id } = await qcOrder("Judul Uji Penyerahan Luar Aplikasi");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    const filesBefore = (await resultRows(id)).length;
+    // informasi minimum per metode
+    assert.equal((await workflow(id, { action: "submit_qc", method: "external", channel: "whatsapp" }, STAFFC)).status, 422, "keterangan wajib");
+    assert.equal((await workflow(id, { action: "submit_qc", method: "external", channel: "whatsapp", note: "ok" }, STAFFC)).status, 422, "keterangan terlalu singkat");
+    const future = new Date(Date.now() + 2 * 3600_000).toISOString();
+    assert.equal((await workflow(id, { action: "submit_qc", method: "external", channel: "whatsapp", note: "Sudah dikirim", handedAt: future }, STAFFC)).status, 422, "waktu penyerahan tidak di masa depan");
+    assert.equal((await qcRow(id)).status, "in_progress", "status tidak berubah saat gagal");
+    // WhatsApp, tanpa upload, tanpa tautan
+    const handedAt = new Date(Date.now() - 3600_000).toISOString();
+    let r = await workflow(id, { action: "submit_qc", method: "external", channel: "whatsapp", recipient: "Manager Uji", handedAt, note: "File PSD dikirim ke WhatsApp Manager" }, STAFFC);
+    assert.equal(r.status, 200, await r.clone().text());
+    assert.deepEqual(await qcRow(id), { status: "pending_confirmation", qc_status: "pending" }, "QC menunggu, bukan disetujui");
+    const [sub] = await events(id, "qc_submitted");
+    assert.equal(sub.detail.method, "external");
+    assert.equal(sub.detail.channel, "whatsapp");
+    assert.equal(sub.detail.recipient, "Manager Uji");
+    assert.equal(sub.detail.handedAt, handedAt, "waktu penyerahan sesuai isian");
+    assert.notEqual(new Date(sub.created_at).toISOString(), handedAt, "waktu pencatatan terpisah");
+    assert.equal((await resultRows(id)).length, filesBefore, "tanpa upload ulang");
+    assert.equal((await events(id, "qc_approved")).length, 0);
+    const html = await (await pageRaw(`/dtic/orders/${id}`, MGR)).text();
+    assert.match(html, /Diserahkan di luar DTIC Nexus via/);
+    assert.match(html, /sistem tidak memverifikasi penerimaan/);
+    // Manager belum bisa memeriksa → minta file/akses (bukan revisi hasil)
+    assert.equal((await workflow(id, { action: "request_access", note: "x" }, STAFFC)).status, 403, "PIC tidak bisa");
+    assert.equal((await workflow(id, { action: "request_access" }, MGR)).status, 422, "catatan wajib");
+    r = await workflow(id, { action: "request_access", note: "File belum saya terima, mohon unggah di DTIC Nexus" }, MGR);
+    assert.equal(r.status, 200);
+    assert.deepEqual(await qcRow(id), { status: "in_progress", qc_status: "none" }, "dikembalikan ke PIC tanpa keputusan hasil");
+    assert.equal((await events(id, "qc_revision_requested")).length, 0, "bukan revisi");
+    assert.match(await (await pageRaw(`/dtic/orders/${id}`, STAFFC)).text(), /File belum saya terima/, "PIC melihat permintaan Manager");
+    // PIC mengunggah sekali, ajukan; lalu ajukan ulang memakai file lama tanpa upload ulang
+    const f = (await (await uploadResult(id, { name: "final.png", data: PNG_BYTES }, STAFFC)).json()).file;
+    assert.equal((await workflow(id, { action: "submit_qc", method: "in_app", resultFileIds: [f.id] }, STAFFC)).status, 200);
+    assert.equal((await workflow(id, { action: "withdraw_qc" }, STAFFC)).status, 200);
+    const rowsBefore = (await resultRows(id)).length;
+    assert.equal((await workflow(id, { action: "submit_qc", method: "in_app", resultFileIds: [f.id], note: "Memakai file yang sudah ada" }, STAFFC)).status, 200);
+    assert.equal((await resultRows(id)).length, rowsBefore, "file lama dipakai ulang tanpa duplikasi");
+    // Manager memeriksa file yang sudah ada tanpa upload ulang lalu menyetujui
+    assert.equal((await fetch(`${BASE}/api/internal/attachments/${f.id}?inline=1`, { headers: { Cookie: MGR } })).status, 200);
+    assert.equal((await workflow(id, { action: "approve_qc" }, MGR)).status, 200);
+    assert.equal((await qcRow(id)).qc_status, "approved");
+    // email
+    const o2 = await qcOrder("Judul Uji Penyerahan Email");
+    await setStatusAs(o2.id, "in_progress", STAFFC);
+    r = await workflow(o2.id, { action: "submit_qc", method: "external", channel: "email", note: "Dikirim ke email manager@dtic.example", link: "https://mail.example/thread/1" }, STAFFC);
+    assert.equal(r.status, 200);
+    const [s2] = await events(o2.id, "qc_submitted");
+    assert.equal(s2.detail.channel, "email");
+    assert.equal(s2.detail.handedAt, null, "waktu tidak diketahui tidak dikarang");
+    assert.equal((await events(o2.id, "delivery_recorded")).length, 0, "penyerahan ke Manager bukan pengiriman ke pemohon");
+  });
+
+  await test("Data lama: pending_confirmation lama → QC menunggu tanpa mengubah status; migrasi idempoten", async () => {
+    const { id } = await qcOrder("Judul Uji Data Lama QC");
+    await db`update orders set status = 'pending_confirmation', qc_status = 'none' where id = ${id}`;
+    const sqlText = await readFile(path.join("supabase/migrations", "20261017000000_qc_workflow.sql"), "utf8");
+    await pg.exec(sqlText);
+    await pg.exec(sqlText);
+    assert.deepEqual(await qcRow(id), { status: "pending_confirmation", qc_status: "pending" });
+    assert.equal((await workflow(id, { action: "approve_qc" }, MGR)).status, 200, "Manager dapat memutuskan data lama");
+  });
+
+  await test("Konsistensi: daftar/filter, dashboard, kalender, display, dan pelacakan publik memakai status baru", async () => {
+    const { id, orderNumber } = await qcOrder("Judul Uji Status Baru");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    await workflow(id, { action: "record_delivery", confirmSent: true }, STAFFC);
+    const list = await page(`/dtic/orders?status=awaiting_requester`);
+    assert.ok(list.html.includes(orderNumber) && list.html.includes("Menunggu Masukan Pemohon"), "filter status baru");
+    const dash = await page(`/dtic/dashboard`);
+    for (const label of ["Menunggu QC Manager", "Perlu Revisi Internal", "Menunggu Masukan Pemohon"]) assert.ok(dash.html.includes(label), label);
+    assert.equal((await page(`/dtic/calendar`)).status, 200);
+    const disp = await fetch(`${BASE}/api/internal/display/orders`, { headers: { Cookie: ADMIN } });
+    assert.ok((await disp.json()).inProgress.items.some((i) => i.orderNumber === orderNumber), "tampil di layar display");
+    const v = await (await search(orderNumber)).json();
+    assert.equal(v.status, "awaiting_requester");
+    assert.ok(!JSON.stringify(v).includes("QC"), "istilah QC internal tidak bocor ke pemohon");
+  });
+
+  await test("Penyerahan (browser): pilih tujuan Manager/pemohon, WhatsApp tidak mencatat, selesaikan; tanpa error konsol; desktop & mobile", async () => {
+    const chromePath = process.env.CHROME_PATH ?? "/usr/bin/google-chrome";
+    const { chromium } = await import("playwright-core");
+    const browser = await chromium.launch({ executablePath: chromePath, headless: true });
+    try {
+      const { id } = await qcOrder("Judul Uji Browser Penyerahan");
+      const pngPage = await browser.newPage({ viewport: { width: 320, height: 200 } });
+      await pngPage.setContent(`<body style="margin:0;background:linear-gradient(135deg,#0f766e,#3b82f6)"></body>`);
+      const REAL_PNG = await pngPage.screenshot();
+      await pngPage.close();
+      const dir = process.env.E2E_SHOT_DIR ?? path.join(os.tmpdir(), "dtic-form-shots");
+      await mkdir(dir, { recursive: true });
+      const consoleErrors = [];
+      const open = async (cookie, size = { width: 1366, height: 900 }) => {
+        const c = await browser.newContext({ viewport: size });
+        const [name, value] = cookie.split("=");
+        await c.addCookies([{ name, value, url: BASE }]);
+        const p = await c.newPage();
+        p.on("console", (m) => { if (m.type() === "error") consoleErrors.push(m.text()); });
+        p.on("pageerror", (e) => consoleErrors.push(e.message));
+        await p.goto(`${BASE}/dtic/orders/${id}`);
+        await p.getByTestId("next-step").waitFor();
+        return { c, p };
+      };
+      const STAFFC = await qcStaff();
+      const pic = await open(STAFFC);
+      assert.match(await pic.p.getByTestId("next-step-text").innerText(), /Pelajari brief dan bahan referensi/);
+      await pic.p.getByTestId("next-step").getByRole("button", { name: "Mulai kerjakan" }).click();
+      await pic.p.getByTestId("next-step").getByRole("button", { name: "Ajukan QC" }).waitFor();
+      assert.equal(await pic.p.getByTestId("next-step").getByRole("button", { name: "Selesaikan Pekerjaan" }).count(), 1);
+      assert.equal(await pic.p.getByText(/Mode A|Mode B|Mode C/).count(), 0, "tanpa pilihan mode");
+      await pic.p.waitForTimeout(400);
+      await pic.p.screenshot({ path: path.join(dir, "8-detail-pic-desktop.png"), fullPage: true });
+      // Ajukan QC → Ke Manager
+      await pic.p.getByRole("button", { name: "Ajukan QC" }).click();
+      const dlg = pic.p.getByRole("dialog", { name: "Pilih Tujuan Penyerahan Hasil" });
+      await dlg.waitFor();
+      // Modal lebar di desktop (±1000px), isi bergulir di dalam modal.
+      const box = await dlg.boundingBox();
+      assert.ok(box.width >= 900, `modal cukup lebar (${Math.round(box.width)}px)`);
+      assert.equal(await dlg.getByRole("button", { name: "Pilih tujuan" }).isDisabled(), true, "belum memilih tujuan");
+      await dlg.getByText("Ke Manager", { exact: true }).click();
+      assert.equal(await dlg.getByTestId("attachments-summary").innerText(), "Tidak ada file yang dilampirkan.", "lampiran opsional, default tanpa file");
+      assert.equal(await dlg.locator("input[type=file]").locator("..").isVisible(), false, "dropzone tidak dominan sebelum memilih unggah");
+      await dlg.getByText("Unggah file baru", { exact: true }).click();
+      assert.match(await dlg.getByTestId("qc-manager-recipient").innerText(), /Manager/);
+      assert.equal(await dlg.getByRole("button", { name: "Ajukan QC", exact: true }).isDisabled(), true, "butuh file atau keterangan penyerahan");
+      await dlg.locator("input[type=file]").setInputFiles([
+        { name: "hasil-browser.png", mimeType: "image/png", buffer: REAL_PNG },
+        { name: "hasil-browser.pdf", mimeType: "application/pdf", buffer: PDF },
+      ]);
+      await dlg.getByText("Terunggah (draf)").nth(1).waitFor();
+      assert.equal(await dlg.getByRole("list", { name: "File hasil yang diunggah" }).getByRole("listitem").count(), 2, "beberapa file sekaligus");
+      await pic.p.waitForTimeout(300);
+      await pic.p.screenshot({ path: path.join(dir, "9-dialog-tujuan-manager.png") });
+      await dlg.getByRole("button", { name: "Ajukan QC", exact: true }).click();
+      await pic.p.getByTestId("qc-status").filter({ hasText: "Menunggu Pemeriksaan Manager" }).waitFor();
+      assert.match(await pic.p.getByTestId("results").innerText(), /hasil-browser\.png[\s\S]*Diajukan untuk QC/, "Hasil pekerjaan menampilkan file & statusnya");
+      assert.equal(await pic.p.getByRole("button", { name: "Tarik Pengajuan QC" }).count(), 1);
+      assert.equal(await pic.p.getByRole("button", { name: "Ajukan QC" }).count(), 0, "Ajukan QC tidak tampil lagi setelah berhasil diajukan");
+      assert.equal(await pic.p.getByRole("button", { name: "Catat Masukan Pemohon" }).count(), 0, "aksi penyerahan ke pemohon tidak tampil saat menunggu Manager");
+      assert.equal(await pic.p.getByRole("button", { name: "Selesaikan Pekerjaan" }).count(), 0, "tidak bisa menyelesaikan saat menunggu Manager");
+      await pic.p.reload();
+      await pic.p.getByTestId("next-step").waitFor();
+      assert.equal(await pic.p.getByRole("button", { name: "Ajukan QC" }).count(), 0, "tetap tidak tampil setelah reload (bukan sekadar state klien)");
+      await pic.c.close();
+      // Manager meminta revisi
+      const mgr = await open(MGR);
+      await mgr.p.getByRole("button", { name: "Minta Revisi" }).click();
+      const rev = mgr.p.getByRole("dialog", { name: "Minta revisi" });
+      await rev.getByLabel(/Instruksi revisi/).fill("Perbesar logo di pojok kanan atas");
+      await rev.getByRole("button", { name: "Kirim Permintaan Revisi" }).click();
+      await mgr.p.getByTestId("qc-revision-note").waitFor();
+      await mgr.c.close();
+      // PIC memperbaiki lalu kirim langsung ke pemohon
+      const pic2 = await open(STAFFC);
+      assert.match(await pic2.p.getByTestId("qc-revision-note").innerText(), /Perbesar logo/);
+      await pic2.p.getByRole("button", { name: "Perbaiki hasil" }).click();
+      await pic2.p.getByRole("button", { name: "Ajukan QC" }).waitFor();
+      await pic2.p.getByRole("button", { name: "Ajukan QC" }).click();
+      const dlg2 = pic2.p.getByRole("dialog", { name: "Pilih Tujuan Penyerahan Hasil" });
+      await dlg2.getByText("Langsung ke Pemohon", { exact: true }).click();
+      const wa = dlg2.getByRole("link", { name: /Buka WhatsApp/ });
+      assert.match(await wa.getAttribute("href"), /^https:\/\/wa\.me\/628/);
+      assert.equal((await events(id, "delivery_recorded")).length, 0, "membuka WhatsApp tidak mencatat");
+      assert.equal(await dlg2.getByRole("button", { name: "Konfirmasi Penyerahan" }).isDisabled(), true, "wajib centang konfirmasi");
+      assert.equal(await dlg2.getByLabel("Waktu penyerahan (WIB)").inputValue(), "", "waktu penyerahan tidak diisi otomatis");
+      // tablet & mobile: modal muat di layar tanpa overflow horizontal
+      for (const [w, h, f] of [[820, 1180, "10b-modal-tablet.png"], [390, 844, "10c-modal-mobile.png"]]) {
+        await pic2.p.setViewportSize({ width: w, height: h });
+        await pic2.p.waitForTimeout(300);
+        const b = await dlg2.boundingBox();
+        assert.ok(b.x >= 0 && b.x + b.width <= w + 1, `modal muat di lebar ${w}px`);
+        await pic2.p.screenshot({ path: path.join(dir, f) });
+      }
+      await pic2.p.setViewportSize({ width: 1366, height: 900 });
+      await dlg2.getByLabel("Saya sudah benar-benar mengirim hasil ini kepada pemohon.").check();
+      await pic2.p.waitForTimeout(300);
+      await pic2.p.screenshot({ path: path.join(dir, "10-dialog-langsung-pemohon.png") });
+      await dlg2.getByRole("button", { name: "Konfirmasi Penyerahan" }).click();
+      await pic2.p.getByTestId("delivery-status").filter({ hasText: "Sudah Dikirim ke Pemohon" }).waitFor();
+      const qcText = await pic2.p.getByTestId("qc-status").innerText();
+      assert.match(qcText, /Perlu Revisi/, "status QC tetap keputusan Manager terakhir");
+      assert.doesNotMatch(qcText, /Disetujui/, "pengiriman langsung tidak menjadi persetujuan");
+      // Selesaikan
+      await pic2.p.getByTestId("next-step").getByRole("button", { name: "Selesaikan Pekerjaan" }).click();
+      const done = pic2.p.getByRole("dialog", { name: "Selesaikan Pekerjaan?" });
+      await done.waitFor();
+      await pic2.p.screenshot({ path: path.join(dir, "11-dialog-selesaikan.png") });
+      await done.getByRole("button", { name: "Ya, Selesaikan" }).click();
+      await pic2.p.getByTestId("next-step-text").filter({ hasText: "Pekerjaan telah diselesaikan." }).waitFor();
+      assert.equal(await pic2.p.getByTestId("next-step").getByRole("button").count(), 0, "CTA tidak relevan dinonaktifkan");
+      assert.equal((await qcRow(id)).status, "completed");
+      await pic2.p.waitForTimeout(400);
+      await pic2.p.screenshot({ path: path.join(dir, "12-detail-selesai-desktop.png"), fullPage: true });
+      await pic2.p.setViewportSize({ width: 390, height: 844 });
+      await pic2.p.waitForTimeout(400);
+      const overflow = await pic2.p.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      await pic2.p.screenshot({ path: path.join(dir, "13-detail-selesai-mobile.png"), fullPage: true });
+      assert.equal(overflow, 0, "tanpa overflow horizontal di mobile");
+      await pic2.c.close();
+      assert.deepEqual(consoleErrors, [], `tanpa error konsol/hydration: ${consoleErrors.join(" | ")}`);
+    } finally {
+      await browser.close();
+    }
+  });
+
+  await test("Smart WhatsApp (browser): template sesuai kondisi, nama dari akun login, edit & reset, wa.me tidak mencatat pengiriman", async () => {
+    const chromePath = process.env.CHROME_PATH ?? "/usr/bin/google-chrome";
+    const { chromium } = await import("playwright-core");
+    const browser = await chromium.launch({ executablePath: chromePath, headless: true });
+    try {
+      const { id } = await qcOrder("Judul Uji Smart WhatsApp");
+      const dir = process.env.E2E_SHOT_DIR ?? path.join(os.tmpdir(), "dtic-form-shots");
+      await mkdir(dir, { recursive: true });
+      const consoleErrors = [];
+      const open = async (cookie, size = { width: 1366, height: 900 }) => {
+        const c = await browser.newContext({ viewport: size });
+        const [name, value] = cookie.split("=");
+        await c.addCookies([{ name, value, url: BASE }]);
+        // Tangkap window.open (wa.me) tanpa benar-benar membuka WhatsApp.
+        await c.addInitScript(() => { window.__opened = []; window.open = (u) => { window.__opened.push(String(u)); return null; }; });
+        const p = await c.newPage();
+        p.on("console", (m) => { if (m.type() === "error") consoleErrors.push(m.text()); });
+        p.on("pageerror", (e) => consoleErrors.push(e.message));
+        await p.goto(`${BASE}/dtic/orders/${id}`);
+        await p.getByTestId("next-step").waitFor();
+        return { c, p };
+      };
+      const STAFFC = await qcStaff();
+      const [acct] = await db`select full_name from app_users where email = 'staff@dtic.example'`;
+      const pic = await open(STAFFC);
+      await pic.p.getByRole("button", { name: "Hubungi via WhatsApp" }).click();
+      const dlg = pic.p.getByRole("dialog", { name: "Pesan WhatsApp" });
+      await dlg.waitFor();
+      assert.equal(await dlg.getByLabel("Jenis pesan").inputValue(), "intro", "PIC baru ditugaskan → perkenalan");
+      const msgBox = dlg.getByLabel("Isi pesan");
+      const intro = await msgBox.inputValue();
+      assert.match(intro, new RegExp(`Perkenalkan, ${acct.full_name} dari Tim DTIC Environesia\\.`), "nama dari akun login");
+      assert.match(intro, /^Halo Kak Ani Lestari, selamat (pagi|siang|sore|malam)!/);
+      assert.doesNotMatch(intro, /\{\{|Bapak|Ibu/);
+      await pic.p.waitForTimeout(300);
+      await pic.p.screenshot({ path: path.join(dir, "14-pesan-whatsapp.png") });
+      // edit lalu reset
+      await msgBox.fill(`${intro}\n\nTambahan dari PIC 🙏`);
+      await dlg.getByRole("button", { name: "Reset ke Template" }).click();
+      assert.equal(await msgBox.inputValue(), intro, "reset mengembalikan template");
+      await msgBox.fill(`${intro}\n\nCatatan: ukuran A3 & warna hijau — https://drive.example/a?b=1&c=2 🙏`);
+      const sent = await msgBox.inputValue();
+      await dlg.getByRole("button", { name: "Buka WhatsApp" }).click();
+      await dlg.getByText("Pesan belum terkirim sampai Anda menekan kirim di WhatsApp.", { exact: false }).waitFor();
+      const opened = await pic.p.evaluate(() => window.__opened);
+      assert.equal(opened.length, 1);
+      assert.match(opened[0], /^https:\/\/wa\.me\/628\d+\?text=/);
+      assert.equal(decodeURIComponent(opened[0].split("?text=")[1]), sent, "karakter Indonesia, emoji, baris baru & URL terjaga");
+      await pic.p.waitForTimeout(500);
+      const logs = await events(id, "whatsapp_opened");
+      assert.equal(logs.length, 1, "WhatsApp dibuka tercatat");
+      assert.equal(logs[0].detail.template, "intro");
+      assert.equal(logs[0].detail.edited, true);
+      assert.ok(!JSON.stringify(logs[0]).includes("ukuran A3"), "isi pesan tidak disimpan");
+      assert.equal((await events(id, "delivery_recorded")).length, 0, "membuka WhatsApp bukan pengiriman");
+      assert.equal((await qcRow(id)).status, "assigned", "status tidak berubah");
+      await pic.c.close();
+      // Dibuka lagi: perkenalan tidak disarankan ulang
+      const pic2 = await open(STAFFC);
+      await pic2.p.getByRole("button", { name: "Hubungi via WhatsApp" }).click();
+      const d2 = pic2.p.getByRole("dialog", { name: "Pesan WhatsApp" });
+      assert.equal(await d2.getByLabel("Jenis pesan").inputValue(), "clarification");
+      assert.equal(await d2.getByRole("button", { name: "Buka WhatsApp" }).isEnabled(), true);
+      await d2.getByRole("button", { name: "Buka WhatsApp" }).click();
+      await d2.getByText("Tulis poin yang ingin diklarifikasi terlebih dahulu.").waitFor();
+      assert.deepEqual(await pic2.p.evaluate(() => window.__opened), [], "klarifikasi kosong tidak dibuka");
+      await pic2.c.close();
+      // Menunggu QC: pemeriksaan internal, tanpa "hasil siap"
+      await setStatusAs(id, "in_progress", STAFFC);
+      await workflow(id, { action: "submit_qc" }, STAFFC);
+      const mgr = await open(MGR);
+      await mgr.p.getByRole("button", { name: "Hubungi via WhatsApp" }).click();
+      const d3 = mgr.p.getByRole("dialog", { name: "Pesan WhatsApp" });
+      assert.equal(await d3.getByLabel("Jenis pesan").inputValue(), "internal_review");
+      const opts = await d3.getByLabel("Jenis pesan").locator("option").allInnerTexts();
+      assert.ok(!opts.includes("Hasil sudah siap") && !opts.includes("Kirim hasil pekerjaan"), "tidak menawarkan hasil saat QC menunggu");
+      const [mg] = await db`select full_name from app_users where email = 'manager@dtic.example'`;
+      assert.match(await d3.getByLabel("Isi pesan").inputValue(), new RegExp(`Perkenalkan, ${mg.full_name}`), "pengirim = Manager yang login, bukan PIC lain");
+      assert.doesNotMatch(await d3.getByLabel("Isi pesan").inputValue(), /disetujui/i);
+      await mgr.p.setViewportSize({ width: 390, height: 844 });
+      await mgr.p.waitForTimeout(300);
+      await mgr.p.screenshot({ path: path.join(dir, "15-pesan-whatsapp-mobile.png") });
+      await mgr.c.close();
+      // Tanpa nomor WhatsApp
+      const o2 = await qcOrder("Judul Uji WA Tanpa Nomor");
+      await db`update orders set requester_whatsapp = null where id = ${o2.id}`;
+      const c4 = await browser.newContext();
+      const [n4, v4] = STAFFC.split("=");
+      await c4.addCookies([{ name: n4, value: v4, url: BASE }]);
+      const p4 = await c4.newPage();
+      await p4.goto(`${BASE}/dtic/orders/${o2.id}`);
+      await p4.getByRole("button", { name: "Hubungi via WhatsApp" }).click();
+      const d4 = p4.getByRole("dialog", { name: "Pesan WhatsApp" });
+      assert.equal(await d4.getByRole("button", { name: "Buka WhatsApp" }).isDisabled(), true, "nomor tidak tersedia → tidak bisa dibuka");
+      await d4.getByText("nomor tidak tersedia").waitFor();
+      await c4.close();
+      assert.deepEqual(consoleErrors, [], `tanpa error konsol: ${consoleErrors.join(" | ")}`);
+    } finally {
+      await browser.close();
+    }
   });
 
   await test("Daftar Order: Super Admin melihat 'Kirim ulang' & 'Tes Telegram'; Manager tidak", async () => {
@@ -2796,7 +3634,7 @@ try {
     assert.match((await empty.json()).fieldErrors.requesterWhatsapp, /wajib/);
     assert.equal((await db`select count(*)::int as c from orders`)[0].c, before);
   });
-  await test("+62 dengan spasi/tanda hubung → disimpan 628…, detail menampilkan tautan wa.me, Telegram memuat nomor", async () => {
+  await test("+62 dengan spasi/tanda hubung → disimpan 628…, detail menyiapkan WhatsApp ke nomor ternormalisasi, Telegram tidak memuat nomor", async () => {
     tg.mode = "ok";
     const beforeTg = tg.calls.length;
     const r = await submit(orderForm(brand1, { requesterWhatsapp: "+62 812-3456-7890" }).fd);
@@ -2805,7 +3643,8 @@ try {
     const row = (await db`select id, requester_whatsapp from orders where order_number = ${orderNumber}`)[0];
     assert.equal(row.requester_whatsapp, "6281234567890");
     const html = (await page(`/dtic/orders/${row.id}`)).html;
-    assert.match(html, /href="https:\/\/wa\.me\/6281234567890"/);
+    // Tautan wa.me disusun saat tombol diklik (Smart WhatsApp); nomor ternormalisasi dikirim ke dialog.
+    assert.match(html, /6281234567890/);
     assert.match(html, /Hubungi via WhatsApp/);
     assert.match(html, /\+6281234567890/);
     await waitFor(() => tg.calls.length > beforeTg, "pesan Telegram");
@@ -2922,7 +3761,7 @@ try {
     const d = (await displayJson(ADMIN)).body;
     const count = async (list) => (await pg.query(`select count(*)::int as c from orders where status in (${list.map((x) => `'${x}'`).join(",")})`)).rows[0].c;
     assert.equal(d.queue.total, await count(["submitted", "assigned"]), "antrean");
-    assert.equal(d.inProgress.total, await count(["in_progress"]), "sedang dikerjakan");
+    assert.equal(d.inProgress.total, await count(["in_progress", "internal_revision", "awaiting_requester"]), "sedang dikerjakan");
     const confirm = await count(["pending_confirmation"]);
     const completed = (await db`select count(*)::int as c from orders where status = 'completed'`)[0].c;
     assert.equal(d.done.total, confirm + Math.min(12, completed), "selesai/siap konfirmasi");
@@ -2944,8 +3783,7 @@ try {
     assert.ok(await inQueue(), "order baru masuk antrean");
     assert.equal((await internal(`/api/internal/orders/${id}/status`, "POST", { status: "in_progress" })).status, 200);
     assert.ok(!(await inQueue()) && (await inProg()), "pindah ke Sedang Dikerjakan");
-    assert.equal((await internal(`/api/internal/orders/${id}/status`, "POST", { status: "pending_confirmation" })).status, 200);
-    assert.equal((await internal(`/api/internal/orders/${id}/status`, "POST", { status: "completed" })).status, 200);
+    await finishViaQc(id);
     assert.ok(!(await inProg()), "selesai keluar dari sedang dikerjakan");
     assert.ok((await displayJson(ADMIN)).body.done.items.some((i) => i.orderNumber === orderNumber), "selesai tampil di kolom selesai");
     const { id: id2, orderNumber: num2 } = await newOrderSent();
@@ -2979,6 +3817,19 @@ try {
     assert.match(body.error, /tidak tersimpan/i);
     assert.ok(!/postgres|ECONNREFUSED|127\.0\.0\.1/.test(body.error), "tidak membocorkan detail internal");
   });
+  await test("React #441 (produksi) = error render Server Component: halaman 'Data gagal dimuat' + digest; log server memuat penyebab asli", async () => {
+    const before = appLog.length;
+    const r = await pageRaw("/dtic/orders", ADMIN);
+    const html = await r.text();
+    // Bukti utama ada di log server: error render (⨯) dengan digest dan penyebab asli (ECONNREFUSED).
+    const serverLog = appLog.slice(before);
+    const block = serverLog.match(/⨯ Error:[\s\S]*?digest: '(\d+)'/);
+    assert.ok(block, "log server mencatat error render dengan digest");
+    assert.ok(/ECONNREFUSED|ETIMEDOUT|CONNECT/i.test(block[0]), "penyebab asli (koneksi database) tercatat pada digest yang sama");
+    assert.ok(!/postgres:\/\/|password=|DATABASE_URL=/i.test(html + serverLog), "tidak membocorkan kredensial");
+    void r;
+  });
+
   } // akhir suite penuh (dilewati pada E2E_WORKER_LIVE=1)
 } finally {
   app.kill("SIGTERM");

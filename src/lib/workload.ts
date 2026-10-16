@@ -2,7 +2,7 @@
  * Aturan workload anggota (murni, tanpa database). Dipakai halaman Workload Tim dan panel Kelola PIC.
  *
  * Definisi (dihitung dari relasi PIC order_assignments, satu baris per order per anggota):
- *  - Aktif       = Pengajuan Masuk (data lama), Siap Dikerjakan, Sedang Dikerjakan, Menunggu Konfirmasi.
+ *  - Aktif       = Pengajuan Masuk (data lama), Siap Dikerjakan, Sedang Dikerjakan, Menunggu QC Manager, Perlu Revisi Internal, Menunggu Masukan Pemohon.
  *  - Ditunda     = ditampilkan terpisah dan TIDAK ikut indikator beban aktif (pekerjaan sedang dihentikan).
  *  - Terlambat   = deadline lewat dan order belum Selesai/Dibatalkan (termasuk yang Ditunda),
  *                  sama dengan aturan "Terlambat" di seluruh aplikasi.
@@ -15,7 +15,7 @@
  * Rekomendasi hanya informasi untuk Manager; sistem tidak pernah memindahkan PIC.
  */
 
-export const ACTIVE_LOAD_STATUSES = ["submitted", "assigned", "in_progress", "pending_confirmation"] as const;
+export const ACTIVE_LOAD_STATUSES = ["submitted", "assigned", "in_progress", "pending_confirmation", "internal_revision", "awaiting_requester"] as const;
 
 export type MemberWorkload = {
   memberId: string;

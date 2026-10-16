@@ -30,6 +30,10 @@ export function diagnoseDbError(error: unknown): string | null {
   const code = errCode(error);
   const message = error instanceof Error ? error.message : "";
   const target = dbTarget();
+  // Batas klien/koneksi Supabase (session pooler): EMAXCONNSESSION atau SQLSTATE 53300 (too_many_connections).
+  if (code === "53300" || code === "EMAXCONNSESSION" || /max clients reached|too many connections|EMAXCONN/i.test(message)) {
+    return `Batas koneksi database tercapai di ${target} (session pooler). Turunkan DB_POOL_MAX ke 1 di environment ini, dan pertimbangkan Transaction Pooler (port 6543) bila jumlah instance serverless besar.`;
+  }
   switch (code) {
     case "ENETUNREACH":
     case "EHOSTUNREACH":
@@ -60,7 +64,50 @@ export function diagnoseDbError(error: unknown): string | null {
       if (/tenant or user not found/i.test(message))
         return `Pooler Supabase menolak username (${target}). Salin ulang connection string Session pooler dari Dashboard → Connect.`;
       return null;
+    // Transaksi gagal karena kondisi SEMENTARA (lock bentrok dengan transaksi lain, mis. migrasi yang
+    // sedang berjalan, atau permintaan serupa yang diproses bersamaan) — bukan bug logika. Aman diulang.
+    case "40P01": // deadlock_detected
+      return `Transaksi database bentrok dengan transaksi lain (deadlock) di ${target}. Perubahan belum tersimpan; silakan coba lagi.`;
+    case "40001": // serialization_failure
+      return `Transaksi database gagal karena pembaruan bersamaan di ${target}. Perubahan belum tersimpan; silakan coba lagi.`;
+    case "55P03": // lock_not_available
+      return `Data sedang dikunci oleh proses lain di ${target} (mis. migrasi yang sedang berjalan). Perubahan belum tersimpan; coba lagi sesaat lagi.`;
+    case "57014": // query_canceled (mis. menunggu lock melewati batas waktu)
+      return `Permintaan database dibatalkan karena menunggu terlalu lama di ${target}. Perubahan belum tersimpan; silakan coba lagi.`;
+    case "08006":
+    case "08003":
+    case "08001":
+    case "08004":
+      return `Koneksi ke ${target} terputus saat permintaan diproses. Perubahan belum tersimpan; silakan coba lagi.`;
     default:
       return null;
   }
+}
+
+/** Kode error Postgres di atas yang murni sementara (aman diulang tanpa perubahan apa pun). */
+export const RETRYABLE_PG_CODES = new Set(["40P01", "40001", "55P03", "57014", "08006", "08003", "08001", "08004"]);
+
+export function isRetryableDbError(error: unknown): boolean {
+  const code = errCode(error);
+  return !!code && RETRYABLE_PG_CODES.has(code);
+}
+
+/**
+ * Jalankan operasi database, dan ulangi SEKALI (total maksimal `attempts` percobaan) bila gagal karena
+ * error yang murni sementara (lock/deadlock/koneksi terputus) — BUKAN untuk menyembunyikan bug. Error lain
+ * (termasuk AppError dari validasi/permission/aturan bisnis) langsung dilempar tanpa diulang, karena tidak
+ * pernah memiliki kode error Postgres yang dikenali di atas. Jeda singkat sebelum mencoba ulang agar lock
+ * yang bentrok (mis. migrasi yang sedang berjalan) sempat dilepas. Aman untuk retry: operasi yang dibungkus
+ * harus berupa transaksi yang sepenuhnya rollback saat gagal (sudah dijamin postgres.js pada sql().begin()).
+ */
+export async function withTransientRetry<T>(fn: () => Promise<T>, attempts = 2, delayMs = 250): Promise<T> {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (!isRetryableDbError(error) || i === attempts - 1) throw error;
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  throw new Error("unreachable");
 }

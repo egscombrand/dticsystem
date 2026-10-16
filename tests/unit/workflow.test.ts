@@ -9,17 +9,17 @@ const go = (from: Parameters<typeof checkTransition>[0]["from"], to: Parameters<
   checkTransition({ from, to, actor, note, hasAssignee });
 
 describe("alur normal oleh PIC", () => {
-  it("assigned → in_progress → pending_confirmation diizinkan untuk PIC", () => {
+  it("assigned → in_progress diizinkan untuk PIC; internal_revision → in_progress juga", () => {
     expect(go("assigned", "in_progress").ok).toBe(true);
-    expect(go("in_progress", "pending_confirmation").ok).toBe(true);
+    expect(go("internal_revision", "in_progress").ok).toBe(true);
   });
-  it("PIC tidak bisa mengonfirmasi selesai, meminta revisi, atau membatalkan", () => {
-    expect(go("pending_confirmation", "completed")).toMatchObject({ ok: false, status: 403 });
-    expect(go("pending_confirmation", "in_progress", pic, "revisi")).toMatchObject({ ok: false, status: 403 });
+  it("PIC tidak bisa membatalkan", () => {
     expect(go("assigned", "cancelled", pic, "alasan")).toMatchObject({ ok: false, status: 403 });
   });
-  it("Super Admin mengonfirmasi selesai", () => {
-    expect(go("pending_confirmation", "completed", admin).ok).toBe(true);
+  it("status QC, pengiriman, dan selesai TIDAK dapat dicapai lewat tombol status (hanya alur QC)", () => {
+    for (const [from, to] of [["in_progress", "pending_confirmation"], ["pending_confirmation", "completed"], ["pending_confirmation", "in_progress"], ["in_progress", "awaiting_requester"], ["in_progress", "internal_revision"], ["in_progress", "completed"], ["awaiting_requester", "completed"]] as const) {
+      for (const actor of [pic, admin, manager]) expect(go(from, to, actor, "catatan")).toMatchObject({ ok: false, status: 409 });
+    }
   });
 });
 
@@ -29,9 +29,9 @@ describe("transisi tambahan & alasan wajib", () => {
     expect(go("in_progress", "on_hold", pic, "Menunggu aset logo").ok).toBe(true);
     expect(go("on_hold", "in_progress").ok).toBe(true);
   });
-  it("revisi wajib catatan; batal wajib alasan", () => {
-    expect(go("pending_confirmation", "in_progress", admin)).toMatchObject({ ok: false, status: 422 });
-    expect(go("pending_confirmation", "in_progress", admin, "Warna kurang kontras").ok).toBe(true);
+  it("batal wajib alasan, juga dari status QC/pemohon", () => {
+    expect(go("pending_confirmation", "cancelled", admin)).toMatchObject({ ok: false, status: 422 });
+    expect(go("awaiting_requester", "cancelled", admin, "Dibatalkan pemohon").ok).toBe(true);
     expect(go("in_progress", "cancelled", admin)).toMatchObject({ ok: false, status: 422 });
     expect(go("in_progress", "cancelled", admin, "Dibatalkan pemohon").ok).toBe(true);
   });
@@ -51,14 +51,14 @@ describe("pelaku", () => {
     expect(go("assigned", "in_progress", otherStaff)).toMatchObject({ ok: false, status: 403 });
     expect(allowedTransitions("assigned", otherStaff)).toEqual([]);
   });
-  it("Manager tidak bisa mengubah status apa pun", () => {
+  it("Manager tidak mengubah status lewat tombol status (keputusan QC lewat alur QC)", () => {
     expect(go("assigned", "in_progress", manager)).toMatchObject({ ok: false, status: 403 });
-    for (const s of ["submitted", "assigned", "in_progress", "pending_confirmation", "on_hold"] as const) {
+    for (const s of ["submitted", "assigned", "in_progress", "pending_confirmation", "internal_revision", "awaiting_requester", "on_hold"] as const) {
       expect(allowedTransitions(s, manager)).toEqual([]);
     }
   });
   it("tombol aksi sesuai pelaku", () => {
-    expect(allowedTransitions("in_progress", pic).map((t) => t.to).sort()).toEqual(["on_hold", "pending_confirmation"]);
-    expect(allowedTransitions("in_progress", admin).map((t) => t.to).sort()).toEqual(["cancelled", "on_hold", "pending_confirmation"]);
+    expect(allowedTransitions("in_progress", pic).map((t) => t.to).sort()).toEqual(["on_hold"]);
+    expect(allowedTransitions("in_progress", admin).map((t) => t.to).sort()).toEqual(["cancelled", "on_hold"]);
   });
 });

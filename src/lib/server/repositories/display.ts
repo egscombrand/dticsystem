@@ -74,7 +74,7 @@ export async function displaySnapshot(scope: OrderScope, now: Date): Promise<Dis
   const db = sql();
   const active = await db<Row[]>`
     ${SELECT(db)}
-    where o.status in ('submitted', 'assigned', 'in_progress', 'pending_confirmation', 'on_hold')
+    where o.status in ('submitted', 'assigned', 'in_progress', 'pending_confirmation', 'internal_revision', 'awaiting_requester', 'on_hold')
     ${scope ? (scope.memberId ? db`and exists (select 1 from order_assignments sa where sa.order_id = o.id and sa.member_id = ${scope.memberId})` : db`and false`) : db``}
     order by o.deadline_at asc
     limit 400`;
@@ -88,7 +88,7 @@ export async function displaySnapshot(scope: OrderScope, now: Date): Promise<Dis
   const queueRows = active
     .filter((r) => r.status === "submitted" || r.status === "assigned")
     .sort((a, b) => (b.priority_rank ?? 0) - (a.priority_rank ?? 0) || a.deadline_at.getTime() - b.deadline_at.getTime() || a.updated_at.getTime() - b.updated_at.getTime());
-  const progressRows = active.filter((r) => r.status === "in_progress");
+  const progressRows = active.filter((r) => r.status === "in_progress" || r.status === "internal_revision" || r.status === "awaiting_requester");
   const confirmRows = active.filter((r) => r.status === "pending_confirmation");
   const doneRows = [...confirmRows, ...recentDone];
 

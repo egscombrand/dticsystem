@@ -89,3 +89,51 @@ export function contentMatchesExtension(ext: string, head: Uint8Array): boolean 
       return false;
   }
 }
+
+// ---------------------------------------------------------------------------
+// File hasil pekerjaan (diunggah PIC). Termasuk format desain & arsip; pratinjau hanya untuk gambar & PDF.
+// ---------------------------------------------------------------------------
+
+export const RESULT_FILE_TYPES: Record<string, string> = {
+  ...ALLOWED_FILE_TYPES,
+  psd: "image/vnd.adobe.photoshop",
+  ai: "application/postscript",
+  svg: "image/svg+xml",
+  zip: "application/zip",
+};
+
+export const RESULT_ACCEPT_ATTRIBUTE = Object.keys(RESULT_FILE_TYPES).map((ext) => `.${ext}`).join(",");
+export const RESULT_EXTENSIONS_LABEL = "JPG, PNG, WEBP, PDF, PSD, AI, SVG, ZIP, DOC/DOCX, XLS/XLSX, PPT/PPTX, TXT";
+/** Batas jumlah file hasil per penyerahan. */
+export const RESULT_MAX_FILES_PER_HANDOVER = 10;
+/** Format yang dapat dipratinjau browser lewat endpoint lampiran (sama dengan INLINE_TYPES di server). */
+export const PREVIEWABLE_MIME = new Set(["application/pdf", "image/png", "image/jpeg", "image/webp"]);
+
+/** Validasi ringan file hasil (browser & server). Server tetap memeriksa isi file. */
+export function checkResultFileBasics(file: { name: string; size: number }, maxBytes: number): string | null {
+  const ext = getExtension(file.name);
+  if (!RESULT_FILE_TYPES[ext]) return `Format "${file.name}" tidak didukung. Gunakan ${RESULT_EXTENSIONS_LABEL}.`;
+  if (file.size <= 0) return `File "${file.name}" kosong.`;
+  if (file.size > maxBytes) return `File "${file.name}" melebihi batas ${formatFileSize(maxBytes)}.`;
+  return null;
+}
+
+/** Pemeriksaan isi file hasil (magic bytes / penanda teks). `head` = hingga 1 KB pertama. */
+export function resultContentMatches(ext: string, head: Uint8Array): boolean {
+  switch (ext) {
+    case "psd":
+      return startsWith(head, [0x38, 0x42, 0x50, 0x53]); // 8BPS
+    case "ai":
+      // Illustrator modern berbasis PDF; versi lama PostScript.
+      return startsWith(head, [0x25, 0x50, 0x44, 0x46, 0x2d]) || startsWith(head, [0x25, 0x21, 0x50, 0x53]);
+    case "zip":
+      return startsWith(head, [0x50, 0x4b, 0x03, 0x04]) || startsWith(head, [0x50, 0x4b, 0x05, 0x06]);
+    case "svg": {
+      if (head.includes(0)) return false;
+      const text = new TextDecoder().decode(head).toLowerCase();
+      return text.includes("<svg");
+    }
+    default:
+      return contentMatchesExtension(ext, head.subarray(0, 16));
+  }
+}

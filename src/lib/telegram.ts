@@ -116,7 +116,9 @@ const short = (v: string | null | undefined, max: number) => {
   const t = (v ?? "").replace(/\s+/g, " ").trim();
   return t.length > max ? `${t.slice(0, max - 1)}…` : t;
 };
-const link = (appUrl: string | null, id: string) => (appUrl ? `🔗 Buka Detail Pekerjaan: ${escapeHtml(`${appUrl}/dtic/orders/${id}`)}` : null);
+/** Tautan "Buka Detail Pekerjaan" (HTML). Hanya dari base URL tervalidasi dan ID pekerjaan dari database. */
+const detailLink = (appUrl: string | null, id: string) =>
+  appUrl ? `<a href="${escapeHtml(`${appUrl}/dtic/orders/${id}`).replace(/"/g, "&quot;")}">Buka Detail Pekerjaan</a>` : null;
 
 /**
  * Baris PIC. Mention langsung (tg://user) HANYA bila status verified dan User ID ada; username dan nama
@@ -134,36 +136,41 @@ export function picLines(picks: PicForMessage[] | null | undefined): string[] {
   });
 }
 
-/** Notifikasi A — request pekerjaan baru. Bahasa Indonesia; nilai dari database, di-escape. */
+/**
+ * Notifikasi A — request pekerjaan baru. Dibaca dari data order yang tersimpan, di-escape untuk Telegram HTML.
+ * Urutan: nomor, status, judul, kategori/tim, jenis, brand, prioritas, tenggat, PIC, brief, lampiran, pemohon, lalu tindakan.
+ */
 export function buildOrderMessage(data: OrderMessageData, appUrl: string | null): string {
+  const detail = detailLink(appUrl, data.id);
   const lines: (string | null)[] = [
-    "🚀 <b>REQUEST PEKERJAAN BARU</b>",
+    "🔔 <b>REQUEST PEKERJAAN BARU</b>",
     DIVIDER,
     "",
-    "📌 <b>RINGKASAN PEKERJAAN</b>",
-    `Nomor Order: ${escapeHtml(data.orderNumber)}`,
+    `Nomor Order: <b>${escapeHtml(data.orderNumber)}</b>`,
     `Status: ${escapeHtml(STATUS_META[data.status].label.toUpperCase())}`,
-    `Judul: ${e(data.title)}`,
+    `Judul: <b>${e(data.title)}</b>`,
     ...(data.teamName ? [`Kategori / Tim: ${escapeHtml(data.teamName)}`] : []),
     `Jenis Pekerjaan: ${e(data.designType)}`,
     `Brand: ${e(data.brandName)}`,
     `Prioritas: ${e(data.priorityName)}`,
-    `Tenggat Waktu: ${escapeHtml(formatDeadline(data.deadlineAt))}`,
+    `Tenggat: ${escapeHtml(formatDeadline(data.deadlineAt))}`,
     "",
-    "👨‍💻 <b>PETUGAS BERTANGGUNG JAWAB</b>",
+    "👨‍💻 <b>PIC</b>",
     ...picLines(data.picInfos),
     "",
     "📝 <b>BRIEF PEKERJAAN</b>",
     e(short(data.brief, BRIEF_MAX)),
     "",
     `📎 Lampiran: ${data.attachmentCount > 0 ? `${data.attachmentCount} file` : "Tidak ada"}`,
-    `👤 Diajukan oleh: ${e(data.requesterName)} · ${e(data.department)}`,
+    `👤 Pemohon: ${e(data.requesterName)} · ${e(data.department)}`,
     "",
-    link(appUrl, data.id),
     DIVIDER,
     "📣 <b>TINDAKAN SELANJUTNYA</b>",
-    "",
-    "Petugas yang ditugaskan, silakan periksa detail pekerjaan, tinjau lampiran, dan mulai pengerjaan sesuai tenggat waktu.",
+    detail
+      ? `1. ${detail} (perlu login akun DTIC).`
+      : "1. Buka sistem DTIC Connect lalu cari nomor order di atas (perlu login akun DTIC).",
+    "2. Periksa brief, tenggat, dan lampiran.",
+    "3. Mulai pengerjaan sesuai status dan alur kerja yang berlaku.",
     "",
     "DTIC Nexus · Notifikasi Otomatis",
   ];
@@ -263,7 +270,7 @@ export function buildStatusMessage(data: StatusMessageData, appUrl: string | nul
     "👨‍💻 <b>PETUGAS</b>",
     ...picLines(data.picInfos),
     "",
-    link(appUrl, data.orderId),
+    detailLink(appUrl, data.orderId),
     DIVIDER,
     "DTIC Nexus · Notifikasi Otomatis",
   ];

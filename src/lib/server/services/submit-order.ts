@@ -1,3 +1,4 @@
+import type { OrderStatus } from "@/lib/status";
 import "server-only";
 import { randomUUID } from "node:crypto";
 import { UPLOAD_LIMITS } from "@/lib/config/app";
@@ -24,6 +25,7 @@ const FORM_FIELDS = [
   "briefDoc",
   "driveUrl",
   "deadline",
+  "deadlineTime",
   "priority",
   "teamId",
 ] as const;
@@ -58,6 +60,8 @@ async function prepareFiles(entries: FormDataEntryValue[]): Promise<PreparedFile
 export type SubmitResult = {
   id: string;
   orderNumber: string;
+  title: string;
+  status: OrderStatus;
   /** Timestamp pengajuan (dibuat server/database). */
   createdAt: string;
   deadlineAt: string;
@@ -85,7 +89,7 @@ export async function submitOrder(form: FormData): Promise<SubmitResult> {
 
   // Pengiriman ganda (klik berulang / retry jaringan) → kembalikan order yang sama. Tidak membuat order baru.
   const existing = await findOrderBySubmissionKey(input.submissionKey);
-  if (existing) return { ...existing, duplicate: true, attachmentCount: 0 };
+  if (existing) return { ...existing, duplicate: true };
 
   const files = await prepareFiles(form.getAll("attachments"));
 
@@ -131,7 +135,7 @@ export async function submitOrder(form: FormData): Promise<SubmitResult> {
     await cleanup();
     if (pgErrorCode(error) === "23505" && pgConstraint(error) === "orders_submission_key_key") {
       const again = await findOrderBySubmissionKey(input.submissionKey);
-      if (again) return { ...again, duplicate: true, attachmentCount: 0 };
+      if (again) return { ...again, duplicate: true };
     }
     if (pgErrorCode(error) === "23503") {
       throw new AppError("Brand tidak ditemukan.", 422, { brandId: "Brand tidak ditemukan. Pilih brand lain." });

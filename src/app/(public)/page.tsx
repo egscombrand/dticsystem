@@ -1,9 +1,9 @@
-import { ClipboardCheck, FileText, Hash } from "lucide-react";
 import type { Metadata } from "next";
 import { connection } from "next/server";
 import { Suspense } from "react";
-import { SubmissionForm } from "@/components/orders/submission-form";
 import { Skeleton } from "@/components/ui/spinner";
+import { ClipboardList } from "lucide-react";
+import { SubmissionForm } from "@/components/orders/submission-form";
 import { listBrands } from "@/lib/server/repositories/brands";
 import { listOrderTypes, listPriorities, listTeamsWithMembers, resolveDefaultPriority } from "@/lib/server/repositories/master-data";
 
@@ -12,38 +12,23 @@ export const metadata: Metadata = {
   description: "Ajukan kebutuhan desain brand Anda ke Department Creative IT (DTIC).",
 };
 
-const STEPS = [
-  { icon: FileText, title: "Isi formulir", text: "Lengkapi data pemohon, brief, dan deadline." },
-  { icon: Hash, title: "Terima nomor order", text: "Nomor DTIC tampil setelah pengajuan tersimpan." },
-  { icon: ClipboardCheck, title: "Diproses tim DTIC", text: "Gunakan nomor order untuk menanyakan progres." },
-];
-
 /** Halaman utama `/` — form pengajuan untuk client/brand (publik, tanpa akses ke data internal). */
 export default function HomeSubmitPage() {
   return (
     <>
-      <div className="mb-8">
-        <p className="text-[12px] font-semibold tracking-[0.14em] text-teal uppercase">DTIC Connect · One Portal for Creative &amp; IT Requests</p>
-        <h1 className="mt-2 text-2xl font-semibold tracking-tight text-navy sm:text-[30px]">Satu pintu untuk semua kebutuhan kreatif dan IT Anda.</h1>
-        <p className="mt-2 max-w-2xl text-sm text-ink-3">
-          Ajukan kebutuhan brand Anda ke Department Creative IT, lalu pantau progresnya melalui satu portal yang sama: dari request diterima hingga selesai.
-        </p>
-        <ol className="mt-6 grid gap-3 sm:grid-cols-3">
-          {STEPS.map(({ icon: Icon, title, text }, i) => (
-            <li key={title} className="flex gap-3 rounded-xl border border-line bg-surface p-3.5 shadow-card">
-              <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent">
-                <Icon className="size-4" aria-hidden="true" />
-              </span>
-              <div className="min-w-0">
-                <p className="text-[13px] font-semibold text-ink">
-                  <span className="text-ink-3">{i + 1}.</span> {title}
-                </p>
-                <p className="mt-0.5 text-xs text-ink-3">{text}</p>
-              </div>
-            </li>
-          ))}
-        </ol>
-      </div>
+      <header className="form-rise relative mb-8 overflow-hidden rounded-3xl bg-[linear-gradient(135deg,#ecfdf5_0%,#f0fdfa_50%,#eff6ff_100%)] p-6 ring-1 ring-line sm:p-8">
+        <span aria-hidden="true" className="hero-glow pointer-events-none absolute -top-16 -right-10 size-56 rounded-full bg-[radial-gradient(circle,rgba(16,185,129,0.35),transparent_70%)] blur-2xl" />
+        <span aria-hidden="true" className="hero-glow pointer-events-none absolute -bottom-20 -left-12 size-64 rounded-full bg-[radial-gradient(circle,rgba(15,118,110,0.22),transparent_70%)] blur-2xl" />
+        <div className="relative flex max-w-3xl flex-col gap-3">
+          <span className="inline-flex w-fit items-center gap-2 rounded-full bg-accent px-3 py-1 text-xs font-semibold tracking-wide text-white shadow-card">
+            <ClipboardList className="size-3.5" aria-hidden="true" /> Form Pengajuan
+          </span>
+          <h1 className="text-3xl font-semibold tracking-tight text-navy sm:text-4xl">Ajukan Pekerjaan</h1>
+          <p className="text-[15px] leading-relaxed text-ink-2">
+            Isi kebutuhan desain atau IT Anda dalam empat langkah. Setelah tersimpan, Anda langsung menerima nomor pekerjaan untuk memantau progresnya.
+          </p>
+        </div>
+      </header>
       <Suspense fallback={<SubmissionFormSkeleton />}>
         <SubmissionFormLoader />
       </Suspense>

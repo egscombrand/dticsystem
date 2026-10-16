@@ -35,35 +35,22 @@ export async function POST(request: Request) {
       throw new AppError("Data formulir tidak dapat dibaca.", 400);
     }
 
+    // Penyimpanan dan notifikasi dipisah. Setelah transaksi commit, pengajuan SELALU dibalas sebagai tersimpan.
+    // Kegagalan Telegram hanya memengaruhi field `notification`; detailnya dicatat di log server, tidak ke pemohon.
     const result = await submitOrder(form);
-    // Order sudah tersimpan (transaksi bersama antrean tujuan). Status notifikasi diambil dari hasil Telegram nyata:
-    // 201/200 hanya bila terkirim (ok:true). Selainnya 202: tersimpan, notifikasi belum terkirim, dengan alasan.
-    // Pengajuan ulang dengan kunci yang sama hanya menyelesaikan notifikasi; tidak membuat order baru.
-    const delivery = await deliverNewOrder(result.id);
-    if (delivery.state !== "sent") {
-      const stage = delivery.state === "no_destination" ? "no_destination" : "notification_pending";
-      const lead = stage === "no_destination"
-        ? "Tidak ada tujuan Telegram yang aktif untuk brand ini, sehingga notifikasi belum terkirim."
-        : "Notifikasi Telegram belum terkirim.";
-      return json(
-        {
-          error: `Pengajuan tersimpan dengan nomor ${result.orderNumber}. ${lead} ${delivery.detail} Isian form dipertahankan; tekan "Kirim pengajuan" lagi untuk memeriksa ulang tanpa membuat pengajuan baru.`,
-          stage,
-          orderNumber: result.orderNumber,
-        },
-        202,
-      );
-    }
+    const delivery = await deliverNewOrder(result.id).catch(() => ({ state: "pending" as const, detail: "" }));
     return json(
       {
         orderNumber: result.orderNumber,
+        title: result.title,
+        status: result.status,
         createdAt: result.createdAt,
         deadlineAt: result.deadlineAt,
         brandName: result.brandName,
         designType: result.designType,
         duplicate: result.duplicate,
         attachmentCount: result.attachmentCount,
-        notification: "sent",
+        notification: { state: delivery.state },
       },
       result.duplicate ? 200 : 201,
     );

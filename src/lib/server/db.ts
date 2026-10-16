@@ -1,5 +1,6 @@
 import "server-only";
 import postgres from "postgres";
+import { poolMax } from "@/lib/server/pool-config";
 
 /**
  * Koneksi Postgres (Supabase) — HANYA di server. DATABASE_URL tidak pernah
@@ -37,7 +38,7 @@ function sslOption(url: string): { ssl?: "require" | false } {
 function createClient(url: string): postgres.Sql {
   return postgres(url, {
     ...sslOption(url),
-    max: Number(process.env.DB_POOL_MAX ?? 5),
+    max: poolMax(process.env.DB_POOL_MAX),
     idle_timeout: 20,
     connect_timeout: 10,
     // Kompatibel dengan Supabase transaction pooler (pgbouncer)

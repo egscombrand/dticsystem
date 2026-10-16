@@ -433,7 +433,7 @@ export async function getOrderNotificationData(orderId: string): Promise<OrderNo
   >`
     select o.id, o.order_number, o.status, o.created_at, o.requester_name, b.name as brand_name, tm.name as team_name,
            o.department, o.design_type, o.title, o.brief, p.name as priority_name, o.deadline_at,
-           (select count(*)::int from order_attachments a where a.order_id = o.id) as attachment_count
+           (select count(*)::int from order_attachments a where a.order_id = o.id and a.kind = 'reference') as attachment_count
     from orders o
     join brands b on b.id = o.brand_id
     left join dtic_teams tm on tm.id = o.team_id

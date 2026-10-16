@@ -20,7 +20,7 @@ export type TelegramEventType = (typeof TELEGRAM_EVENT_TYPES)[number];
 export const EVENT_LABEL: Record<TelegramEventType, string> = {
   new_order: "Pengajuan baru",
   status_changed: "Perubahan status pekerjaan",
-  waiting_confirmation: "Menunggu konfirmasi",
+  waiting_confirmation: "Menunggu QC Manager",
   completed: "Pekerjaan selesai",
   on_hold: "Pekerjaan ditunda",
   cancelled: "Pekerjaan dibatalkan",

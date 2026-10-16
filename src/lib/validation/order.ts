@@ -66,6 +66,21 @@ const deadlineDateField = z
     return d;
   });
 
+/** Jam deadline (HH:mm, WIB). Opsional pada form publik: kosong = akhir hari (23.59 WIB). */
+const DEADLINE_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+const deadlineTimeField = z
+  .string()
+  .trim()
+  .optional()
+  .transform((v) => (v ? v : undefined))
+  .refine((v) => v === undefined || DEADLINE_TIME_RE.test(v), { message: "Format jam deadline tidak valid (HH:mm)." });
+
+/** Deadline final: tanggal (WIB) + jam bila diisi; tanpa jam = 23.59 WIB pada tanggal itu. */
+function combineDeadline(date: Date, time?: string): Date | null {
+  if (!time) return date;
+  return zonedLocalToUtc(`${toDateKey(date)}T${time}`);
+}
+
 const brandIdField = z.uuid({ error: "Pilih brand pemohon." });
 /** Jenis order & prioritas berupa identifier; keberadaan & status aktifnya dicek ke database di server. */
 const designTypeIdField = z.uuid({ error: "Pilih jenis order desain." });
@@ -185,6 +200,7 @@ export const orderSubmissionSchema = z
     briefDoc: briefDocField,
     driveUrl: driveUrlField,
     deadline: deadlineDateField,
+    deadlineTime: deadlineTimeField,
     priority: priorityCodeField.optional(),
     /** Kategori pekerjaan = tim penanggung jawab. */
     teamId: z.uuid({ error: "Pilih kategori pekerjaan." }),
@@ -199,6 +215,10 @@ export const orderSubmissionSchema = z
     // Tanggal deadline paling cepat hari ini (WIB).
     if (toDateKey(v.deadline) < toDateKey(new Date())) {
       ctx.addIssue({ code: "custom", path: ["deadline"], message: "Tanggal deadline tidak boleh sebelum hari ini." });
+    } else if (v.deadlineTime) {
+      const at = combineDeadline(v.deadline, v.deadlineTime);
+      if (!at) ctx.addIssue({ code: "custom", path: ["deadlineTime"], message: "Jam deadline tidak valid." });
+      else if (at.getTime() < Date.now()) ctx.addIssue({ code: "custom", path: ["deadlineTime"], message: "Waktu deadline sudah lewat." });
     }
   })
   .transform((v) => ({
@@ -216,7 +236,7 @@ export const orderSubmissionSchema = z
     brief: v.briefDoc.text,
     briefRich: v.briefDoc.doc,
     driveUrl: v.driveUrl,
-    deadlineAt: v.deadline,
+    deadlineAt: combineDeadline(v.deadline, v.deadlineTime) ?? v.deadline,
     /** null → default prioritas dari konfigurasi server. */
     priority: v.priority ?? null,
     title: v.title,
@@ -287,3 +307,21 @@ export const internalNotesSchema = z
     internalNotes: z.string().max(10000, "Catatan internal maksimal 10.000 karakter.").transform((v) => (v.trim() ? v : null)),
   })
   .strict();
+
+/** Perubahan deadline oleh Manager/Super Admin: tanggal + jam WIB (tanpa jam = 23.59) dan alasan wajib. */
+export const deadlineChangeSchema = z
+  .object({
+    deadlineDate: z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/, "Tanggal deadline tidak valid."),
+    deadlineTime: deadlineTimeField,
+    reason: requiredText("Alasan perubahan deadline", 5, 300),
+  })
+  .strict()
+  .transform((v, ctx) => {
+    const at = zonedLocalToUtc(`${v.deadlineDate}T${v.deadlineTime ?? "23:59"}`);
+    if (!at) {
+      ctx.addIssue({ code: "custom", path: ["deadlineDate"], message: "Tanggal deadline tidak valid." });
+      return z.NEVER;
+    }
+    return { deadlineAt: at, reason: v.reason };
+  });
+export type DeadlineChangeInput = z.output<typeof deadlineChangeSchema>;

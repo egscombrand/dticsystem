@@ -1,7 +1,7 @@
 import "server-only";
 import type postgres from "postgres";
 import { ORDERS_PAGE_SIZE } from "@/lib/config/app";
-import { addDaysToKey, dateKeyToUtcStart, toDateKey } from "@/lib/dates";
+import { addDaysToKey, dateKeyToUtcStart, formatDeadline, toDateKey } from "@/lib/dates";
 import { sql } from "@/lib/server/db";
 import { AppError, NotFoundError } from "@/lib/server/errors";
 import { FINISHED_STATUSES, type HistoryStatus, type OrderStatus } from "@/lib/status";
@@ -304,7 +304,7 @@ export async function getOrderDetail(id: string): Promise<OrderDetail | null> {
   const [attachments, history] = await Promise.all([
     db<{ id: string; file_name: string; mime_type: string; file_size: number; created_at: Date }[]>`
       select id, file_name, mime_type, file_size, created_at
-      from order_attachments where order_id = ${id} order by created_at, file_name`,
+      from order_attachments where order_id = ${id} and kind = 'reference' order by created_at, file_name`,
     db<{ id: string; previous_status: HistoryStatus | null; new_status: HistoryStatus; changed_at: Date; notes: string | null; changed_by_name: string | null; is_first: boolean }[]>`
       select h.id, h.previous_status, h.new_status, h.changed_at, h.notes, u.full_name as changed_by_name,
              h.previous_status is null as is_first
@@ -360,22 +360,33 @@ export async function getOrderDetail(id: string): Promise<OrderDetail | null> {
 
 export type NewAttachment = { fileName: string; storagePath: string; mimeType: string; fileSize: number };
 
-type CreatedOrderRow = { id: string; order_number: string; created_at: Date; deadline_at: Date; brand_name: string; design_type: string };
+type CreatedOrderRow = {
+  id: string; order_number: string; title: string; status: OrderStatus; created_at: Date; deadline_at: Date; brand_name: string; design_type: string;
+  attachment_count?: number;
+};
 
 function mapCreated(r: CreatedOrderRow) {
   return {
     id: r.id,
     orderNumber: r.order_number,
+    title: r.title,
+    status: r.status,
     createdAt: r.created_at.toISOString(),
     deadlineAt: r.deadline_at.toISOString(),
     brandName: r.brand_name,
     designType: r.design_type,
+    attachmentCount: r.attachment_count ?? 0,
   };
 }
 
+/**
+ * Tanda terima pengajuan dari kunci pengajuan (idempoten, hanya data yang sudah dilihat pemohon).
+ * Dipakai untuk pengiriman ulang, rekonsiliasi status setelah koneksi terputus, dan pengecekan status.
+ */
 export async function findOrderBySubmissionKey(key: string) {
   const rows = await sql()<CreatedOrderRow[]>`
-    select o.id, o.order_number, o.created_at, o.deadline_at, b.name as brand_name, o.design_type
+    select o.id, o.order_number, o.title, o.status, o.created_at, o.deadline_at, b.name as brand_name, o.design_type,
+           (select count(*)::int from order_attachments a where a.order_id = o.id and a.kind = 'reference') as attachment_count
     from orders o join brands b on b.id = o.brand_id where o.submission_key = ${key}`;
   return rows[0] ? mapCreated(rows[0]) : null;
 }
@@ -587,7 +598,7 @@ export async function insertOrder(orderId: string, input: OrderSubmissionInput, 
         ${type.id}, ${type.label}, ${input.designSize}, ${input.title}, ${input.brief},
         ${tx.json(input.briefRich as postgres.JSONValue)}, ${input.driveUrl ?? null}, ${input.deadlineAt}, ${priority}, 'assigned', ${input.teamId}
       )
-      returning id, order_number, created_at, deadline_at, ${brand[0].name}::text as brand_name, design_type`;
+      returning id, order_number, title, status, created_at, deadline_at, ${brand[0].name}::text as brand_name, design_type`;
     for (const a of attachments) {
       await tx`
         insert into order_attachments (order_id, file_name, storage_path, mime_type, file_size)
@@ -640,6 +651,40 @@ export async function updateOrder(id: string, input: OrderUpdateInput, actor: { 
       return { picOutboxId: pic.outboxId };
     }
     return { picOutboxId: null };
+  });
+}
+
+/** Ubah tenggat pekerjaan (Manager/Super Admin). Status tidak berubah; pekerjaan selesai/dibatalkan ditolak. */
+export async function changeOrderDeadline(
+  orderId: string,
+  deadlineAt: Date,
+  reason: string,
+  actor: { userId: string; name: string },
+): Promise<{ changed: boolean; previousDeadline: string; newDeadline: string }> {
+  return sql().begin(async (tx) => {
+    const [o] = await tx<{ order_number: string; title: string; status: OrderStatus; deadline_at: Date }[]>`
+      select order_number, title, status, deadline_at from orders where id = ${orderId} for update`;
+    if (!o) throw new NotFoundError("Order tidak ditemukan.");
+    if (FINISHED.includes(o.status)) {
+      throw new AppError("Pekerjaan sudah selesai atau dibatalkan; tenggat tidak dapat diubah.", 409, { deadlineDate: "Pekerjaan sudah ditutup." });
+    }
+    const previousDeadline = o.deadline_at.toISOString();
+    if (o.deadline_at.getTime() === deadlineAt.getTime()) return { changed: false, previousDeadline, newDeadline: previousDeadline };
+    await tx`update orders set deadline_at = ${deadlineAt} where id = ${orderId}`;
+    await tx`insert into auth_audit_log (actor_user_id, action, detail)
+      values (${actor.userId}, 'order_deadline_changed', ${tx.json({
+        orderId,
+        orderNumber: o.order_number,
+        title: o.title,
+        previousDeadline,
+        newDeadline: deadlineAt.toISOString(),
+        status: o.status,
+        reason,
+        actorUserId: actor.userId,
+        actorName: actor.name,
+        result: "ok",
+      })})`;
+    return { changed: true, previousDeadline, newDeadline: deadlineAt.toISOString() };
   });
 }
 
@@ -776,3 +821,40 @@ export async function updateClientInfo(id: string, info: { requesterMessage: str
   if (rows.length === 0) throw new NotFoundError("Order tidak ditemukan.");
 }
 
+
+export type OrderActivity = {
+  id: string;
+  kind: "pic" | "deadline";
+  at: string;
+  actorName: string | null;
+  summary: string;
+  /** Alasan internal; hanya ditampilkan untuk role yang melihat seluruh order. */
+  reason: string | null;
+};
+
+/**
+ * Aktivitas penugasan dan perubahan deadline dari audit log (sumber otoritatif), terbaru dulu.
+ * Riwayat status tetap dibaca dari order_status_history.
+ */
+export async function listOrderActivity(orderId: string): Promise<OrderActivity[]> {
+  const rows = await sql()<{ id: string; action: string; created_at: Date; actor_name: string | null; detail: Record<string, unknown> }[]>`
+    select l.id::text as id, l.action, l.created_at, u.full_name as actor_name, l.detail
+    from auth_audit_log l left join app_users u on u.id = l.actor_user_id
+    where l.action in ('order_pic_changed', 'order_deadline_changed') and l.detail->>'orderId' = ${orderId}
+    order by l.created_at desc, l.id desc
+    limit 30`;
+  const list = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+  return rows.map((r) => {
+    const d = r.detail;
+    const actorName = typeof d.actorName === "string" ? d.actorName : r.actor_name;
+    const reason = typeof d.reason === "string" ? d.reason : null;
+    if (r.action === "order_deadline_changed") {
+      const prev = typeof d.previousDeadline === "string" ? formatDeadline(d.previousDeadline) : "—";
+      const next = typeof d.newDeadline === "string" ? formatDeadline(d.newDeadline) : "—";
+      return { id: r.id, kind: "deadline" as const, at: r.created_at.toISOString(), actorName, summary: `Deadline diubah: ${prev} → ${next}`, reason };
+    }
+    const before = list(d.before).join(", ") || "—";
+    const after = list(d.after).join(", ") || "—";
+    return { id: r.id, kind: "pic" as const, at: r.created_at.toISOString(), actorName, summary: `PIC diubah: ${before} → ${after}`, reason };
+  });
+}

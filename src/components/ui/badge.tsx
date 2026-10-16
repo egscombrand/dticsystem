@@ -11,6 +11,7 @@ const tones: Record<StatusTone, string> = {
   success: "bg-ok-soft text-ok ring-[#cdeed9]",
   danger: "bg-bad-soft text-bad ring-[#fbd5d1]",
   muted: "bg-[#f4f5f7] text-ink-3 ring-[#e6e8eb]",
+  violet: "bg-brand-violet-soft text-[#5b21b6] ring-[#ddd6fe]",
 };
 
 const dots: Record<StatusTone, string> = {
@@ -21,6 +22,7 @@ const dots: Record<StatusTone, string> = {
   success: "bg-ok",
   danger: "bg-bad",
   muted: "bg-[#9aa1ad]",
+  violet: "bg-brand-violet",
 };
 
 export function Badge({ tone = "neutral", children, dot, className }: { tone?: StatusTone; children: ReactNode; dot?: boolean; className?: string }) {

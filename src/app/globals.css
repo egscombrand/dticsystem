@@ -132,3 +132,34 @@ dialog::backdrop {
   }
 }
 
+
+/* Visual form pengajuan (V2): warna brand tambahan dan animasi ringan. */
+@theme {
+  --color-brand-emerald: #10b981;
+  --color-brand-mint: #ecfdf5;
+  --color-brand-blue: #3b82f6;
+  --color-brand-sky: #eff6ff;
+  --color-brand-violet: #8b5cf6;
+  --color-brand-violet-soft: #f5f3ff;
+  --color-brand-deep: #115e59;
+}
+@keyframes form-rise {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes check-pop {
+  0% { opacity: 0; transform: scale(0.4); }
+  60% { opacity: 1; transform: scale(1.12); }
+  100% { opacity: 1; transform: scale(1); }
+}
+@keyframes glow-drift {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+  50% { transform: translate3d(14px, -10px, 0) scale(1.06); }
+}
+.form-rise { animation: form-rise 320ms ease-out both; }
+.step-panel { animation: form-rise 240ms ease-out both; }
+.check-pop { animation: check-pop 280ms ease-out both; }
+.hero-glow { animation: glow-drift 14s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .form-rise, .step-panel, .check-pop, .hero-glow { animation: none; }
+}

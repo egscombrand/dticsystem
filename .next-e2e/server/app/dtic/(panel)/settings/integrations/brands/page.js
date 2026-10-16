@@ -1,5 +1,5 @@
 var R=require("../../../../../../chunks/ssr/[turbopack]_runtime.js")("server/app/dtic/(panel)/settings/integrations/brands/page.js")
-R.c("server/chunks/ssr/[root-of-the-server]__19i1t7x9i55hu._.js")
+R.c("server/chunks/ssr/[root-of-the-server]__0z2v4qg_wn5zy._.js")
 R.c("server/chunks/ssr/node_modules_next_dist_esm_build_templates_app-page_0sd1-nu03r2f_.js")
 R.c("server/chunks/ssr/[root-of-the-server]__0h851raekexyy._.js")
 R.c("server/chunks/ssr/[root-of-the-server]__0272_7lx-l36l._.js")

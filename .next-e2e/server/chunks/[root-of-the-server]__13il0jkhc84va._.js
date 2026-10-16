@@ -1,0 +1,3 @@
+module.exports=[2157,(e,r,s)=>{r.exports=e.x("node:fs",()=>require("node:fs"))},12714,(e,r,s)=>{r.exports=e.x("node:fs/promises",()=>require("node:fs/promises"))},50227,(e,r,s)=>{r.exports=e.x("node:path",()=>require("node:path"))},26058,e=>{"use strict";let r=(process.env.DEFAULT_PRIORITY_CODE??"normal").trim()||"normal";e.s(["r",0,r,"c",0,function(){let e=Number(process.env.RESULT_UPLOAD_MAX_MB);return Math.floor(1024*(Number.isFinite(e)&&e>0?Math.min(e,200):process.env.VERCEL?4:25)*1024)}])}];
+
+//# sourceMappingURL=%5Broot-of-the-server%5D__13il0jkhc84va._.js.map

@@ -186,3 +186,20 @@ describe("kategori & PIC pilihan pemohon (anggota tim)", () => {
     expect(orderSubmissionSchema.safeParse({ ...valid, sizePreset: "na" }).success).toBe(true);
   });
 });
+
+describe("perubahan deadline & jam deadline pemohon", () => {
+  it("jam kosong = akhir hari 23.59 WIB; jam diisi dipakai sebagai WIB", async () => {
+    const { deadlineChangeSchema } = await import("@/lib/validation/order");
+    const endOfDay = deadlineChangeSchema.parse({ deadlineDate: "2099-01-01", reason: "Alasan cukup" });
+    expect(endOfDay.deadlineAt.toISOString()).toBe("2099-01-01T16:59:00.000Z");
+    const nine = deadlineChangeSchema.parse({ deadlineDate: "2099-01-01", deadlineTime: "09:30", reason: "Alasan cukup" });
+    expect(nine.deadlineAt.toISOString()).toBe("2099-01-01T02:30:00.000Z");
+  });
+  it("alasan pendek, tanggal tak valid, dan jam tak valid ditolak", async () => {
+    const { deadlineChangeSchema } = await import("@/lib/validation/order");
+    expect(deadlineChangeSchema.safeParse({ deadlineDate: "2099-01-01", reason: "abc" }).success).toBe(false);
+    expect(deadlineChangeSchema.safeParse({ deadlineDate: "2099-02-31", reason: "Alasan cukup" }).success).toBe(false);
+    expect(deadlineChangeSchema.safeParse({ deadlineDate: "2099-01-01", deadlineTime: "25:00", reason: "Alasan cukup" }).success).toBe(false);
+    expect(deadlineChangeSchema.safeParse({ deadlineDate: "2099-01-01", reason: "Alasan cukup", status: "completed" }).success).toBe(false);
+  });
+});

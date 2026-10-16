@@ -1,10 +1,11 @@
-import { AlertCircle, CheckCircle2, Info } from "lucide-react";
+import { AlertCircle, AlertTriangle, CheckCircle2, Info } from "lucide-react";
 import type { ReactNode } from "react";
 import { cn } from "@/components/ui/cn";
 
 const styles = {
   error: { box: "border-[#f6cfca] bg-bad-soft text-[#7a1a12]", icon: AlertCircle, iconCls: "text-bad" },
   success: { box: "border-[#c7ebd4] bg-ok-soft text-[#14532d]", icon: CheckCircle2, iconCls: "text-ok" },
+  warning: { box: "border-[#fbe2b8] bg-warn-soft text-[#7a4a06]", icon: AlertTriangle, iconCls: "text-warn" },
   info: { box: "border-line bg-subtle text-ink-2", icon: Info, iconCls: "text-ink-3" },
 };
 

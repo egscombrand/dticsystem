@@ -48,7 +48,7 @@ export async function getMemberWorkloads(filters: WorkloadFilters | string | nul
     from dtic_members m
     join dtic_departments d on d.id = m.department_id
     cross join lateral (
-      select count(*) filter (where o.status in ('submitted', 'assigned', 'in_progress', 'pending_confirmation'))::int as active,
+      select count(*) filter (where o.status in ('submitted', 'assigned', 'in_progress', 'pending_confirmation', 'internal_revision', 'awaiting_requester'))::int as active,
              count(*) filter (where o.status = 'in_progress')::int as in_progress,
              count(*) filter (where o.status = 'pending_confirmation')::int as pending,
              count(*) filter (where o.status = 'on_hold')::int as on_hold,
