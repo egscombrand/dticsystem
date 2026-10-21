@@ -1,4 +1,3 @@
-import { after } from "next/server";
 import { authorize, canAccessOrder } from "@/lib/server/auth";
 import { AppError, NotFoundError } from "@/lib/server/errors";
 import { assertSameOrigin, assertUuid, errorResponse, json, readJson } from "@/lib/server/http";
@@ -28,10 +27,8 @@ export async function POST(request: Request, ctx: RouteContext<"/api/internal/or
     // terputus) — mis. bentrok dengan migrasi yang sedang berjalan. Transaksi yang gagal sudah rollback
     // total; validasi, permission, dan aturan transisi TIDAK pernah membuat kode ini, jadi tidak diulang.
     const result = await withTransientRetry(() => applyWorkflowAction(id, parsed.data, { userId: s.userId, name: s.name, role: s.role, memberId: s.memberId }));
-    if (result.outboxId) {
-      const outboxId = result.outboxId;
-      after(() => notifyOutbox(outboxId));
-    }
+    // Fire-and-forget (lihat catatan di src/app/api/internal/orders/[id]/route.ts) — bukan after() Next.js.
+    if (result.outboxId) void notifyOutbox(result.outboxId).catch(() => {});
     return json({ ok: true, changed: result.changed, duplicate: result.duplicate, status: result.status });
   } catch (error) {
     return errorResponse(error, "POST order workflow");

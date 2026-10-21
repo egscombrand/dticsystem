@@ -1,4 +1,5 @@
 import { addDaysToKey, dateKeyToUtcStart, isDateKey } from "@/lib/dates";
+import { QC_STATUSES, type QcStatus } from "@/lib/qc";
 import { isOrderStatus } from "@/lib/status";
 import type { OrderStatus } from "@/lib/status";
 
@@ -33,6 +34,11 @@ export function statusListParam(sp: RawSearchParams, key = "status"): OrderStatu
 export function priorityParam(sp: RawSearchParams, key = "priority"): string | undefined {
   const v = first(sp, key);
   return v && /^[a-z][a-z0-9_]{1,29}$/.test(v) ? v : undefined;
+}
+
+export function qcStatusParam(sp: RawSearchParams, key = "qc"): QcStatus | undefined {
+  const v = first(sp, key);
+  return (QC_STATUSES as readonly string[]).includes(v ?? "") ? (v as QcStatus) : undefined;
 }
 
 export function enumParam<T extends string>(sp: RawSearchParams, key: string, values: readonly T[]): T | undefined {

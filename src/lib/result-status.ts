@@ -49,3 +49,21 @@ export function latestResultIds(events: Ev[]): string[] {
   const e = events.find((x) => ["qc_approved", "qc_submitted", "delivery_recorded"].includes(x.kind) && Array.isArray(x.detail.resultFileIds) && (x.detail.resultFileIds as unknown[]).length > 0);
   return e ? (e.detail.resultFileIds as string[]) : [];
 }
+
+/** Sama seperti latestResultIds tapi untuk link hasil (lihat order_result_links). */
+export function latestResultLinkIds(events: Ev[]): string[] {
+  const e = events.find((x) => ["qc_approved", "qc_submitted", "delivery_recorded"].includes(x.kind) && Array.isArray(x.detail.resultLinkIds) && (x.detail.resultLinkIds as unknown[]).length > 0);
+  return e ? (e.detail.resultLinkIds as string[]) : [];
+}
+
+/** true bila link ini pernah dirujuk di peristiwa penyerahan/persetujuan mana pun — link yang sudah
+ *  diserahkan tidak boleh dihapus (sama seperti aturan file hasil, lihat resultFileHistory). */
+export function resultLinksUsed(linkIds: string[], events: Ev[]): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  for (const id of linkIds) out[id] = false;
+  for (const e of events) {
+    const ids = Array.isArray(e.detail.resultLinkIds) ? (e.detail.resultLinkIds as unknown[]).filter((x): x is string => typeof x === "string") : [];
+    for (const id of ids) if (id in out) out[id] = true;
+  }
+  return out;
+}

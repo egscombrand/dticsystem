@@ -11,6 +11,7 @@ const text = (label: string, max: number) =>
     .transform((v) => v ?? null);
 
 const resultFileIds = z.array(z.uuid({ error: "File hasil tidak valid." })).max(10, "Maksimal 10 file hasil per penyerahan.").optional();
+const resultLinkIds = z.array(z.uuid({ error: "Link hasil tidak valid." })).max(10, "Maksimal 10 link hasil per penyerahan.").optional();
 const requestKey = z.uuid({ error: "Kunci permintaan tidak valid." }).optional();
 const URL_RE = /^https?:\/\/[^\s]+$/i;
 
@@ -37,6 +38,7 @@ export const workflowActionSchema = z.discriminatedUnion("action", [
     stage: z.enum(DELIVERY_STAGES, { error: "Tahap tidak valid." }).optional(),
     link: optionalLink,
     resultFileIds,
+    resultLinkIds,
     note: text("Catatan", 1000),
     requestKey,
   }),
@@ -60,6 +62,7 @@ export const workflowActionSchema = z.discriminatedUnion("action", [
     channel: z.enum(HANDOVER_CHANNELS, { error: "Media penyerahan tidak valid." }).optional(),
     link: optionalLink,
     resultFileIds,
+    resultLinkIds,
     note: text("Catatan pengiriman", 1000),
     sentAt: z.iso.datetime({ offset: true, error: "Waktu pengiriman tidak valid." }).optional(),
     requestKey,
@@ -70,6 +73,6 @@ export const workflowActionSchema = z.discriminatedUnion("action", [
     note: z.string({ error: "Ringkasan masukan pemohon wajib diisi." }).trim().min(1, "Ringkasan masukan pemohon wajib diisi.").max(1000, "Ringkasan maksimal 1000 karakter."),
     requestKey,
   }),
-  z.strictObject({ action: z.literal("complete"), note: text("Catatan penyelesaian", 1000), link: optionalLink, resultFileIds, requestKey }),
+  z.strictObject({ action: z.literal("complete"), note: text("Catatan penyelesaian", 1000), link: optionalLink, resultFileIds, resultLinkIds, requestKey }),
 ]);
 export type WorkflowActionInput = z.output<typeof workflowActionSchema>;

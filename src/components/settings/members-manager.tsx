@@ -10,6 +10,7 @@ import { Card, CardHeader } from "@/components/ui/card";
 import { cn } from "@/components/ui/cn";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Select } from "@/components/ui/form";
+import { TableScroll } from "@/components/ui/table-scroll";
 import { ApiError, internalRequest } from "@/lib/client/api";
 import { ROLE_LABEL, isRole } from "@/lib/auth/permissions";
 import { ENTITY_DEFS, type MasterRow } from "@/lib/master-data";
@@ -138,8 +139,8 @@ export function MembersManager({ rows, departments, readOnly }: { rows: MasterRo
       ) : filtered.length === 0 ? (
         <p className="p-6 text-sm text-ink-3">Tidak ada anggota yang cocok dengan pencarian atau filter.</p>
       ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[720px] text-left text-sm">
+        <TableScroll minWidthPx={720}>
+          <table className="w-full text-left text-sm">
             <thead className="border-b border-line text-xs uppercase tracking-wide text-ink-3">
               <tr>
                 <th scope="col" className="px-5 py-3 font-medium">Nama anggota</th>
@@ -240,7 +241,7 @@ export function MembersManager({ rows, departments, readOnly }: { rows: MasterRo
               })}
             </tbody>
           </table>
-        </div>
+        </TableScroll>
       )}
     </Card>
   );

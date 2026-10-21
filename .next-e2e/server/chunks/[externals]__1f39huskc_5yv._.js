@@ -1,3 +1,0 @@
-module.exports=[54799,(e,r,s)=>{r.exports=e.x("crypto",()=>require("crypto"))},22734,(e,r,s)=>{r.exports=e.x("fs",()=>require("fs"))},4446,(e,r,s)=>{r.exports=e.x("net",()=>require("net"))},46786,(e,r,s)=>{r.exports=e.x("os",()=>require("os"))},60438,(e,r,s)=>{r.exports=e.x("perf_hooks",()=>require("perf_hooks"))},88947,(e,r,s)=>{r.exports=e.x("stream",()=>require("stream"))},55004,(e,r,s)=>{r.exports=e.x("tls",()=>require("tls"))}];
-
-//# sourceMappingURL=%5Bexternals%5D__1f39huskc_5yv._.js.map

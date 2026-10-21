@@ -1,6 +1,6 @@
 "use client";
 
-import { CheckCircle2, ExternalLink, FileUp, FolderOpen, KeyRound, MessageCircle, MessageSquareReply, Paperclip, Send, ShieldCheck, Undo2, UserCheck, Users } from "lucide-react";
+import { CheckCircle2, ExternalLink, FileUp, FolderOpen, KeyRound, Link2, MessageCircle, MessageSquareReply, Paperclip, Plus, Send, ShieldCheck, Undo2, UserCheck, Users } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useId, useRef, useState } from "react";
 import { Alert } from "@/components/ui/alert";
@@ -15,6 +15,7 @@ import { formatFileSize } from "@/lib/files";
 import { ResultUploader, type UploadedResult } from "@/components/orders/result-uploader";
 
 export type ExistingResult = { id: string; fileName: string; fileSize: number; statusLabel: string };
+export type ExistingLink = { id: string; title: string; url: string };
 
 type Dialog = "handover" | Exclude<WorkflowAction, "submit_qc" | "record_delivery"> | null;
 type Destination = "manager" | "requester";
@@ -44,6 +45,8 @@ export function QcFlowActions({
   maxResultBytes,
   existingResults,
   defaultResultIds,
+  resultLinks,
+  defaultResultLinkIds,
 }: {
   orderId: string;
   orderTitle: string;
@@ -58,6 +61,9 @@ export function QcFlowActions({
   existingResults: ExistingResult[];
   /** File dari penyerahan/persetujuan terakhir: dipilih otomatis sebagai referensi. */
   defaultResultIds: string[];
+  /** Link hasil (website/repo/hosting) — pelengkap atau pengganti file untuk hasil yang bukan dokumen. */
+  resultLinks: ExistingLink[];
+  defaultResultLinkIds: string[];
 }) {
   const router = useRouter();
   const uid = useId();
@@ -85,6 +91,39 @@ export function QcFlowActions({
   const [uploaderKey, setUploaderKey] = useState(0);
   const resultIds = attachMode === "existing" ? [...picked] : attachMode === "upload" ? uploaded.map((u) => u.id) : [];
 
+  // Link hasil (website/repo/hosting) — TERPISAH dari mode lampiran file: bisa dikombinasikan dengan file.
+  const [links, setLinks] = useState<ExistingLink[]>(resultLinks);
+  const [pickedLinks, setPickedLinks] = useState<Set<string>>(() => new Set());
+  const [addLinkOpen, setAddLinkOpen] = useState(false);
+  const [newLinkUrl, setNewLinkUrl] = useState("");
+  const [newLinkTitle, setNewLinkTitle] = useState("");
+  const [newLinkDescription, setNewLinkDescription] = useState("");
+  const [addingLink, setAddingLink] = useState(false);
+  const [linkError, setLinkError] = useState<string | null>(null);
+  const linkIds = [...pickedLinks];
+
+  async function addLink() {
+    setAddingLink(true);
+    setLinkError(null);
+    try {
+      const r = await internalRequest<{ link: ExistingLink }>(`/api/internal/orders/${orderId}/result-links`, "POST", {
+        url: newLinkUrl.trim(),
+        title: newLinkTitle.trim(),
+        description: newLinkDescription.trim() || undefined,
+      });
+      setLinks((prev) => [r.link, ...prev]);
+      setPickedLinks((prev) => new Set(prev).add(r.link.id));
+      setNewLinkUrl("");
+      setNewLinkTitle("");
+      setNewLinkDescription("");
+      setAddLinkOpen(false);
+    } catch (err) {
+      setLinkError(err instanceof ApiError ? err.message : "Link belum tersimpan. Coba lagi.");
+    } finally {
+      setAddingLink(false);
+    }
+  }
+
   const canManager = actions.includes("submit_qc");
   const canRequester = actions.includes("record_delivery");
 
@@ -107,6 +146,13 @@ export function QcFlowActions({
     setPicked(new Set(defaults));
     setAttachMode(defaults.length > 0 ? "existing" : "none");
     setUploaderKey((k) => k + 1);
+    setLinks(resultLinks);
+    setPickedLinks(new Set(defaultResultLinkIds.filter((id) => resultLinks.some((l) => l.id === id))));
+    setAddLinkOpen(false);
+    setNewLinkUrl("");
+    setNewLinkTitle("");
+    setNewLinkDescription("");
+    setLinkError(null);
     setDest(next === "handover" && canManager !== canRequester ? (canManager ? "manager" : "requester") : null);
     setDialog(next);
   }
@@ -126,16 +172,16 @@ export function QcFlowActions({
       const common = { link: link.trim() || undefined, note: note.trim() || undefined, stage: stage || undefined };
       body =
         dest === "manager"
-          ? resultIds.length > 0
-            ? { action: "submit_qc", method: "in_app", resultFileIds: resultIds, handedAt: wibToIso(handedAt), ...common }
+          ? resultIds.length > 0 || linkIds.length > 0
+            ? { action: "submit_qc", method: "in_app", resultFileIds: resultIds, resultLinkIds: linkIds, handedAt: wibToIso(handedAt), ...common }
             : { action: "submit_qc", method: "external", channel: channel || undefined, recipient: recipient.trim() || undefined, handedAt: wibToIso(handedAt), ...common }
-          : { action: "record_delivery", confirmSent, channel: channel || undefined, resultFileIds: resultIds, sentAt: wibToIso(handedAt), ...common };
+          : { action: "record_delivery", confirmSent, channel: channel || undefined, resultFileIds: resultIds, resultLinkIds: linkIds, sentAt: wibToIso(handedAt), ...common };
       done = dest === "manager" ? "Hasil diajukan ke Manager untuk diperiksa." : "Penyerahan ke pemohon tercatat.";
     } else if (dialog === "record_feedback") {
       body = { action: dialog, needsRevision, note: note.trim() };
       done = "Masukan pemohon tercatat.";
     } else if (dialog === "complete") {
-      body = { action: dialog, note: note.trim() || undefined, link: link.trim() || undefined, resultFileIds: resultIds };
+      body = { action: dialog, note: note.trim() || undefined, link: link.trim() || undefined, resultFileIds: resultIds, resultLinkIds: linkIds };
       done = "Pekerjaan diselesaikan.";
     } else {
       body = { action: dialog, note: note.trim() || undefined };
@@ -162,8 +208,9 @@ export function QcFlowActions({
     if (dialog === "handover") {
       if (dest === "manager") {
         if (!linkOk) return false;
-        // Dengan lampiran → file di DTIC Nexus; tanpa lampiran → keterangan penyerahan di luar aplikasi wajib.
-        return resultIds.length > 0 || (channel !== "" && note.trim().length >= EXTERNAL_NOTE_MIN);
+        // Dengan lampiran (file ATAU link) → sudah ada hasil yang dapat ditinjau di DTIC Nexus; tanpa
+        // keduanya → keterangan penyerahan di luar aplikasi wajib.
+        return resultIds.length > 0 || linkIds.length > 0 || (channel !== "" && note.trim().length >= EXTERNAL_NOTE_MIN);
       }
       if (dest === "requester") return confirmSent && linkOk;
       return false;
@@ -192,11 +239,17 @@ export function QcFlowActions({
   const primary = actions.filter((a) => a !== "record_delivery");
 
   const selectedCount = resultIds.length;
+  const selectedLinkCount = linkIds.length;
+  const hasAttachment = selectedCount > 0 || selectedLinkCount > 0;
   const resultsBlock = (
     <section className="flex flex-col gap-3 rounded-xl border border-line p-4" aria-labelledby={`${uid}-att`} data-testid="attachments">
       <div>
         <h3 id={`${uid}-att`} className="flex items-center gap-2 text-sm font-semibold text-ink"><Paperclip className="size-4 text-ink-2" aria-hidden="true" /> Lampiran hasil (opsional)</h3>
-        <p className="mt-1 text-[13px] leading-relaxed text-ink-2">Jika file sudah dikirim melalui WhatsApp, email, atau media lain, Anda tidak perlu mengunggahnya kembali. Lampirkan file di sini hanya jika perlu menyimpan salinan di DTIC Nexus.</p>
+        <p className="mt-1 text-[13px] leading-relaxed text-ink-2">
+          {dest === "manager"
+            ? "Lampirkan file dan/atau link hasil agar Manager dapat memeriksanya langsung di DTIC Nexus. Lewati hanya bila hasil sudah dibagikan ke Manager lewat kanal lain — jelaskan di catatan penyerahan."
+            : "Jika file sudah dikirim melalui WhatsApp, email, atau media lain, Anda tidak perlu mengunggahnya kembali. Lampirkan file di sini hanya jika perlu menyimpan salinan di DTIC Nexus."}
+        </p>
       </div>
       <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Cara melampirkan file">
         {([
@@ -227,7 +280,50 @@ export function QcFlowActions({
         <ResultUploader key={uploaderKey} orderId={orderId} maxBytes={maxResultBytes} disabled={busy} onChange={(list, isBusy) => { setUploaded(list); setUploading(isBusy); }} />
         <p className="mt-2 text-xs text-ink-2">File baru tersimpan privat sebagai draf sampai Anda mengonfirmasi. Menyimpan file belum berarti hasil sudah diserahkan.</p>
       </div>
-      <p className="text-[13px] text-ink-2" data-testid="attachments-summary">{selectedCount > 0 ? `${selectedCount} file akan dikaitkan dengan penyerahan ini.` : "Tidak ada file yang dilampirkan."}</p>
+
+      {/* Link hasil — TERPISAH dari mode lampiran file di atas (bisa dikombinasikan): untuk hasil yang
+          bukan dokumen, mis. website yang sudah online, repo, atau hosting lain. */}
+      <div className="border-t border-line pt-3">
+        <h4 className="flex items-center gap-2 text-sm font-semibold text-ink"><Link2 className="size-4 text-ink-2" aria-hidden="true" /> Link hasil (opsional)</h4>
+        <p className="mt-1 text-[13px] text-ink-2">Untuk hasil yang bukan dokumen, mis. website yang sudah online — tidak perlu diunggah sebagai ZIP.</p>
+        {links.length > 0 && (
+          <fieldset className="mt-2 flex flex-col gap-1.5" disabled={busy}>
+            <legend className="sr-only">Link yang sudah tersimpan</legend>
+            {links.map((l) => (
+              <label key={l.id} className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-ink hover:bg-subtle">
+                <input type="checkbox" className="size-4 accent-[#0f766e]" checked={pickedLinks.has(l.id)} onChange={(e) => setPickedLinks((prev) => { const n = new Set(prev); if (e.target.checked) n.add(l.id); else n.delete(l.id); return n; })} />
+                <span className="min-w-0 flex-1 truncate" title={l.url}>{l.title}</span>
+              </label>
+            ))}
+          </fieldset>
+        )}
+        {addLinkOpen ? (
+          <div className="mt-2 flex flex-col gap-2 rounded-lg border border-line-strong p-3">
+            <Field label="URL Hasil" htmlFor={`${uid}-lurl`} hint="Wajib https://.">
+              <Input id={`${uid}-lurl`} type="url" inputMode="url" placeholder="https://" value={newLinkUrl} onChange={(e) => setNewLinkUrl(e.target.value)} disabled={addingLink} />
+            </Field>
+            <Field label="Nama/Judul Hasil" htmlFor={`${uid}-ltitle`}>
+              <Input id={`${uid}-ltitle`} value={newLinkTitle} onChange={(e) => setNewLinkTitle(e.target.value)} maxLength={200} disabled={addingLink} />
+            </Field>
+            <Field label="Keterangan" htmlFor={`${uid}-ldesc`} hint="Opsional.">
+              <Textarea id={`${uid}-ldesc`} value={newLinkDescription} onChange={(e) => setNewLinkDescription(e.target.value)} maxLength={1000} disabled={addingLink} className="min-h-16" />
+            </Field>
+            {linkError && <p role="alert" className="text-sm text-bad">{linkError}</p>}
+            <div className="flex gap-2">
+              <Button size="sm" onClick={addLink} loading={addingLink} disabled={!newLinkUrl.trim() || !newLinkTitle.trim()}>Tambah Link</Button>
+              <Button size="sm" variant="ghost" onClick={() => setAddLinkOpen(false)} disabled={addingLink}>Batal</Button>
+            </div>
+          </div>
+        ) : (
+          <Button size="sm" variant="secondary" className="mt-2" icon={<Plus className="size-3.5" aria-hidden="true" />} onClick={() => setAddLinkOpen(true)} disabled={busy}>Tambah Link</Button>
+        )}
+      </div>
+
+      <p className="text-[13px] text-ink-2" data-testid="attachments-summary">
+        {selectedCount > 0 || selectedLinkCount > 0
+          ? [selectedCount > 0 ? `${selectedCount} file` : null, selectedLinkCount > 0 ? `${selectedLinkCount} link` : null].filter(Boolean).join(" + ") + " akan dikaitkan dengan penyerahan ini."
+          : "Tidak ada file atau link yang dilampirkan."}
+      </p>
     </section>
   );
 
@@ -273,21 +369,31 @@ export function QcFlowActions({
 
           {dialog === "handover" && (
             <>
-              <fieldset className="grid gap-3 sm:grid-cols-2" disabled={busy}>
-                <legend className="mb-2 text-sm font-semibold text-ink">Tujuan penyerahan</legend>
-                {([
-                  ["manager", "Ke Manager", "Serahkan hasil untuk pemeriksaan QC oleh Manager.", Users, canManager],
-                  ["requester", "Langsung ke Pemohon", "Catat penyerahan hasil langsung kepada pemohon tanpa melalui QC Manager.", UserCheck, canRequester],
-                ] as const).map(([value, label, hint, Icon, enabled]) => (
-                  <label key={value} className={cn("flex cursor-pointer gap-3 rounded-xl border-2 p-4 transition-colors motion-reduce:transition-none", dest === value ? "border-accent bg-accent-soft" : "border-line hover:border-line-strong", !enabled && "cursor-not-allowed opacity-50")}>
-                    <input type="radio" name={`${uid}-dest`} value={value} checked={dest === value} disabled={!enabled} onChange={() => setDest(value)} className="mt-1 accent-[#0f766e]" />
-                    <span>
-                      <span className="flex items-center gap-2 font-semibold text-ink"><Icon className="size-4 text-accent" aria-hidden="true" /> {label}</span>
-                      <span className="mt-0.5 block text-sm text-ink-2">{hint}</span>
-                    </span>
-                  </label>
-                ))}
-              </fieldset>
+              {/* Pilihan tujuan HANYA ditampilkan bila keduanya benar-benar tersedia — bila cuma satu jalur
+                  yang mungkin (kasus paling umum: hanya "Ke Manager"), tampilkan pernyataan statis saja
+                  agar dialog tidak menyodorkan pilihan yang sebenarnya bukan pilihan. */}
+              {canManager && canRequester ? (
+                <fieldset className="grid gap-3 sm:grid-cols-2" disabled={busy}>
+                  <legend className="mb-2 text-sm font-semibold text-ink">Tujuan penyerahan</legend>
+                  {([
+                    ["manager", "Ke Manager", "Serahkan hasil untuk pemeriksaan QC oleh Manager.", Users, canManager],
+                    ["requester", "Langsung ke Pemohon", "Catat penyerahan hasil langsung kepada pemohon tanpa melalui QC Manager.", UserCheck, canRequester],
+                  ] as const).map(([value, label, hint, Icon, enabled]) => (
+                    <label key={value} className={cn("flex cursor-pointer gap-3 rounded-xl border-2 p-4 transition-colors motion-reduce:transition-none", dest === value ? "border-accent bg-accent-soft" : "border-line hover:border-line-strong", !enabled && "cursor-not-allowed opacity-50")}>
+                      <input type="radio" name={`${uid}-dest`} value={value} checked={dest === value} disabled={!enabled} onChange={() => setDest(value)} className="mt-1 accent-[#0f766e]" />
+                      <span>
+                        <span className="flex items-center gap-2 font-semibold text-ink"><Icon className="size-4 text-accent" aria-hidden="true" /> {label}</span>
+                        <span className="mt-0.5 block text-sm text-ink-2">{hint}</span>
+                      </span>
+                    </label>
+                  ))}
+                </fieldset>
+              ) : (
+                <p className="flex items-center gap-2 text-sm font-medium text-ink">
+                  {dest === "manager" ? <Users className="size-4 text-accent" aria-hidden="true" /> : <UserCheck className="size-4 text-accent" aria-hidden="true" />}
+                  Diajukan ke {dest === "manager" ? "Manager" : "Pemohon"}
+                </p>
+              )}
 
               {dest && (
                 <section className="rounded-xl bg-subtle p-4 text-sm" aria-label="Informasi tujuan" data-testid={dest === "manager" ? "qc-manager-recipient" : "qc-whatsapp"}>
@@ -319,7 +425,51 @@ export function QcFlowActions({
                 </section>
               )}
 
-              {dest && (
+              {/* Ke Manager: hanya field yang relevan untuk pemeriksaan QC internal (media/catatan HANYA
+                  muncul sebagai jalan keluar bila PIC benar-benar tidak melampirkan file di sini — mis.
+                  sudah dibagikan ke Manager lewat kanal lain). Tahap/Waktu/Penerima/Tautan eksternal (field
+                  pencatatan serah-terima) hanya relevan untuk penyerahan LANGSUNG ke pemohon, lihat di bawah. */}
+              {dest === "manager" && (
+                <section className="flex flex-col gap-4" aria-labelledby={`${uid}-info`}>
+                  <h3 id={`${uid}-info`} className="text-sm font-semibold text-ink">Informasi penyerahan</h3>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    {hasAttachment ? (
+                      <div className="sm:col-span-2">
+                        <span className="mb-1.5 block text-sm font-medium text-ink">Media penyerahan</span>
+                        <p className="flex items-center gap-2 rounded-xl border border-line bg-subtle px-3 py-2.5 text-sm text-ink">
+                          <Paperclip className="size-4 text-accent" aria-hidden="true" /> {HANDOVER_CHANNEL_LABEL.dtic_nexus}
+                          <span className="text-[13px] text-ink-2">— file/link disimpan dan statusnya dilacak langsung di sini.</span>
+                        </p>
+                      </div>
+                    ) : (
+                      <Field
+                        label="Media penyerahan"
+                        htmlFor={`${uid}-ch`}
+                        required
+                        error={fieldError.channel}
+                        hint="Wajib bila tidak melampirkan file atau link."
+                      >
+                        <Select id={`${uid}-ch`} value={channel} onChange={(e) => setChannel(e.target.value as HandoverChannel | "")} disabled={busy}>
+                          <option value="">Pilih media</option>
+                          {HANDOVER_CHANNELS.map((c) => <option key={c} value={c}>{HANDOVER_CHANNEL_LABEL[c]}</option>)}
+                        </Select>
+                      </Field>
+                    )}
+                    <Field
+                      label="Catatan penyerahan (internal)"
+                      htmlFor={`${uid}-note`}
+                      required={!hasAttachment}
+                      error={fieldError.note}
+                      hint={`Catatan ini digunakan untuk komunikasi internal antara PIC, manager, dan reviewer QC. Jangan masukkan informasi yang ditujukan khusus untuk pemohon.${!hasAttachment ? ` Wajib (minimal ${EXTERNAL_NOTE_MIN} karakter) bila tidak melampirkan file/link, mis. "Sudah dikirim ke WhatsApp Manager".` : ""}`}
+                      className={hasAttachment ? "sm:col-span-2" : undefined}
+                    >
+                      <Textarea id={`${uid}-note`} value={note} onChange={(e) => setNote(e.target.value)} maxLength={1000} disabled={busy} className="min-h-20" />
+                    </Field>
+                  </div>
+                </section>
+              )}
+
+              {dest === "requester" && (
                 <section className="flex flex-col gap-4" aria-labelledby={`${uid}-info`}>
                   <h3 id={`${uid}-info`} className="text-sm font-semibold text-ink">Informasi penyerahan</h3>
                   <div className="grid gap-4 sm:grid-cols-2">
@@ -332,34 +482,17 @@ export function QcFlowActions({
                     <Field label="Waktu penyerahan (WIB)" htmlFor={`${uid}-at`} error={fieldError.handedAt ?? fieldError.sentAt} hint="Kosongkan bila tidak diketahui. Waktu pencatatan disimpan terpisah.">
                       <Input id={`${uid}-at`} type="datetime-local" value={handedAt} onChange={(e) => setHandedAt(e.target.value)} disabled={busy} />
                     </Field>
-                    <Field
-                      label="Media penyerahan"
-                      htmlFor={`${uid}-ch`}
-                      required={dest === "manager" && selectedCount === 0}
-                      error={fieldError.channel}
-                      hint={dest === "manager" ? (selectedCount === 0 ? "Wajib bila tidak melampirkan file." : "Opsional; file dilampirkan di DTIC Nexus.") : "Opsional."}
-                    >
+                    <Field label="Media penyerahan" htmlFor={`${uid}-ch`} error={fieldError.channel} hint="Opsional.">
                       <Select id={`${uid}-ch`} value={channel} onChange={(e) => setChannel(e.target.value as HandoverChannel | "")} disabled={busy}>
                         <option value="">Pilih media</option>
-                        {HANDOVER_CHANNELS.map((c) => <option key={c} value={c}>{dest === "requester" && c === "direct" ? "Langsung kepada pemohon" : HANDOVER_CHANNEL_LABEL[c]}</option>)}
+                        {HANDOVER_CHANNELS.map((c) => <option key={c} value={c}>{c === "direct" ? "Langsung kepada pemohon" : HANDOVER_CHANNEL_LABEL[c]}</option>)}
                       </Select>
                     </Field>
-                    {dest === "manager" ? (
-                      <Field label="Penerima" htmlFor={`${uid}-rcp`} hint="Bila diketahui.">
-                        <Input id={`${uid}-rcp`} value={recipient} onChange={(e) => setRecipient(e.target.value)} maxLength={120} disabled={busy} />
-                      </Field>
-                    ) : <div className="hidden sm:block" />}
+                    <div className="hidden sm:block" />
                     <Field label="Tautan eksternal yang diserahkan" htmlFor={`${uid}-link`} error={fieldError.link} hint="Opsional." className="sm:col-span-2">
                       <Input id={`${uid}-link`} type="url" inputMode="url" placeholder="https://" value={link} onChange={(e) => setLink(e.target.value)} disabled={busy} />
                     </Field>
-                    <Field
-                      label="Catatan penyerahan (internal)"
-                      htmlFor={`${uid}-note`}
-                      required={dest === "manager" && selectedCount === 0}
-                      error={fieldError.note}
-                      hint={`Tidak terlihat oleh pemohon.${dest === "manager" && selectedCount === 0 ? ` Wajib (minimal ${EXTERNAL_NOTE_MIN} karakter) bila tidak melampirkan file, mis. "Sudah dikirim ke WhatsApp Manager".` : ""}`}
-                      className="sm:col-span-2"
-                    >
+                    <Field label="Catatan penyerahan (internal)" htmlFor={`${uid}-note`} error={fieldError.note} hint="Tidak terlihat oleh pemohon." className="sm:col-span-2">
                       <Textarea id={`${uid}-note`} value={note} onChange={(e) => setNote(e.target.value)} maxLength={1000} disabled={busy} className="min-h-20" />
                     </Field>
                   </div>

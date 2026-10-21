@@ -1,0 +1,3 @@
+module.exports=[10939,a=>{"use strict";a.i(68504),a.s(["l",0,{not_configured:"Belum dikonfigurasi",config_invalid:"Konfigurasi tidak lengkap atau tidak valid",ready_untested:"Konfigurasi siap, belum diuji",test_failed:"Pengujian koneksi gagal",connected_inactive:"Koneksi berhasil, integrasi belum diaktifkan",active:"Integrasi aktif",active_config_broken:"Integrasi aktif, tetapi konfigurasi sekarang bermasalah"},"M",0,{not_configured:"neutral",config_invalid:"warning",ready_untested:"info",test_failed:"danger",connected_inactive:"warning",active:"success",active_config_broken:"danger"},"u",0,{pending:"Menunggu diunggah ke Drive",synced:"Tersimpan di Google Drive",failed:"Gagal disinkronkan ke Drive"}])}];
+
+//# sourceMappingURL=src_lib_drive_ts_0-p2e3lmxkyia._.js.map

@@ -1,4 +1,3 @@
-import { after } from "next/server";
 import { AppError } from "@/lib/server/errors";
 import { assertSameOrigin, assertUuid, errorResponse, json, readJson } from "@/lib/server/http";
 import { authorize } from "@/lib/server/auth";
@@ -29,17 +28,14 @@ export async function PUT(request: Request, ctx: RouteContext<"/api/internal/ord
       actorName: auth.session.name,
       source: "pic_panel",
     });
-    if (result.outboxId) {
-      const picOutboxId = result.outboxId;
-      after(() => notifyOutbox(picOutboxId));
-    }
+    // Fire-and-forget (lihat catatan di src/app/api/internal/orders/[id]/route.ts): tidak memakai after()
+    // Next.js — server Node.js persisten, dan after() di versi Next.js ini pernah terbukti membuat proses
+    // berhenti merespons di bawah beban permintaan beruntun (lihat audit E2E).
+    if (result.outboxId) void notifyOutbox(result.outboxId).catch(() => {});
     if (result.changed && (await getOrderStatus(id)) === "submitted") {
       const s = auth.session;
       const changed = await changeOrderStatus(id, "assigned", "PIC ditetapkan oleh Super Admin.", { userId: s.userId, role: s.role, memberId: s.memberId });
-      if (changed.changed && changed.outboxId) {
-        const outboxId = changed.outboxId;
-        after(() => notifyOutbox(outboxId));
-      }
+      if (changed.changed && changed.outboxId) void notifyOutbox(changed.outboxId).catch(() => {});
     }
     // Status penyimpanan PIC dan status notifikasi dilaporkan terpisah.
     return json({ ok: true, changed: result.changed, operation: result.operation, assignees: result.after, notification: result.notification });

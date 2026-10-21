@@ -399,7 +399,13 @@ export function AppFrame({ role, name, menu, systemName, tagline, defaultCollaps
       )}
 
       <main className={cn(mounted && "transition-[padding] duration-200", collapsed ? "lg:pl-[76px]" : "lg:pl-64")}>
-        <div className="mx-auto w-full max-w-[1400px] px-4 py-6 sm:px-6 sm:py-8 lg:px-10">{children}</div>
+        {/* Lebar maksimum ikut `collapsed` (state sidebar yang sudah ada, bukan state baru): sidebar
+           tertutup membebaskan ruang, jadi konten (termasuk tabel lebar) boleh memakainya. Keduanya kelas
+           Tailwind tetap (bukan nilai px dari JS), jadi tidak ada pengukuran — murni CSS mengikuti padding
+           sidebar yang sudah bertransisi di atas. */}
+        <div data-testid="panel-content" className={cn("mx-auto w-full px-4 py-6 transition-[max-width] duration-200 sm:px-6 sm:py-8 lg:px-10", collapsed ? "max-w-[1680px]" : "max-w-[1400px]")}>
+          {children}
+        </div>
       </main>
     </div>
   );

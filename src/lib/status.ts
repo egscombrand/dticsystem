@@ -93,11 +93,23 @@ export function isStatusTone(value: unknown): value is StatusTone {
   return typeof value === "string" && ["neutral", "accent", "info", "warning", "success", "danger", "muted", "violet"].includes(value);
 }
 
-/** Status yang masih berjalan (belum selesai/dibatalkan). */
+/**
+ * Status yang masih berjalan (belum selesai/dibatalkan) — dipakai sebagai sumber kebenaran tunggal untuk
+ * tab "Pekerjaan Aktif" di daftar order (src/app/dtic/(panel)/orders/page.tsx). FINISHED_STATUSES di atas
+ * adalah tab "Selesai & Dibatalkan": dibatalkan SENGAJA tidak dipisah dari selesai (keduanya status
+ * terminal yang sama-sama tidak lagi memerlukan tindakan), tetapi label tab tetap menyebut keduanya
+ * secara eksplisit ("Selesai & Dibatalkan") supaya tidak terlihat seperti mengklaim order dibatalkan = selesai.
+ */
 export const ACTIVE_STATUSES: readonly OrderStatus[] = ORDER_STATUSES.filter((s) => !FINISHED_STATUSES.includes(s));
 
-/** Kelompok status untuk filter daftar order. */
-export const STATUS_GROUPS = [
-  { value: ACTIVE_STATUSES.join(","), label: "Semua yang masih berjalan" },
-  { value: "completed,cancelled", label: "Selesai atau dibatalkan" },
-] as const;
+/**
+ * Subset dari ACTIVE_STATUSES yang BUTUH tindakan internal (PIC/Manager) SEKARANG — dipakai tab "Perlu
+ * Tindakan" di daftar order. Definisi (didokumentasikan karena status backend tidak punya flag "butuh
+ * tindakan" eksplisit):
+ *  - assigned: PIC sudah ditetapkan tapi belum mulai — PIC perlu memulai.
+ *  - pending_confirmation: hasil sudah diserahkan, menunggu QC Manager — Manager perlu memeriksa.
+ *  - internal_revision: Manager meminta revisi — PIC perlu memperbaiki.
+ * SENGAJA TIDAK termasuk: in_progress (sedang berjalan normal, bukan macet), awaiting_requester (giliran
+ * pemohon merespons, bukan tim internal), on_hold (ditunda dengan sengaja, bukan terabaikan).
+ */
+export const ACTION_NEEDED_STATUSES: readonly OrderStatus[] = ["assigned", "pending_confirmation", "internal_revision"];

@@ -1,4 +1,3 @@
-import { after } from "next/server";
 import { can } from "@/lib/auth/permissions";
 import { authorize } from "@/lib/server/auth";
 import { AppError } from "@/lib/server/errors";
@@ -23,7 +22,11 @@ export async function PATCH(request: Request, ctx: RouteContext<"/api/internal/o
       throw new AppError("Anda tidak memiliki izin untuk menetapkan PIC.", 403);
     }
     const { picOutboxId } = await updateOrder(id, parsed.data, { userId: auth.session.userId, name: auth.session.name });
-    if (picOutboxId) after(() => notifyOutbox(picOutboxId));
+    // Fire-and-forget: proses tanpa menunggu & tidak pernah menggagalkan respons ini (notifyOutbox sudah
+    // menangkap errornya sendiri). Server Node.js persisten (bukan serverless) — tidak perlu after()/waitUntil
+    // Next.js untuk memastikan tugas ini selesai; after() di versi Next.js proyek ini pernah terbukti membuat
+    // proses server berhenti merespons di bawah beban permintaan beruntun (lihat audit E2E).
+    if (picOutboxId) void notifyOutbox(picOutboxId).catch(() => {});
     return json({ ok: true });
   } catch (error) {
     return errorResponse(error, "PATCH order");

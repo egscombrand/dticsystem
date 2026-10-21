@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { availableWorkflowActions, checkWorkflowAction, completionNeedsNote, handoverProblem, type QcActor, type QcContext } from "@/lib/qc";
+import { availableWorkflowActions, checkWorkflowAction, completionNeedsNote, HANDOVER_CHANNEL_LABEL, handoverProblem, SELECTABLE_HANDOVER_CHANNELS, type QcActor, type QcContext } from "@/lib/qc";
 
 const pic: QcActor = { role: "staff", isAssignee: true };
 const otherStaff: QcActor = { role: "staff", isAssignee: false };
@@ -40,6 +40,15 @@ describe("cara penyerahan ke Manager", () => {
   it("file di DTIC Nexus: minimal satu file (baru atau yang sudah ada)", () => {
     expect(handoverProblem({ method: "in_app", fileCount: 0 })).toMatchObject({ field: "resultFileIds" });
     expect(handoverProblem({ method: "in_app", fileCount: 1 })).toBeNull();
+  });
+  it("link hasil saja (tanpa file) juga memenuhi syarat penyerahan in_app", () => {
+    expect(handoverProblem({ method: "in_app", fileCount: 0, resultLinkCount: 1 })).toBeNull();
+    expect(handoverProblem({ method: "in_app", fileCount: 0, resultLinkCount: 0 })).toMatchObject({ field: "resultFileIds" });
+    expect(handoverProblem({ method: "in_app", fileCount: 1, resultLinkCount: 1 })).toBeNull();
+  });
+  it("'dtic_nexus' punya label tapi TIDAK termasuk opsi yang dapat dipilih manual (sistem yang mencatatnya)", () => {
+    expect(HANDOVER_CHANNEL_LABEL.dtic_nexus).toBe("Website DTIC Nexus");
+    expect(SELECTABLE_HANDOVER_CHANNELS).not.toContain("dtic_nexus");
   });
   it("di luar DTIC Nexus: media & keterangan wajib; upload tidak wajib", () => {
     expect(handoverProblem({ method: "external", fileCount: 0 })).toMatchObject({ field: "channel" });

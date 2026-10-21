@@ -4,16 +4,20 @@ import { ORDERS_PAGE_SIZE } from "@/lib/config/app";
 import { addDaysToKey, dateKeyToUtcStart, formatDeadline, toDateKey } from "@/lib/dates";
 import { sql } from "@/lib/server/db";
 import { AppError, NotFoundError } from "@/lib/server/errors";
-import { FINISHED_STATUSES, type HistoryStatus, type OrderStatus } from "@/lib/status";
+import type { QcStatus } from "@/lib/qc";
+import { ACTION_NEEDED_STATUSES, ACTIVE_STATUSES, FINISHED_STATUSES, type HistoryStatus, type OrderStatus } from "@/lib/status";
 import { checkTransition } from "@/lib/workflow";
 import type { Role } from "@/lib/auth/permissions";
 import { DEFAULT_PRIORITY_CODE } from "@/lib/server/config";
 import type { Assignee, OrderAttachment, OrderDetail, OrderListItem, StatusHistoryEntry } from "@/lib/types";
+import { resultCollectionStatus, type ResultCollectionStatus } from "@/lib/result-collection";
 import { type OrderSubmissionInput, type OrderUpdateInput } from "@/lib/validation/order";
 import { enqueueOrderNotification } from "@/lib/server/repositories/notifications";
 import { eventTypeForStatus } from "@/lib/telegram-routing";
 
 const FINISHED = FINISHED_STATUSES as unknown as string[];
+/** Order yang sedang menunggu keputusan QC Manager — satu-satunya status order saat qc_status = 'pending'. */
+export const QC_QUEUE_STATUSES: readonly OrderStatus[] = ["pending_confirmation"];
 
 export type OrderRow = {
   id: string;
@@ -30,6 +34,7 @@ export type OrderRow = {
   priority_name: string;
   priority_tone: string;
   status: OrderStatus;
+  qc_status: QcStatus;
   created_at: Date;
   team_id: string | null;
   team_name: string | null;
@@ -52,6 +57,7 @@ export function mapListItem(r: OrderRow): OrderListItem {
     priorityName: r.priority_name,
     priorityTone: r.priority_tone,
     status: r.status,
+    qcStatus: r.qc_status,
     createdAt: r.created_at.toISOString(),
     teamId: r.team_id ?? null,
     teamName: r.team_name ?? null,
@@ -62,7 +68,7 @@ export function mapListItem(r: OrderRow): OrderListItem {
 export function listColumns(db: postgres.Sql) {
   return db`o.id, o.order_number, o.requester_name, o.company, o.department, o.title, o.design_type,
             o.brand_id, b.name as brand_name, o.deadline_at, o.priority, p.name as priority_name,
-            p.tone as priority_tone, o.status, o.created_at,
+            p.tone as priority_tone, o.status, o.qc_status, o.created_at,
             coalesce(o.team_id, (select dot.team_id from design_order_types dot where dot.id = o.design_order_type_id)) as team_id,
             (select t.name from dtic_teams t where t.id = coalesce(o.team_id, (select dot.team_id from design_order_types dot where dot.id = o.design_order_type_id))) as team_name,
             coalesce((
@@ -95,7 +101,7 @@ export function fromOrders(db: postgres.Sql) {
 export const DEADLINE_FILTERS = ["overdue", "today", "week", "month"] as const;
 export type DeadlineFilter = (typeof DEADLINE_FILTERS)[number];
 
-export const ORDER_SORTS = ["newest", "oldest", "deadline_asc", "deadline_desc"] as const;
+export const ORDER_SORTS = ["newest", "oldest", "deadline_asc", "deadline_desc", "qc_queue"] as const;
 export type OrderSort = (typeof ORDER_SORTS)[number];
 
 export type OrderListFilters = {
@@ -107,6 +113,8 @@ export type OrderListFilters = {
   assignee?: string;
   /** Kategori/tim pekerjaan (dtic_teams.id). */
   teamId?: string;
+  /** Status QC — TERPISAH dari filter `statuses` (status pekerjaan). */
+  qcStatus?: QcStatus;
   /** Periode tanggal masuk (created_at): from inklusif, to eksklusif. */
   from?: Date;
   to?: Date;
@@ -142,6 +150,11 @@ const SORT_SQL: Record<OrderSort, string> = {
   oldest: "o.created_at asc, o.order_number asc",
   deadline_asc: "o.deadline_at asc, o.created_at asc",
   deadline_desc: "o.deadline_at desc, o.created_at desc",
+  // Antrean QC Manager: terlambat dahulu, lalu deadline terdekat, lalu pengajuan QC terlama (waktu
+  // 'qc_submitted' terakhir — fallback created_at order untuk baris lama/anomali tanpa event tercatat).
+  qc_queue: `(o.deadline_at < now() and o.status not in ('completed','cancelled')) desc,
+              o.deadline_at asc,
+              coalesce((select max(e.created_at) from order_workflow_events e where e.order_id = o.id and e.kind = 'qc_submitted'), o.created_at) asc`,
 };
 
 /**
@@ -155,6 +168,56 @@ export function scopeWhere(db: postgres.Sql, scope: OrderScope) {
   if (!scope) return db``;
   if (!scope.memberId) return db`and false`;
   return db`and exists (select 1 from order_assignments sa where sa.order_id = o.id and sa.member_id = ${scope.memberId})`;
+}
+
+/**
+ * "PIC utama" untuk struktur folder Google Drive: anggota yang PALING AWAL ditugaskan (assigned_at) dan
+ * MASIH ditugaskan sekarang. order_assignments tidak punya konsep "utama" eksplisit — ini aturan yang
+ * dipilih & didokumentasikan (lihat src/lib/drive.ts), bukan ditebak diam-diam. null bila belum ada PIC.
+ */
+export async function primaryAssigneeName(orderId: string): Promise<string | null> {
+  const [row] = await sql()<{ full_name: string }[]>`
+    select m.full_name from order_assignments a join dtic_members m on m.id = a.member_id
+    where a.order_id = ${orderId}
+    order by a.assigned_at asc, a.member_id asc
+    limit 1`;
+  return row?.full_name ?? null;
+}
+
+export type OrderDocSummary = {
+  referenceCount: number;
+  resultCount: number;
+  resultPendingCount: number;
+  resultReconcileCount: number;
+  collectionStatus: ResultCollectionStatus;
+  lastSyncAt: string | null;
+  lastSyncStatus: "success" | "partial" | "failed" | null;
+};
+export type OrderListItemWithDocs = OrderListItem & OrderDocSummary;
+
+/** Subquery ringkasan dokumen/sinkronisasi — HANYA dipakai listOrders (Pengelolaan Pekerjaan), bukan board/kalender. */
+function docSummaryColumns(db: postgres.Sql) {
+  return db`
+    (select count(*)::int from order_attachments a where a.order_id = o.id and a.kind = 'reference') as reference_count,
+    (select count(*)::int from order_attachments a where a.order_id = o.id and a.kind = 'result' and a.drive_file_id is not null and a.reconcile_status is null) as result_count,
+    (select count(*)::int from order_attachments a where a.order_id = o.id and a.kind = 'result' and a.sync_status in ('pending','failed')) as result_pending_count,
+    (select count(*)::int from order_attachments a where a.order_id = o.id and a.kind = 'result' and a.reconcile_status is not null) as result_reconcile_count,
+    ods.last_sync_at, ods.last_sync_status`;
+}
+function docSummaryFrom(db: postgres.Sql) {
+  return db`left join order_drive_sync ods on ods.order_id = o.id`;
+}
+
+function mapDocSummary(r: { reference_count: number; result_count: number; result_pending_count: number; result_reconcile_count: number; last_sync_at: Date | null; last_sync_status: "success" | "partial" | "failed" | null }, orderStatus: OrderStatus, qcStatus: QcStatus): OrderDocSummary {
+  return {
+    referenceCount: r.reference_count,
+    resultCount: r.result_count,
+    resultPendingCount: r.result_pending_count,
+    resultReconcileCount: r.result_reconcile_count,
+    collectionStatus: resultCollectionStatus({ orderStatus, qcStatus, resultCount: r.result_count }),
+    lastSyncAt: r.last_sync_at?.toISOString() ?? null,
+    lastSyncStatus: r.last_sync_status,
+  };
 }
 
 export async function listOrders(filters: OrderListFilters & { scope?: OrderScope }, now = new Date()) {
@@ -177,6 +240,7 @@ export async function listOrders(filters: OrderListFilters & { scope?: OrderScop
     ${filters.to ? db`and o.created_at < ${filters.to}` : db``}
     ${filters.teamId ? db`and coalesce(o.team_id, (select dot.team_id from design_order_types dot where dot.id = o.design_order_type_id)) = ${filters.teamId}` : db``}
     ${filters.priority ? db`and o.priority = ${filters.priority}` : db``}
+    ${filters.qcStatus ? db`and o.qc_status = ${filters.qcStatus}` : db``}
     ${assigneeWhere(db, filters.assignee)}
     ${scopeWhere(db, filters.scope)}
     ${range?.overdue ? db`and o.deadline_at < ${now} and o.status not in ${db(FINISHED)}` : db``}
@@ -184,16 +248,64 @@ export async function listOrders(filters: OrderListFilters & { scope?: OrderScop
     ${range?.to ? db`and o.deadline_at < ${range.to}` : db``}`;
 
   const [rows, [{ total }]] = await Promise.all([
-    db<OrderRow[]>`
-      select ${listColumns(db)}
-      from ${fromOrders(db)}
+    db<(OrderRow & { reference_count: number; result_count: number; result_pending_count: number; result_reconcile_count: number; last_sync_at: Date | null; last_sync_status: "success" | "partial" | "failed" | null })[]>`
+      select ${listColumns(db)}, ${docSummaryColumns(db)}
+      from ${fromOrders(db)} ${docSummaryFrom(db)}
       ${where}
       order by ${db.unsafe(SORT_SQL[filters.sort ?? "newest"])}
       limit ${ORDERS_PAGE_SIZE} offset ${offset}`,
     db<{ total: number }[]>`select count(*)::int as total from ${fromOrders(db)} ${where}`,
   ]);
 
-  return { items: rows.map(mapListItem), total, page, pageSize: ORDERS_PAGE_SIZE };
+  const items: OrderListItemWithDocs[] = rows.map((r) => ({ ...mapListItem(r), ...mapDocSummary(r, r.status, r.qc_status) }));
+  return { items, total, page, pageSize: ORDERS_PAGE_SIZE };
+}
+
+/**
+ * Jumlah pekerjaan untuk tab "Pekerjaan Aktif" / "Selesai & Dibatalkan" (daftar order) — SELALU dari
+ * query count() sungguhan, tidak pernah dari panjang data yang kebetulan sudah dimuat di satu halaman.
+ * Memakai filter yang sama dengan listOrders KECUALI status (sengaja diabaikan): jumlah per tab mewakili
+ * "berapa yang akan tampil bila pindah ke tab itu", bukan hasil setelah sub-filter status di dalam tab
+ * yang sedang aktif — supaya berpindah tab tidak pernah terlihat seperti 0 hasil karena filter status tab
+ * sebelumnya ikut terbawa. "terlambat" dihitung hanya dari pekerjaan AKTIF (selesai/dibatalkan tidak
+ * pernah terlambat, lihat isOverdue di src/lib/status.ts).
+ */
+export async function countOrdersByView(
+  filters: Pick<OrderListFilters, "q" | "brandId" | "priority" | "assignee" | "teamId" | "from" | "to" | "deadline"> & { scope?: OrderScope },
+  now = new Date(),
+): Promise<{ active: number; actionNeeded: number; finished: number; overdueActive: number; qcQueue: number }> {
+  const db = sql();
+  const q = filters.q?.trim();
+  const like = q ? `%${escapeLike(q)}%` : null;
+  const range = filters.deadline ? deadlineRange(filters.deadline, now) : null;
+
+  const whereFor = (statuses: readonly OrderStatus[], overdueOnly: boolean) => db`
+    where true
+    and o.status in ${db(statuses as string[])}
+    ${overdueOnly ? db`and o.deadline_at < ${now}` : db``}
+    ${like
+      ? db`and (o.order_number ilike ${like} or o.requester_name ilike ${like}
+               or o.company ilike ${like} or b.name ilike ${like} or o.title ilike ${like})`
+      : db``}
+    ${filters.brandId ? db`and o.brand_id = ${filters.brandId}` : db``}
+    ${filters.from ? db`and o.created_at >= ${filters.from}` : db``}
+    ${filters.to ? db`and o.created_at < ${filters.to}` : db``}
+    ${filters.teamId ? db`and coalesce(o.team_id, (select dot.team_id from design_order_types dot where dot.id = o.design_order_type_id)) = ${filters.teamId}` : db``}
+    ${filters.priority ? db`and o.priority = ${filters.priority}` : db``}
+    ${assigneeWhere(db, filters.assignee)}
+    ${scopeWhere(db, filters.scope)}
+    ${!overdueOnly && range?.overdue ? db`and o.deadline_at < ${now}` : db``}
+    ${range?.from ? db`and o.deadline_at >= ${range.from}` : db``}
+    ${range?.to ? db`and o.deadline_at < ${range.to}` : db``}`;
+
+  const [[{ c: active }], [{ c: actionNeeded }], [{ c: finished }], [{ c: overdueActive }], [{ c: qcQueue }]] = await Promise.all([
+    db<{ c: number }[]>`select count(*)::int as c from ${fromOrders(db)} ${whereFor(ACTIVE_STATUSES, false)}`,
+    db<{ c: number }[]>`select count(*)::int as c from ${fromOrders(db)} ${whereFor(ACTION_NEEDED_STATUSES, false)}`,
+    db<{ c: number }[]>`select count(*)::int as c from ${fromOrders(db)} ${whereFor(FINISHED_STATUSES, false)}`,
+    db<{ c: number }[]>`select count(*)::int as c from ${fromOrders(db)} ${whereFor(ACTIVE_STATUSES, true)}`,
+    db<{ c: number }[]>`select count(*)::int as c from ${fromOrders(db)} ${whereFor(QC_QUEUE_STATUSES, false)}`,
+  ]);
+  return { active, actionNeeded, finished, overdueActive, qcQueue };
 }
 
 /** Order untuk Workboard (semua status). */
@@ -750,17 +862,21 @@ export async function deleteOrder(id: string, actorId: string): Promise<string[]
   return sql().begin(async (tx) => {
     const [order] = await tx<{ order_number: string; title: string; status: string }[]>`select order_number, title, status from orders where id = ${id} for update`;
     if (!order) throw new NotFoundError("Order tidak ditemukan.");
-    const files = await tx<{ storage_path: string }[]>`select storage_path from order_attachments where order_id = ${id}`;
+    const files = await tx<{ storage_path: string | null; drive_file_id: string | null }[]>`select storage_path, drive_file_id from order_attachments where order_id = ${id}`;
     await tx`delete from orders where id = ${id}`;
     await tx`insert into auth_audit_log (actor_user_id, action, detail)
              values (${actorId}, 'order_deleted', ${tx.json({ orderNumber: order.order_number, title: order.title, status: order.status, attachments: files.length })})`;
-    return files.map((f) => f.storage_path);
+    const driveOrphans = files.filter((f) => f.drive_file_id).length;
+    // File di Google Drive SENGAJA tidak dihapus otomatis (di luar kendali transaksi database, dan
+    // penghapusan file nyata tidak boleh bergantung pada keberhasilan satu panggilan API pihak ketiga).
+    if (driveOrphans > 0) console.error(`[orders] order ${order.order_number} dihapus; ${driveOrphans} file di Google Drive TIDAK ikut dihapus (perlu dibersihkan manual bila perlu).`);
+    return files.map((f) => f.storage_path).filter((p): p is string => p !== null);
   });
 }
 
 export async function getAttachment(id: string) {
-  const rows = await sql()<{ id: string; order_id: string; file_name: string; storage_path: string; mime_type: string; file_size: number }[]>`
-    select id, order_id, file_name, storage_path, mime_type, file_size from order_attachments where id = ${id}`;
+  const rows = await sql()<{ id: string; order_id: string; file_name: string; storage_path: string | null; mime_type: string; file_size: number; drive_file_id: string | null }[]>`
+    select id, order_id, file_name, storage_path, mime_type, file_size, drive_file_id from order_attachments where id = ${id}`;
   return rows[0] ?? null;
 }
 

@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { checkResultFileBasics, resultContentMatches } from "@/lib/files";
-import { latestResultIds, resultFileHistory } from "@/lib/result-status";
+import { latestResultIds, latestResultLinkIds, resultFileHistory, resultLinksUsed } from "@/lib/result-status";
 
 const ev = (kind: string, at: string, ids: string[]) => ({ kind, at, detail: { resultFileIds: ids } });
+const evLink = (kind: string, at: string, ids: string[]) => ({ kind, at, detail: { resultLinkIds: ids } });
 
 describe("status file hasil dari peristiwa nyata", () => {
   it("tanpa rujukan = draf; tahap tertinggi menang; riwayat urut waktu", () => {
@@ -24,6 +25,21 @@ describe("status file hasil dari peristiwa nyata", () => {
   it("file terbaru dari penyerahan/persetujuan terakhir", () => {
     expect(latestResultIds([ev("qc_approved", "2", ["x"]), ev("qc_submitted", "1", ["y"])])).toEqual(["x"]);
     expect(latestResultIds([ev("completed", "2", ["x"])])).toEqual([]);
+  });
+});
+
+describe("link hasil dari peristiwa nyata", () => {
+  it("link terbaru dari penyerahan/persetujuan terakhir", () => {
+    expect(latestResultLinkIds([evLink("qc_approved", "2", ["l1"]), evLink("qc_submitted", "1", ["l2"])])).toEqual(["l1"]);
+    expect(latestResultLinkIds([evLink("completed", "2", ["l1"])])).toEqual([]);
+    expect(latestResultLinkIds([])).toEqual([]);
+  });
+  it("link yang pernah dirujuk di peristiwa penyerahan/persetujuan ditandai terpakai", () => {
+    const used = resultLinksUsed(["l1", "l2"], [evLink("qc_submitted", "1", ["l1"])]);
+    expect(used).toEqual({ l1: true, l2: false });
+  });
+  it("link tanpa rujukan apa pun tetap belum terpakai", () => {
+    expect(resultLinksUsed(["l1"], [])).toEqual({ l1: false });
   });
 });
 

@@ -1,6 +1,7 @@
 import { authorize, canAccessOrder } from "@/lib/server/auth";
+import { DriveNotConfiguredError, driveClient } from "@/lib/server/drive";
 import { NotFoundError } from "@/lib/server/errors";
-import { assertUuid, errorResponse } from "@/lib/server/http";
+import { assertUuid, errorResponse, json } from "@/lib/server/http";
 import { getAttachment } from "@/lib/server/repositories/orders";
 import { storage } from "@/lib/server/storage";
 
@@ -23,7 +24,9 @@ export async function GET(request: Request, ctx: RouteContext<"/api/internal/att
     // Dokumen hanya bisa diunduh oleh yang berhak atas order-nya (Staff: order yang ditugaskan).
     if (!attachment || !(await canAccessOrder(auth.session, attachment.order_id)))
       throw new NotFoundError("Dokumen tidak ditemukan.");
-    const body = await storage().get(attachment.storage_path);
+    // Byte-nya selalu mengalir lewat server kita (tidak pernah redirect ke Google) — URL/izin Drive tidak
+    // pernah terekspos ke klien, dan header keamanan di bawah (CSP, no-store) berlaku sama untuk kedua sumber.
+    const body = attachment.drive_file_id ? await (await driveClient()).downloadFile(attachment.drive_file_id) : attachment.storage_path ? await storage().get(attachment.storage_path) : null;
     if (!body) throw new NotFoundError("Berkas dokumen tidak ditemukan di penyimpanan.");
 
     const wantsInline = new URL(request.url).searchParams.get("inline") === "1";
@@ -39,6 +42,10 @@ export async function GET(request: Request, ctx: RouteContext<"/api/internal/att
       },
     });
   } catch (error) {
+    if (error instanceof DriveNotConfiguredError) {
+      console.error("[attachments] Drive tidak terkonfigurasi:", error.message);
+      return json({ error: "Penyimpanan Google Drive belum dikonfigurasi. Hubungi Super Admin." }, 503);
+    }
     return errorResponse(error, "GET attachment");
   }
 }

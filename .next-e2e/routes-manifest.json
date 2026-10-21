@@ -127,12 +127,37 @@
       "namedRegex": "^/api/internal/orders/(?<nxtPid>[^/]+?)/deadline(?:/)?$"
     },
     {
+      "page": "/api/internal/orders/[id]/drive-sync",
+      "regex": "^/api/internal/orders/([^/]+?)/drive\\-sync(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/api/internal/orders/(?<nxtPid>[^/]+?)/drive\\-sync(?:/)?$"
+    },
+    {
       "page": "/api/internal/orders/[id]/notes",
       "regex": "^/api/internal/orders/([^/]+?)/notes(?:/)?$",
       "routeKeys": {
         "nxtPid": "nxtPid"
       },
       "namedRegex": "^/api/internal/orders/(?<nxtPid>[^/]+?)/notes(?:/)?$"
+    },
+    {
+      "page": "/api/internal/orders/[id]/result-links",
+      "regex": "^/api/internal/orders/([^/]+?)/result\\-links(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/api/internal/orders/(?<nxtPid>[^/]+?)/result\\-links(?:/)?$"
+    },
+    {
+      "page": "/api/internal/orders/[id]/result-links/[linkId]",
+      "regex": "^/api/internal/orders/([^/]+?)/result\\-links/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid",
+        "nxtPlinkId": "nxtPlinkId"
+      },
+      "namedRegex": "^/api/internal/orders/(?<nxtPid>[^/]+?)/result\\-links/(?<nxtPlinkId>[^/]+?)(?:/)?$"
     },
     {
       "page": "/api/internal/orders/[id]/results",
@@ -150,6 +175,15 @@
         "nxtPfileId": "nxtPfileId"
       },
       "namedRegex": "^/api/internal/orders/(?<nxtPid>[^/]+?)/results/(?<nxtPfileId>[^/]+?)(?:/)?$"
+    },
+    {
+      "page": "/api/internal/orders/[id]/results/[fileId]/retry",
+      "regex": "^/api/internal/orders/([^/]+?)/results/([^/]+?)/retry(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid",
+        "nxtPfileId": "nxtPfileId"
+      },
+      "namedRegex": "^/api/internal/orders/(?<nxtPid>[^/]+?)/results/(?<nxtPfileId>[^/]+?)/retry(?:/)?$"
     },
     {
       "page": "/api/internal/orders/[id]/status",
@@ -352,6 +386,54 @@
       "namedRegex": "^/api/internal/display/orders(?:/)?$"
     },
     {
+      "page": "/api/internal/integrations/drive/disable",
+      "regex": "^/api/internal/integrations/drive/disable(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/internal/integrations/drive/disable(?:/)?$"
+    },
+    {
+      "page": "/api/internal/integrations/drive/enable",
+      "regex": "^/api/internal/integrations/drive/enable(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/internal/integrations/drive/enable(?:/)?$"
+    },
+    {
+      "page": "/api/internal/integrations/drive/oauth/callback",
+      "regex": "^/api/internal/integrations/drive/oauth/callback(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/internal/integrations/drive/oauth/callback(?:/)?$"
+    },
+    {
+      "page": "/api/internal/integrations/drive/oauth/connect",
+      "regex": "^/api/internal/integrations/drive/oauth/connect(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/internal/integrations/drive/oauth/connect(?:/)?$"
+    },
+    {
+      "page": "/api/internal/integrations/drive/oauth/disconnect",
+      "regex": "^/api/internal/integrations/drive/oauth/disconnect(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/internal/integrations/drive/oauth/disconnect(?:/)?$"
+    },
+    {
+      "page": "/api/internal/integrations/drive/simulate-test-data",
+      "regex": "^/api/internal/integrations/drive/simulate\\-test\\-data(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/internal/integrations/drive/simulate\\-test\\-data(?:/)?$"
+    },
+    {
+      "page": "/api/internal/integrations/drive/sync-members",
+      "regex": "^/api/internal/integrations/drive/sync\\-members(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/internal/integrations/drive/sync\\-members(?:/)?$"
+    },
+    {
+      "page": "/api/internal/integrations/drive/test",
+      "regex": "^/api/internal/integrations/drive/test(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/internal/integrations/drive/test(?:/)?$"
+    },
+    {
       "page": "/api/internal/integrations/telegram",
       "regex": "^/api/internal/integrations/telegram(?:/)?$",
       "routeKeys": {},
@@ -478,6 +560,12 @@
       "namedRegex": "^/dtic/orders(?:/)?$"
     },
     {
+      "page": "/dtic/qc-history",
+      "regex": "^/dtic/qc\\-history(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dtic/qc\\-history(?:/)?$"
+    },
+    {
       "page": "/dtic/settings",
       "regex": "^/dtic/settings(?:/)?$",
       "routeKeys": {},
@@ -500,6 +588,12 @@
       "regex": "^/dtic/settings/integrations/brands(?:/)?$",
       "routeKeys": {},
       "namedRegex": "^/dtic/settings/integrations/brands(?:/)?$"
+    },
+    {
+      "page": "/dtic/settings/integrations/google-drive",
+      "regex": "^/dtic/settings/integrations/google\\-drive(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dtic/settings/integrations/google\\-drive(?:/)?$"
     },
     {
       "page": "/dtic/settings/menu",

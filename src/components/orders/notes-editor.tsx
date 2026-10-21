@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/form";
 import { internalRequest } from "@/lib/client/api";
 
-export function NotesEditor({ orderId, notes }: { orderId: string; notes: string | null }) {
+export function NotesEditor({ orderId, notes, editable = true }: { orderId: string; notes: string | null; editable?: boolean }) {
   const router = useRouter();
   const [value, setValue] = useState(notes ?? "");
   const [editing, setEditing] = useState(false);
@@ -37,11 +37,13 @@ export function NotesEditor({ orderId, notes }: { orderId: string; notes: string
         ) : (
           <p className="text-sm text-ink-3">Belum ada catatan internal.</p>
         )}
-        <div>
-          <Button size="sm" variant="secondary" onClick={() => { setValue(notes ?? ""); setEditing(true); setMsg(null); }}>
-            {notes ? "Edit catatan" : "Tambah catatan"}
-          </Button>
-        </div>
+        {editable && (
+          <div>
+            <Button size="sm" variant="secondary" onClick={() => { setValue(notes ?? ""); setEditing(true); setMsg(null); }}>
+              {notes ? "Edit catatan" : "Tambah catatan"}
+            </Button>
+          </div>
+        )}
         {msg && <Alert kind={msg.kind}>{msg.text}</Alert>}
       </div>
     );

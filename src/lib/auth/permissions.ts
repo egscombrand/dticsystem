@@ -21,8 +21,10 @@ export const CAPABILITIES = {
   "dashboard.view": ["super_admin", "manager", "staff"],
   /** Melihat seluruh order (tanpa pembatasan PIC). */
   "orders.view_all": ["super_admin", "manager"],
-  /** Mengubah detail order, catatan internal, dan informasi untuk pemohon. */
-  "orders.update": ["super_admin", "manager"],
+  /** Mengubah detail order, catatan internal, dan informasi untuk pemohon. Manager SENGAJA tidak termasuk
+   *  — kewenangan Manager dibatasi pada keputusan QC (orders.qc/orders.workflow), bukan data pekerjaan itu
+   *  sendiri (deadline, bahan referensi, info pemohon tetap hak pemohon/role lain yang berwenang). */
+  "orders.update": ["super_admin"],
   /** Menghapus order (termasuk lampiran). */
   "orders.delete": ["super_admin"],
   /** Menambah, menghapus, atau mengganti PIC (anggota tim yang sesuai kategori). Wajib alasan; dicatat di audit. */

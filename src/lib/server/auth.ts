@@ -23,7 +23,7 @@ export function sessionTtlHours(): number {
   return Number.isFinite(raw) && raw > 0 && raw <= 168 ? raw : 12;
 }
 
-function cookieSecure(): boolean {
+export function cookieSecure(): boolean {
   return process.env.NODE_ENV === "production" && process.env.SESSION_COOKIE_SECURE !== "false";
 }
 

@@ -10,7 +10,7 @@
  * Tidak adanya respons Manager atau pemohon TIDAK pernah dianggap persetujuan.
  */
 import type { Role } from "@/lib/auth/permissions";
-import type { OrderStatus } from "@/lib/status";
+import type { OrderStatus, StatusTone } from "@/lib/status";
 
 export const QC_STATUSES = ["none", "pending", "approved", "revision"] as const;
 export type QcStatus = (typeof QC_STATUSES)[number];
@@ -19,6 +19,13 @@ export const QC_STATUS_LABEL: Record<QcStatus, string> = {
   pending: "Menunggu Pemeriksaan Manager",
   approved: "Disetujui Manager",
   revision: "Perlu Revisi",
+};
+/** Warna badge status QC — TERPISAH dari warna badge status pekerjaan (src/lib/status.ts STATUS_META). */
+export const QC_STATUS_TONE: Record<QcStatus, StatusTone> = {
+  none: "neutral",
+  pending: "violet",
+  approved: "success",
+  revision: "danger",
 };
 
 export const DELIVERY_STAGES = ["draft", "revision", "final"] as const;
@@ -65,20 +72,37 @@ export const COMPLETION_NOTE_MIN = 5;
  */
 export const HANDOVER_METHODS = ["in_app", "external"] as const;
 export type HandoverMethod = (typeof HANDOVER_METHODS)[number];
-export const HANDOVER_CHANNELS = ["whatsapp", "email", "direct", "other"] as const;
+/**
+ * "dtic_nexus" TIDAK PERNAH dipilih manual oleh pengguna — sistem yang mencatatnya secara otomatis untuk
+ * setiap pengajuan QC metode in_app (lihat applyWorkflowAction di src/lib/server/repositories/qc.ts), sesuai
+ * aturan: "Jika penyerahan dilakukan melalui DTIC Nexus, sistem mencatat media penyerahan sebagai Website
+ * DTIC Nexus." Opsi lain tetap untuk penyerahan DI LUAR aplikasi (metode external) atau penyerahan ke pemohon.
+ */
+export const HANDOVER_CHANNELS = ["whatsapp", "email", "direct", "google_drive", "external_link", "other", "dtic_nexus"] as const;
 export type HandoverChannel = (typeof HANDOVER_CHANNELS)[number];
 export const HANDOVER_CHANNEL_LABEL: Record<HandoverChannel, string> = {
   whatsapp: "WhatsApp",
   email: "Email",
   direct: "Langsung kepada Manager",
+  google_drive: "Google Drive",
+  external_link: "Tautan Eksternal",
   other: "Media lain",
+  dtic_nexus: "Website DTIC Nexus",
 };
+/** Dipilih manual oleh pengguna di dropdown Media Penyerahan — "dtic_nexus" dikeluarkan (lihat catatan di atas). */
+export const SELECTABLE_HANDOVER_CHANNELS = HANDOVER_CHANNELS.filter((c) => c !== "dtic_nexus");
 export const EXTERNAL_NOTE_MIN = 3;
 
-/** Informasi minimum per metode penyerahan (dipakai server & UI). null = lengkap. */
-export function handoverProblem(input: { method: HandoverMethod; fileCount: number; channel?: string | null; note?: string | null }): { field: "resultFileIds" | "channel" | "note"; message: string } | null {
+/**
+ * Informasi minimum per metode penyerahan (dipakai server & UI). null = lengkap.
+ * method "in_app" (jalur DTIC Nexus): hasil yang dapat ditinjau boleh berupa file ATAU link — pekerjaan
+ * seperti website tidak harus dipaksa diunggah sebagai ZIP bila sudah online (lihat resultLinkCount).
+ */
+export function handoverProblem(input: { method: HandoverMethod; fileCount: number; resultLinkCount?: number; channel?: string | null; note?: string | null }): { field: "resultFileIds" | "channel" | "note"; message: string } | null {
   if (input.method === "in_app") {
-    return input.fileCount > 0 ? null : { field: "resultFileIds", message: "Pilih file yang sudah ada atau unggah minimal satu file hasil." };
+    return input.fileCount > 0 || (input.resultLinkCount ?? 0) > 0
+      ? null
+      : { field: "resultFileIds", message: "Pilih file yang sudah ada, unggah minimal satu file hasil, atau tambahkan link hasil." };
   }
   if (!input.channel) return { field: "channel", message: "Pilih media penyerahan hasil." };
   if ((input.note?.trim().length ?? 0) < EXTERNAL_NOTE_MIN) return { field: "note", message: "Tulis keterangan singkat penyerahan (mis. \"Dikirim ke WhatsApp Manager pukul 10.00\")." };

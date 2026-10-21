@@ -5,7 +5,7 @@ import { useId, useRef, useState, type DragEvent } from "react";
 import { cn } from "@/components/ui/cn";
 import { checkResultFileBasics, formatFileSize, getExtension, PREVIEWABLE_MIME, RESULT_ACCEPT_ATTRIBUTE, RESULT_EXTENSIONS_LABEL, RESULT_FILE_TYPES, RESULT_MAX_FILES_PER_HANDOVER } from "@/lib/files";
 
-export type UploadedResult = { id: string; fileName: string; mimeType: string; fileSize: number };
+export type UploadedResult = { id: string; fileName: string; mimeType: string; fileSize: number; driveSyncStatus?: "synced" | null };
 
 type Item = {
   key: string; // uploadKey: dipakai ulang saat mencoba lagi agar server tidak menyimpan file ganda
@@ -126,7 +126,7 @@ export function ResultUploader({ orderId, maxBytes, onChange, disabled }: { orde
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium text-ink" title={i.file.name}>{i.file.name}</p>
                 <p className="text-xs text-ink-2">
-                  {formatFileSize(i.file.size)} · {i.state === "uploading" ? `Mengunggah ${i.progress}%` : i.state === "done" ? "Terunggah (draf)" : i.error}
+                  {formatFileSize(i.file.size)} · {i.state === "uploading" ? `Mengunggah ${i.progress}%` : i.state === "done" ? (i.result?.driveSyncStatus === "synced" ? "Tersimpan di Google Drive" : "Terunggah (draf)") : i.error}
                 </p>
                 {i.state === "uploading" && (
                   <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-subtle" role="progressbar" aria-valuenow={i.progress} aria-valuemin={0} aria-valuemax={100} aria-label={`Progres ${i.file.name}`}>

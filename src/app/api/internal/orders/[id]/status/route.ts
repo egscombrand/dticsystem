@@ -1,4 +1,3 @@
-import { after } from "next/server";
 import { authorize, canAccessOrder } from "@/lib/server/auth";
 import { AppError, NotFoundError } from "@/lib/server/errors";
 import { assertSameOrigin, assertUuid, errorResponse, json, readJson } from "@/lib/server/http";
@@ -24,10 +23,8 @@ export async function POST(request: Request, ctx: RouteContext<"/api/internal/or
     if (!parsed.success) throw new AppError("Status tidak valid.", 422, toFieldErrors(parsed.error));
     const s = auth.session;
     const result = await changeOrderStatus(id, parsed.data.status, parsed.data.note, { userId: s.userId, role: s.role, memberId: s.memberId }, parsed.data.noteForClient === true);
-    if (result.changed && result.outboxId) {
-      const outboxId = result.outboxId;
-      after(() => notifyOutbox(outboxId));
-    }
+    // Fire-and-forget (lihat catatan di src/app/api/internal/orders/[id]/route.ts) — bukan after() Next.js.
+    if (result.changed && result.outboxId) void notifyOutbox(result.outboxId).catch(() => {});
     return json({ ok: true, changed: result.changed });
   } catch (error) {
     return errorResponse(error, "POST order status");

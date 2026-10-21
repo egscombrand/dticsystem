@@ -7,6 +7,7 @@ import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader } from "@/components/ui/card";
+import { TableScroll } from "@/components/ui/table-scroll";
 import { ApiError, internalAction, internalRequest } from "@/lib/client/api";
 import { formatDateTime } from "@/lib/dates";
 import { EVENT_LABEL, TELEGRAM_EVENT_TYPES, type TelegramEventType } from "@/lib/telegram-routing";
@@ -244,7 +245,8 @@ export function TelegramGlobalGroup({ group, configured }: { group: BrandChannel
           <Button variant="ghost" onClick={toggleHistory} icon={<History className="size-4" aria-hidden="true" />}>{history ? "Sembunyikan riwayat" : "Lihat riwayat pengiriman"}</Button>
           {history && (
             history.length === 0 ? <p className="mt-2 text-sm text-ink-3">Belum ada pengiriman ke grup ini.</p> : (
-              <div className="mt-2 max-h-80 overflow-auto">
+              <div className="mt-2 max-h-80 overflow-y-auto">
+                <TableScroll minWidthPx={560}>
                 <table className="w-full text-left text-xs">
                   <thead className="text-ink-3"><tr><th className="py-2 pr-3">Order</th><th className="py-2 pr-3">Event</th><th className="py-2 pr-3">Status</th><th className="py-2 pr-3">Terkirim</th><th className="py-2">Keterangan</th></tr></thead>
                   <tbody className="divide-y divide-line">
@@ -259,6 +261,7 @@ export function TelegramGlobalGroup({ group, configured }: { group: BrandChannel
                     ))}
                   </tbody>
                 </table>
+                </TableScroll>
               </div>
             )
           )}

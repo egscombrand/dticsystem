@@ -18,6 +18,7 @@ export function StatCard({
   icon: Icon,
   tone = "neutral",
   href,
+  active = false,
 }: {
   label: string;
   value: number;
@@ -25,6 +26,8 @@ export function StatCard({
   icon: LucideIcon;
   tone?: keyof typeof iconTones;
   href?: string;
+  /** Tandai kartu ini sesuai filter/tab yang sedang aktif di halaman (bukan hover — kondisi saat ini). */
+  active?: boolean;
 }) {
   const body = (
     <>
@@ -38,9 +41,9 @@ export function StatCard({
       {hint && <p className="mt-2 text-xs text-ink-3">{hint}</p>}
     </>
   );
-  const cls = "block rounded-xl border border-line bg-surface p-4 shadow-card sm:p-5";
+  const cls = cn("block rounded-xl border p-4 shadow-card sm:p-5", active ? "border-accent bg-accent-soft ring-1 ring-accent/30" : "border-line bg-surface");
   return href ? (
-    <Link href={href} className={cn(cls, "transition-colors hover:border-line-strong hover:bg-[#fcfcfd]")}>
+    <Link href={href} aria-current={active ? "true" : undefined} className={cn(cls, "transition-colors", !active && "hover:border-line-strong hover:bg-[#fcfcfd]")}>
       {body}
     </Link>
   ) : (

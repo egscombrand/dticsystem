@@ -188,6 +188,23 @@ type RouteHandlerConfig<Route extends AppRouteHandlerRoutes = AppRouteHandlerRou
   type __Unused = __Check
 }
 
+// Validate ../../src/app/dtic/(panel)/qc-history/page.tsx
+{
+  type __IsExpected<Specific extends AppPageConfig<"/dtic/qc-history">> = Specific
+  const handler = {} as typeof import("../../src/app/dtic/(panel)/qc-history/page.js")
+  type __Check = __IsExpected<typeof handler>
+  
+  type __ParamMatchingValue =
+    typeof handler extends { unstable_paramMatching: infer Matcher } ? Matcher :
+    typeof handler extends { unstable_generateParamMatching: (...args: any[]) => infer Matcher } ? Awaited<Matcher> : {}
+  type __InvalidParamMatchingKeys = Exclude<keyof __ParamMatchingValue, keyof ParamMap["/dtic/qc-history"]>
+  type __AssertNoInvalidParamMatchingKeys<Invalid extends never> = Invalid
+  const __paramMatchingKeyCheck: __AssertNoInvalidParamMatchingKeys<__InvalidParamMatchingKeys> | undefined = undefined
+  void __paramMatchingKeyCheck
+  // @ts-ignore
+  type __Unused = __Check
+}
+
 // Validate ../../src/app/dtic/(panel)/settings/[entity]/page.tsx
 {
   type __IsExpected<Specific extends AppPageConfig<"/dtic/settings/[entity]">> = Specific
@@ -232,6 +249,23 @@ type RouteHandlerConfig<Route extends AppRouteHandlerRoutes = AppRouteHandlerRou
     typeof handler extends { unstable_paramMatching: infer Matcher } ? Matcher :
     typeof handler extends { unstable_generateParamMatching: (...args: any[]) => infer Matcher } ? Awaited<Matcher> : {}
   type __InvalidParamMatchingKeys = Exclude<keyof __ParamMatchingValue, keyof ParamMap["/dtic/settings/integrations/brands"]>
+  type __AssertNoInvalidParamMatchingKeys<Invalid extends never> = Invalid
+  const __paramMatchingKeyCheck: __AssertNoInvalidParamMatchingKeys<__InvalidParamMatchingKeys> | undefined = undefined
+  void __paramMatchingKeyCheck
+  // @ts-ignore
+  type __Unused = __Check
+}
+
+// Validate ../../src/app/dtic/(panel)/settings/integrations/google-drive/page.tsx
+{
+  type __IsExpected<Specific extends AppPageConfig<"/dtic/settings/integrations/google-drive">> = Specific
+  const handler = {} as typeof import("../../src/app/dtic/(panel)/settings/integrations/google-drive/page.js")
+  type __Check = __IsExpected<typeof handler>
+  
+  type __ParamMatchingValue =
+    typeof handler extends { unstable_paramMatching: infer Matcher } ? Matcher :
+    typeof handler extends { unstable_generateParamMatching: (...args: any[]) => infer Matcher } ? Awaited<Matcher> : {}
+  type __InvalidParamMatchingKeys = Exclude<keyof __ParamMatchingValue, keyof ParamMap["/dtic/settings/integrations/google-drive"]>
   type __AssertNoInvalidParamMatchingKeys<Invalid extends never> = Invalid
   const __paramMatchingKeyCheck: __AssertNoInvalidParamMatchingKeys<__InvalidParamMatchingKeys> | undefined = undefined
   void __paramMatchingKeyCheck
@@ -486,6 +520,86 @@ type RouteHandlerConfig<Route extends AppRouteHandlerRoutes = AppRouteHandlerRou
   type __Unused = __Check
 }
 
+// Validate ../../src/app/api/internal/integrations/drive/disable/route.ts
+{
+  type __IsExpected<Specific extends RouteHandlerConfig<"/api/internal/integrations/drive/disable">> = Specific
+  const handler = {} as typeof import("../../src/app/api/internal/integrations/drive/disable/route.js")
+  type __Check = __IsExpected<typeof handler>
+  
+  // @ts-ignore
+  type __Unused = __Check
+}
+
+// Validate ../../src/app/api/internal/integrations/drive/enable/route.ts
+{
+  type __IsExpected<Specific extends RouteHandlerConfig<"/api/internal/integrations/drive/enable">> = Specific
+  const handler = {} as typeof import("../../src/app/api/internal/integrations/drive/enable/route.js")
+  type __Check = __IsExpected<typeof handler>
+  
+  // @ts-ignore
+  type __Unused = __Check
+}
+
+// Validate ../../src/app/api/internal/integrations/drive/oauth/callback/route.ts
+{
+  type __IsExpected<Specific extends RouteHandlerConfig<"/api/internal/integrations/drive/oauth/callback">> = Specific
+  const handler = {} as typeof import("../../src/app/api/internal/integrations/drive/oauth/callback/route.js")
+  type __Check = __IsExpected<typeof handler>
+  
+  // @ts-ignore
+  type __Unused = __Check
+}
+
+// Validate ../../src/app/api/internal/integrations/drive/oauth/connect/route.ts
+{
+  type __IsExpected<Specific extends RouteHandlerConfig<"/api/internal/integrations/drive/oauth/connect">> = Specific
+  const handler = {} as typeof import("../../src/app/api/internal/integrations/drive/oauth/connect/route.js")
+  type __Check = __IsExpected<typeof handler>
+  
+  // @ts-ignore
+  type __Unused = __Check
+}
+
+// Validate ../../src/app/api/internal/integrations/drive/oauth/disconnect/route.ts
+{
+  type __IsExpected<Specific extends RouteHandlerConfig<"/api/internal/integrations/drive/oauth/disconnect">> = Specific
+  const handler = {} as typeof import("../../src/app/api/internal/integrations/drive/oauth/disconnect/route.js")
+  type __Check = __IsExpected<typeof handler>
+  
+  // @ts-ignore
+  type __Unused = __Check
+}
+
+// Validate ../../src/app/api/internal/integrations/drive/simulate-test-data/route.ts
+{
+  type __IsExpected<Specific extends RouteHandlerConfig<"/api/internal/integrations/drive/simulate-test-data">> = Specific
+  const handler = {} as typeof import("../../src/app/api/internal/integrations/drive/simulate-test-data/route.js")
+  type __Check = __IsExpected<typeof handler>
+  
+  // @ts-ignore
+  type __Unused = __Check
+}
+
+// Validate ../../src/app/api/internal/integrations/drive/sync-members/route.ts
+{
+  type __IsExpected<Specific extends RouteHandlerConfig<"/api/internal/integrations/drive/sync-members">> = Specific
+  const handler = {} as typeof import("../../src/app/api/internal/integrations/drive/sync-members/route.js")
+  type __Check = __IsExpected<typeof handler>
+  
+  // @ts-ignore
+  type __Unused = __Check
+}
+
+// Validate ../../src/app/api/internal/integrations/drive/test/route.ts
+{
+  type __IsExpected<Specific extends RouteHandlerConfig<"/api/internal/integrations/drive/test">> = Specific
+  const handler = {} as typeof import("../../src/app/api/internal/integrations/drive/test/route.js")
+  type __Check = __IsExpected<typeof handler>
+  
+  // @ts-ignore
+  type __Unused = __Check
+}
+
 // Validate ../../src/app/api/internal/integrations/telegram/check/route.ts
 {
   type __IsExpected<Specific extends RouteHandlerConfig<"/api/internal/integrations/telegram/check">> = Specific
@@ -596,10 +710,50 @@ type RouteHandlerConfig<Route extends AppRouteHandlerRoutes = AppRouteHandlerRou
   type __Unused = __Check
 }
 
+// Validate ../../src/app/api/internal/orders/[id]/drive-sync/route.ts
+{
+  type __IsExpected<Specific extends RouteHandlerConfig<"/api/internal/orders/[id]/drive-sync">> = Specific
+  const handler = {} as typeof import("../../src/app/api/internal/orders/[id]/drive-sync/route.js")
+  type __Check = __IsExpected<typeof handler>
+  
+  // @ts-ignore
+  type __Unused = __Check
+}
+
 // Validate ../../src/app/api/internal/orders/[id]/notes/route.ts
 {
   type __IsExpected<Specific extends RouteHandlerConfig<"/api/internal/orders/[id]/notes">> = Specific
   const handler = {} as typeof import("../../src/app/api/internal/orders/[id]/notes/route.js")
+  type __Check = __IsExpected<typeof handler>
+  
+  // @ts-ignore
+  type __Unused = __Check
+}
+
+// Validate ../../src/app/api/internal/orders/[id]/result-links/[linkId]/route.ts
+{
+  type __IsExpected<Specific extends RouteHandlerConfig<"/api/internal/orders/[id]/result-links/[linkId]">> = Specific
+  const handler = {} as typeof import("../../src/app/api/internal/orders/[id]/result-links/[linkId]/route.js")
+  type __Check = __IsExpected<typeof handler>
+  
+  // @ts-ignore
+  type __Unused = __Check
+}
+
+// Validate ../../src/app/api/internal/orders/[id]/result-links/route.ts
+{
+  type __IsExpected<Specific extends RouteHandlerConfig<"/api/internal/orders/[id]/result-links">> = Specific
+  const handler = {} as typeof import("../../src/app/api/internal/orders/[id]/result-links/route.js")
+  type __Check = __IsExpected<typeof handler>
+  
+  // @ts-ignore
+  type __Unused = __Check
+}
+
+// Validate ../../src/app/api/internal/orders/[id]/results/[fileId]/retry/route.ts
+{
+  type __IsExpected<Specific extends RouteHandlerConfig<"/api/internal/orders/[id]/results/[fileId]/retry">> = Specific
+  const handler = {} as typeof import("../../src/app/api/internal/orders/[id]/results/[fileId]/retry/route.js")
   type __Check = __IsExpected<typeof handler>
   
   // @ts-ignore

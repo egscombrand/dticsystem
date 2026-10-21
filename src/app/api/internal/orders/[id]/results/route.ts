@@ -1,10 +1,12 @@
 import { authorize, canAccessOrder } from "@/lib/server/auth";
 import { checkResultFileBasics, getExtension, RESULT_FILE_TYPES, resultContentMatches, sanitizeFileName } from "@/lib/files";
 import { resultMaxFileBytes } from "@/lib/server/config";
+import { DriveNotConfiguredError } from "@/lib/server/drive";
 import { sql } from "@/lib/server/db";
 import { AppError, NotFoundError } from "@/lib/server/errors";
 import { assertSameOrigin, assertUuid, errorResponse, json, UUID_RE } from "@/lib/server/http";
 import { saveResultFile } from "@/lib/server/repositories/results";
+import { withTransientRetry } from "@/lib/server/db-diagnostics";
 import { StorageNotConfiguredError } from "@/lib/server/storage";
 import { isFinishedStatus, type OrderStatus } from "@/lib/status";
 
@@ -49,12 +51,19 @@ export async function POST(request: Request, ctx: RouteContext<"/api/internal/or
     const bytes = new Uint8Array(await file.arrayBuffer());
     if (!resultContentMatches(ext, bytes.subarray(0, 1024))) throw new AppError(`Isi file "${fileName}" tidak sesuai dengan formatnya.`, 422, { file: "Isi file tidak sesuai format." });
 
-    const result = await saveResultFile(id, { uploadKey, fileName, ext, mimeType: RESULT_FILE_TYPES[ext], bytes }, s.userId);
+    // saveResultFile aman diulang (idempoten lewat uploadKey) — klaim/insert baris pending bisa gagal
+    // sementara (lock/koneksi) di bawah tekanan konkurensi, bukan hanya karena duplikat (23505) yang sudah
+    // ditangani di dalamnya. Lihat withTransientRetry di src/lib/server/db-diagnostics.ts.
+    const result = await withTransientRetry(() => saveResultFile(id, { uploadKey, fileName, ext, mimeType: RESULT_FILE_TYPES[ext], bytes }, s.userId));
     return json({ ok: true, ...result }, result.duplicate ? 200 : 201);
   } catch (error) {
     if (error instanceof StorageNotConfiguredError) {
       console.error("[results] storage tidak terkonfigurasi:", error.message);
       return json({ error: "Penyimpanan file belum dikonfigurasi. Hubungi Super Admin." }, 503);
+    }
+    if (error instanceof DriveNotConfiguredError) {
+      console.error("[results] Drive tidak terkonfigurasi:", error.message);
+      return json({ error: "Integrasi Google Drive belum dikonfigurasi. Hubungi Super Admin." }, 503);
     }
     return errorResponse(error, "POST order result file");
   }

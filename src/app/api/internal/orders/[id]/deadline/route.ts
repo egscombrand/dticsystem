@@ -5,7 +5,7 @@ import { changeOrderDeadline } from "@/lib/server/repositories/orders";
 import { toFieldErrors } from "@/lib/validation/common";
 import { deadlineChangeSchema } from "@/lib/validation/order";
 
-/** Ubah tenggat pekerjaan. Hanya role dengan orders.update (Super Admin & Manager); staff ditolak. */
+/** Ubah tenggat pekerjaan. Hanya role dengan orders.update (Super Admin) — Manager dibatasi pada keputusan QC, bukan data pekerjaan; staff juga ditolak. */
 export async function PUT(request: Request, ctx: RouteContext<"/api/internal/orders/[id]/deadline">) {
   const auth = await authorize(request, "orders.update");
   if (!auth.ok) return auth.response;

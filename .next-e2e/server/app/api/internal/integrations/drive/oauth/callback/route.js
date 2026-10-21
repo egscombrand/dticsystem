@@ -1,0 +1,13 @@
+var R=require("../../../../../../../chunks/[turbopack]_runtime.js")("server/app/api/internal/integrations/drive/oauth/callback/route.js")
+R.c("server/chunks/[externals]__1wbnpzi-3iu_s._.js")
+R.c("server/chunks/src_lib_server_repositories_drive-oauth_ts_1p07x83-8n-bc._.js")
+R.c("server/chunks/_0b7wu1sctgvi_._.js")
+R.c("server/chunks/src_lib_dates_ts_1l2u0e5rkf_t9._.js")
+R.c("server/chunks/_0he_d8lmpk__2._.js")
+R.c("server/chunks/[root-of-the-server]__15bjnu5yieigz._.js")
+R.c("server/chunks/node_modules_next_dist_10oni030-l6bx._.js")
+R.c("server/chunks/src_lib_server_0wfruc1yba0q3._.js")
+R.c("server/chunks/_1e_hxl452cdj_._.js")
+R.c("server/chunks/1jng_app_api_internal_integrations_drive_oauth_callback_route_actions_0cpiyvka5kek9.js")
+R.m(40664)
+module.exports=R.m(40664).exports

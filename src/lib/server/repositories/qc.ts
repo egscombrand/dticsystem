@@ -1,13 +1,14 @@
 import "server-only";
 import type postgres from "postgres";
 import type { Role } from "@/lib/auth/permissions";
-import { checkWorkflowAction, handoverProblem, type DeliveryStatus, type QcContext, type QcStatus, type WorkflowEventKind } from "@/lib/qc";
+import { checkWorkflowAction, handoverProblem, type DeliveryStatus, type HandoverChannel, type QcContext, type QcStatus, type WorkflowEventKind } from "@/lib/qc";
 import { sql } from "@/lib/server/db";
 import { AppError, NotFoundError } from "@/lib/server/errors";
 import { enqueueOrderNotification } from "@/lib/server/repositories/notifications";
 import type { OrderStatus } from "@/lib/status";
 import { eventTypeForStatus } from "@/lib/telegram-routing";
-import { assertResultFiles } from "@/lib/server/repositories/results";
+import { assertResultFiles, assertResultLinks, moveResultFilesToCategory } from "@/lib/server/repositories/results";
+import type { ResultCategory } from "@/lib/drive";
 import type { WorkflowActionInput } from "@/lib/validation/workflow";
 
 export type QcActorInfo = { userId: string; name: string; role: Role; memberId: string | null };
@@ -23,6 +24,17 @@ export type WorkflowEvent = {
   needsRevision: boolean | null;
   detail: Record<string, unknown>;
 };
+
+/**
+ * Waktu pengajuan QC PERTAMA kali untuk order ini (atau null bila belum pernah diajukan sama sekali) —
+ * acuan tanggal folder arsip Drive (lihat driveResultFolderPath): folder dibuat berdasarkan kapan hasil
+ * pertama kali diserahkan untuk QC, bukan kapan order dibuat.
+ */
+export async function firstQcSubmittedAt(orderId: string): Promise<Date | null> {
+  const [r] = await sql()<{ created_at: Date }[]>`
+    select created_at from order_workflow_events where order_id = ${orderId} and kind = 'qc_submitted' order by created_at asc limit 1`;
+  return r?.created_at ?? null;
+}
 
 export async function getQcStatus(orderId: string): Promise<QcStatus | null> {
   const [r] = await sql()<{ qc_status: QcStatus }[]>`select qc_status from orders where id = ${orderId}`;
@@ -49,6 +61,36 @@ export async function listWorkflowEvents(orderId: string): Promise<WorkflowEvent
   return rows.map((r) => ({ id: r.id, kind: r.kind, at: r.created_at.toISOString(), actorName: r.actor_name, stage: r.stage, link: r.link, summary: r.summary, needsRevision: r.needs_revision, detail: r.detail ?? {} }));
 }
 
+export type QcHistoryEntry = {
+  id: string;
+  orderId: string;
+  orderNumber: string;
+  orderTitle: string;
+  kind: "qc_approved" | "qc_revision_requested" | "qc_access_requested";
+  at: string;
+  actorName: string | null;
+  summary: string | null;
+};
+
+/**
+ * Riwayat KEPUTUSAN QC lintas-order (Setujui/Minta Revisi/Minta Akses) — bukan seluruh peristiwa workflow
+ * (lihat listWorkflowEvents untuk riwayat lengkap SATU order). Dipakai tab "Riwayat QC" Manager. Tidak ada
+ * tabel baru: membaca order_workflow_events yang sudah ada, hanya kind keputusan QC.
+ */
+export async function listQcHistory(limit = 100): Promise<QcHistoryEntry[]> {
+  const rows = await sql()<
+    { id: string; order_id: string; order_number: string; title: string; kind: "qc_approved" | "qc_revision_requested" | "qc_access_requested"; created_at: Date; actor_name: string | null; summary: string | null }[]
+  >`
+    select e.id, e.order_id, o.order_number, o.title, e.kind, e.created_at, coalesce(e.actor_name, u.full_name) as actor_name, e.summary
+    from order_workflow_events e
+    join orders o on o.id = e.order_id
+    left join app_users u on u.id = e.actor_user_id
+    where e.kind in ('qc_approved', 'qc_revision_requested', 'qc_access_requested')
+    order by e.created_at desc, e.id desc
+    limit ${limit}`;
+  return rows.map((r) => ({ id: r.id, orderId: r.order_id, orderNumber: r.order_number, orderTitle: r.title, kind: r.kind, at: r.created_at.toISOString(), actorName: r.actor_name, summary: r.summary }));
+}
+
 /** Status pengiriman dari peristiwa terbaru (tidak disimpan ganda). */
 export function deliveryStatusOf(events: WorkflowEvent[]): DeliveryStatus {
   const d = events.find((e) => e.kind === "delivery_recorded");
@@ -66,12 +108,19 @@ const SENT_AT_FUTURE_MS = 5 * 60_000;
  * (klik ganda, retry setelah timeout) mengembalikan hasil tanpa membuat peristiwa atau notifikasi baru.
  */
 export async function applyWorkflowAction(orderId: string, input: WorkflowActionInput, actor: QcActorInfo): Promise<WorkflowResult> {
-  return sql().begin(async (tx) => {
+  // Dipindahkan ke kategori folder Drive yang sesuai SETELAH transaksi berhasil (tidak menahan transaksi
+  // database untuk memanggil Drive — pola yang sama dengan sinkronisasi unggah hasil). Kegagalan Drive di
+  // sini tidak pernah membatalkan aksi QC yang sudah sah tersimpan (lihat moveResultFilesToCategory).
+  // (Dikembalikan dari dalam transaksi, bukan lewat variabel luar yang diubah di dalam closure — TypeScript
+  // tidak melacak penugasan di dalam closure async untuk narrowing di luar, lihat pembahasan di PR.)
+  type DriveMove = { fileIds: string[]; category: ResultCategory; revisionNumber?: number };
+  const { driveMove, ...result } = await sql().begin(async (tx) => {
+    let driveMove: DriveMove | null = null;
     const [o] = await tx<{ status: OrderStatus; qc_status: QcStatus }[]>`select status, qc_status from orders where id = ${orderId} for update`;
     if (!o) throw new NotFoundError("Order tidak ditemukan.");
     if (input.requestKey) {
       const dup = await tx`select 1 from order_workflow_events where order_id = ${orderId} and request_key = ${input.requestKey}`;
-      if (dup.length > 0) return { changed: false, duplicate: true, status: o.status, outboxId: null };
+      if (dup.length > 0) return { changed: false, duplicate: true, status: o.status, outboxId: null, driveMove };
     }
 
     const assignees = (await tx<{ member_id: string }[]>`select member_id from order_assignments where order_id = ${orderId}`).map((r) => r.member_id);
@@ -85,9 +134,11 @@ export async function applyWorkflowAction(orderId: string, input: WorkflowAction
     }
 
     const fileIds = "resultFileIds" in input && input.resultFileIds ? [...new Set(input.resultFileIds)] : [];
+    const linkIds = "resultLinkIds" in input && input.resultLinkIds ? [...new Set(input.resultLinkIds)] : [];
     await assertResultFiles(tx, orderId, fileIds);
+    await assertResultLinks(tx, orderId, linkIds);
     if (input.action === "submit_qc") {
-      const problem = handoverProblem({ method: input.method, fileCount: fileIds.length, channel: input.channel, note });
+      const problem = handoverProblem({ method: input.method, fileCount: fileIds.length, resultLinkCount: linkIds.length, channel: input.channel, note });
       if (problem) throw new AppError(problem.message, 422, { [problem.field]: problem.message });
       if (input.handedAt && new Date(input.handedAt).getTime() > Date.now() + SENT_AT_FUTURE_MS) {
         throw new AppError("Waktu penyerahan tidak boleh di masa depan.", 422, { handedAt: "Waktu penyerahan tidak boleh di masa depan." });
@@ -109,9 +160,18 @@ export async function applyWorkflowAction(orderId: string, input: WorkflowAction
           detail:
             input.method === "external"
               // Klaim PIC: dicatat apa adanya. handedAt hanya bila diisi (tidak dikarang); waktu pencatatan = created_at.
-              ? { method: "external", channel: input.channel, recipient: input.recipient, handedAt: input.handedAt ?? null, resultFileIds: fileIds }
-              : { method: "in_app", channel: input.channel ?? null, handedAt: input.handedAt ?? null, resultFileIds: fileIds },
+              ? { method: "external", channel: input.channel, recipient: input.recipient, handedAt: input.handedAt ?? null, resultFileIds: fileIds, resultLinkIds: linkIds }
+              // method in_app = diserahkan lewat DTIC Nexus — "dtic_nexus" DICATAT SISTEM, bukan dipilih
+              // PIC (lihat SELECTABLE_HANDOVER_CHANNELS); input.channel diabaikan di jalur ini.
+              : { method: "in_app", channel: "dtic_nexus" satisfies HandoverChannel, handedAt: input.handedAt ?? null, resultFileIds: fileIds, resultLinkIds: linkIds },
         };
+        if (fileIds.length > 0) {
+          // Pengajuan pertama (belum pernah diminta revisi) → Hasil Awal; setelah revisi diminta N kali →
+          // Revisi-NN (N = jumlah 'qc_revision_requested' SEBELUM pengajuan ini).
+          const [{ c: revisionCount }] = await tx<{ c: number }[]>`
+            select count(*)::int as c from order_workflow_events where order_id = ${orderId} and kind = 'qc_revision_requested'`;
+          driveMove = revisionCount === 0 ? { fileIds, category: "hasil_awal" } : { fileIds, category: "revisi", revisionNumber: revisionCount };
+        }
         break;
       case "withdraw_qc":
         to = "in_progress"; qc = "none"; kind = "qc_withdrawn";
@@ -122,7 +182,11 @@ export async function applyWorkflowAction(orderId: string, input: WorkflowAction
           // Persetujuan berlaku untuk versi yang diajukan terakhir (file & tautan yang sama).
           const [sub] = await tx<{ link: string | null; detail: Record<string, unknown> }[]>`
             select link, detail from order_workflow_events where order_id = ${orderId} and kind = 'qc_submitted' order by created_at desc, id desc limit 1`;
-          ev = { link: sub?.link ?? null, detail: { resultFileIds: Array.isArray(sub?.detail?.resultFileIds) ? sub.detail.resultFileIds : [] } };
+          const approvedFileIds = Array.isArray(sub?.detail?.resultFileIds) ? (sub.detail.resultFileIds as string[]) : [];
+          const approvedLinkIds = Array.isArray(sub?.detail?.resultLinkIds) ? (sub.detail.resultLinkIds as string[]) : [];
+          ev = { link: sub?.link ?? null, detail: { resultFileIds: approvedFileIds, resultLinkIds: approvedLinkIds } };
+          // Disetujui Manager = persyaratan persetujuan hasil pekerjaan di DTIC Nexus terpenuhi → Hasil Final.
+          if (approvedFileIds.length > 0) driveMove = { fileIds: approvedFileIds, category: "hasil_final" };
         }
         break;
       case "request_revision":
@@ -137,7 +201,7 @@ export async function applyWorkflowAction(orderId: string, input: WorkflowAction
         // (notify_status_changed) sebagai event terpisah dari "Menunggu QC Manager" — pesan memuat label
         // status "Menunggu Masukan Pemohon" apa adanya, tidak pernah mengklaim persetujuan QC.
         to = "awaiting_requester"; kind = "delivery_recorded"; notify = true;
-        ev = { stage: input.stage ?? null, link: input.link, detail: { afterQc: o.qc_status === "approved", qcStatusAtSend: o.qc_status, sentAt: input.sentAt ?? null, channel: input.channel ?? null, resultFileIds: fileIds } };
+        ev = { stage: input.stage ?? null, link: input.link, detail: { afterQc: o.qc_status === "approved", qcStatusAtSend: o.qc_status, sentAt: input.sentAt ?? null, channel: input.channel ?? null, resultFileIds: fileIds, resultLinkIds: linkIds } };
         break;
       case "record_feedback":
         kind = "feedback_recorded"; ev = { needsRevision: input.needsRevision };
@@ -146,7 +210,11 @@ export async function applyWorkflowAction(orderId: string, input: WorkflowAction
       case "complete":
         // Tidak membuat catatan pengiriman/persetujuan: hanya penyelesaian beserta keterangannya.
         to = "completed"; kind = "completed"; notify = true;
-        ev = { link: input.link, detail: { deliveryRecorded: o.status === "awaiting_requester", qcStatusAtCompletion: o.qc_status, fromStatus: o.status, resultFileIds: fileIds } };
+        ev = { link: input.link, detail: { deliveryRecorded: o.status === "awaiting_requester", qcStatusAtCompletion: o.qc_status, fromStatus: o.status, resultFileIds: fileIds, resultLinkIds: linkIds } };
+        // Penyelesaian tanpa persetujuan QC Manager (mis. diserahkan langsung ke pemohon) — file yang
+        // dirujuk saat menyelesaikan tetap dipindahkan ke Hasil Final; tidak menimpa pemindahan approve_qc
+        // di atas bila kedua aksi sama-sama merujuk file yang sama (idempoten di moveResultFilesToCategory).
+        if (fileIds.length > 0 && !driveMove) driveMove = { fileIds, category: "hasil_final" };
         break;
     }
 
@@ -174,8 +242,10 @@ export async function applyWorkflowAction(orderId: string, input: WorkflowAction
         console.error("[qc] gagal mengantrekan notifikasi:", error instanceof Error ? error.message : "error");
       }
     }
-    return { changed: true, duplicate: false, status: to, outboxId, notification };
+    return { changed: true, duplicate: false, status: to, outboxId, notification, driveMove };
   });
+  if (driveMove) await moveResultFilesToCategory(orderId, driveMove.fileIds, driveMove.category, driveMove.revisionNumber);
+  return result;
 }
 
 /** Pengguna ini pernah membuka WhatsApp pemohon untuk pekerjaan ini (menentukan perlu tidaknya perkenalan). */

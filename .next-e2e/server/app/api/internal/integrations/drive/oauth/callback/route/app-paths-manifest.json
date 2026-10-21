@@ -1,0 +1,3 @@
+{
+  "/api/internal/integrations/drive/oauth/callback/route": "app/api/internal/integrations/drive/oauth/callback/route.js"
+}

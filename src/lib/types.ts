@@ -1,3 +1,4 @@
+import type { QcStatus } from "@/lib/qc";
 import type { HistoryStatus, OrderStatus } from "@/lib/status";
 
 export type Brand = {
@@ -48,6 +49,8 @@ export type OrderListItem = {
   teamName: string | null;
   /** PIC / member DTIC yang ditugaskan; kosong = belum ditugaskan. */
   assignees: Assignee[];
+  /** Status QC — TERPISAH dari status pekerjaan (lihat src/lib/qc.ts). */
+  qcStatus: QcStatus;
 };
 
 export type OrderAttachment = {

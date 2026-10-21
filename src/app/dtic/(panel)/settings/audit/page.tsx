@@ -5,6 +5,7 @@ import { Suspense } from "react";
 import { Card } from "@/components/ui/card";
 import { PageHeader } from "@/components/ui/page-header";
 import { BrandListSkeleton } from "@/components/ui/skeletons";
+import { TableScroll } from "@/components/ui/table-scroll";
 import { can } from "@/lib/auth/permissions";
 import { formatDateTime } from "@/lib/dates";
 import { requireSession } from "@/lib/server/auth";
@@ -51,8 +52,8 @@ async function AuditContent() {
       {rows.length === 0 ? (
         <p className="p-6 text-sm text-ink-3">Belum ada aktivitas tercatat.</p>
       ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[640px] text-left text-sm">
+        <TableScroll minWidthPx={640}>
+          <table className="w-full text-left text-sm">
             <thead className="border-b border-line text-xs uppercase tracking-wide text-ink-3">
               <tr>
                 <th scope="col" className="px-4 py-3 font-medium">Waktu</th>
@@ -80,7 +81,7 @@ async function AuditContent() {
               ))}
             </tbody>
           </table>
-        </div>
+        </TableScroll>
       )}
     </Card>
   );

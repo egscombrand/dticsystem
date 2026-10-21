@@ -1,6 +1,7 @@
 import { AlertTriangle } from "lucide-react";
 import type { ReactNode } from "react";
 import { cn } from "@/components/ui/cn";
+import { QC_STATUS_LABEL, QC_STATUS_TONE, type QcStatus } from "@/lib/qc";
 import { isStatusTone, statusLabel, statusTone, type HistoryStatus, type OrderStatus, type StatusTone } from "@/lib/status";
 
 const tones: Record<StatusTone, string> = {
@@ -47,6 +48,12 @@ export function StatusBadge({ status }: { status: OrderStatus | HistoryStatus | 
       {statusLabel(status)}
     </Badge>
   );
+}
+
+/** Badge status QC — SELALU terpisah dari StatusBadge (status pekerjaan). "none" sengaja tidak ditampilkan
+ *  di tabel (belum pernah diajukan QC bukan informasi yang perlu badge sendiri); pemanggil memutuskan itu. */
+export function QcBadge({ status }: { status: QcStatus }) {
+  return <Badge tone={QC_STATUS_TONE[status]}>{QC_STATUS_LABEL[status]}</Badge>;
 }
 
 /** Badge prioritas — nama & warna berasal dari tabel priority_levels. */

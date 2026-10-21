@@ -21,7 +21,7 @@ describe("visibilitas menu", () => {
     expect(staffTree).toEqual(["dashboard", "orders", "workboard", "calendar"]);
     const adminTree = buildMenuTree(DEFAULT_MENU, "super_admin");
     const settings = adminTree.find((n) => n.key === "settings");
-    expect(settings?.children.map((c) => c.key)).toEqual(["master", "website", "menu", "integrations"]);
+    expect(settings?.children.map((c) => c.key)).toEqual(["master", "website", "menu", "integrations", "google_drive"]);
     const hiddenParent = buildMenuTree(DEFAULT_MENU.map((i) => (i.key === "settings" ? { ...i, isVisible: false } : i)), "super_admin");
     expect(hiddenParent.find((n) => n.key === "master")).toBeUndefined();
   });

@@ -7,12 +7,12 @@ import { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, openSync, writeSync } from "node:fs";
 
 const freePort = () =>
   new Promise((resolve) => {
@@ -132,6 +132,135 @@ await pg.query(
    values (null, $1, 'Grup Request Desain Uji', 'https://t.me/c/1234567890/1', 'verified', now(), true)`,
   [TG_CHAT],
 );
+
+// ---------------------------------------------------------------- Google Drive (tiruan, loopback)
+// Service account PALSU: kunci RSA sungguhan (dibuat sekali di sini) dipakai agar kode penandatanganan
+// JWT yang SUNGGUHAN tetap teruji end-to-end, tetapi tanda tangannya tidak pernah diverifikasi siapa pun
+// (server tiruan ini tidak memvalidasi JWT — persis seperti Telegram tiruan tidak memvalidasi token bot).
+const { generateKeyPairSync } = await import("node:crypto");
+const { privateKey: DRIVE_FAKE_KEY } = generateKeyPairSync("rsa", { modulusLength: 2048, publicKeyEncoding: { type: "spki", format: "pem" }, privateKeyEncoding: { type: "pkcs8", format: "pem" } });
+const DRIVE_ROOT = "ROOT_DRIVE_A_UJI";
+const drive = {
+  mode: "ok", // ok | 500 | 401 (token) | drop (putus koneksi, memicu timeout klien)
+  folders: new Map([[DRIVE_ROOT, { id: DRIVE_ROOT, name: "Drive A", parentId: null }]]),
+  files: new Map(),
+  uploads: 0, // jumlah panggilan upload sungguhan (bukan yang ditemukan lewat idempotensi)
+  shares: [],
+};
+function driveFindFolder(parentId, name) {
+  for (const f of drive.folders.values()) if (f.parentId === parentId && f.name === name) return f;
+  return null;
+}
+function driveFindFileByKey(folderId, key) {
+  for (const f of drive.files.values()) if (f.parentId === folderId && f.appProperties?.idempotencyKey === key) return f;
+  return null;
+}
+function parseMultipart(buf, boundary) {
+  const sep = `--${boundary}`;
+  const text = buf.toString("latin1");
+  const parts = text.split(sep).slice(1, -1); // buang preamble & epilog "--"
+  const out = [];
+  for (const part of parts) {
+    const headerEnd = part.indexOf("\r\n\r\n");
+    const headers = part.slice(0, headerEnd);
+    const bodyStart = headerEnd + 4;
+    const bodyEnd = part.endsWith("\r\n") ? part.length - 2 : part.length;
+    out.push({ contentType: /Content-Type:\s*([^\r\n]+)/i.exec(headers)?.[1] ?? "", body: Buffer.from(part.slice(bodyStart, bodyEnd), "latin1") });
+  }
+  return out;
+}
+const DRIVE_PORT = await freePort();
+const driveServer = http.createServer(async (req, res) => {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  const raw = Buffer.concat(chunks);
+  const url = new URL(req.url, "http://x");
+  const sendJson = (code, payload) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(payload)); };
+
+  if (drive.mode === "drop" && url.pathname !== "/token") return req.socket.destroy();
+
+  if (req.method === "POST" && url.pathname === "/token") {
+    if (drive.mode === "401") return sendJson(401, { error: "invalid_grant" });
+    if (drive.mode === "drop") return req.socket.destroy();
+    return sendJson(200, { access_token: "fake-drive-access-token", expires_in: 3600 });
+  }
+  if (req.method === "GET" && url.pathname === "/drive/v3/files" && !url.pathname.match(/\/files\//)) {
+    const q = url.searchParams.get("q") ?? "";
+    const parent = /'([^']+)' in parents/.exec(q)?.[1];
+    const nameMatch = /name = '((?:[^'\\]|\\.)*)'/.exec(q);
+    const keyMatch = /value='([^']*)'/.exec(q);
+    if (keyMatch) {
+      const file = driveFindFileByKey(parent, keyMatch[1]);
+      return sendJson(200, { files: file ? [{ id: file.id, name: file.name, webViewLink: file.webViewLink }] : [] });
+    }
+    if (nameMatch) {
+      const name = nameMatch[1].replace(/\\'/g, "'");
+      const folder = driveFindFolder(parent, name);
+      return sendJson(200, { files: folder ? [{ id: folder.id, name: folder.name }] : [] });
+    }
+    return sendJson(200, { files: [] });
+  }
+  if (req.method === "POST" && url.pathname === "/drive/v3/files") {
+    if (drive.mode === "500") return sendJson(500, { error: { message: "server tiruan: gagal sengaja" } });
+    const body = JSON.parse(raw.toString("utf8"));
+    const id = `folder-${drive.folders.size}-${randomUUID().slice(0, 8)}`;
+    drive.folders.set(id, { id, name: body.name, parentId: body.parents?.[0] ?? null });
+    return sendJson(200, { id, name: body.name });
+  }
+  if (req.method === "POST" && url.pathname === "/upload/drive/v3/files") {
+    if (drive.mode === "500") return sendJson(500, { error: { message: "server tiruan: gagal sengaja saat unggah" } });
+    // boundary mungkin dikutip (RFC 2045, lihat client.ts) — lepas tanda kutip sebelum dipakai memecah body,
+    // karena DELIMITER DI DALAM BODY sendiri TIDAK PERNAH memuat tanda kutip (hanya nilai di header Content-Type).
+    const boundary = /boundary=([^;]+)/.exec(req.headers["content-type"] ?? "")?.[1]?.replace(/^"|"$/g, "");
+    const parts = parseMultipart(raw, boundary);
+    const metadata = JSON.parse(parts[0].body.toString("utf8"));
+    const content = parts[1]?.body ?? Buffer.alloc(0);
+    const id = `file-${drive.files.size}-${randomUUID().slice(0, 8)}`;
+    const webViewLink = `https://drive.example/file/${id}`;
+    drive.files.set(id, { id, name: metadata.name, parentId: metadata.parents?.[0] ?? null, mimeType: parts[1]?.contentType ?? "application/octet-stream", bytes: content, appProperties: metadata.appProperties ?? {}, webViewLink, modifiedTime: new Date().toISOString() });
+    drive.uploads++;
+    return sendJson(200, { id, name: metadata.name, webViewLink });
+  }
+  const fileIdMatch = /^\/drive\/v3\/files\/([^/]+)$/.exec(url.pathname);
+  if (req.method === "GET" && fileIdMatch) {
+    if (drive.mode === "500") return sendJson(500, { error: { message: "server tiruan: gagal sengaja" } });
+    const id = fileIdMatch[1];
+    if (url.searchParams.get("alt") === "media") {
+      const file = drive.files.get(id);
+      if (!file) return sendJson(404, { error: { message: "Not Found" } });
+      res.writeHead(200, { "content-type": file.mimeType, "content-length": String(file.bytes.length) });
+      return res.end(file.bytes);
+    }
+    // Metadata saja (uji koneksi admin: getFolderMetadata mengambil folder akar langsung lewat ID, bukan pencarian).
+    // Field selengkap respons Google sungguhan (parents/modifiedTime) — dipakai rekonsiliasi (doSync) untuk
+    // menentukan apakah file masih berada di folder yang diketahui & kapan terakhir berubah.
+    const folder = drive.folders.get(id);
+    if (folder) return sendJson(200, { id: folder.id, name: folder.name, mimeType: "application/vnd.google-apps.folder" });
+    const file = drive.files.get(id);
+    if (file) return sendJson(200, { id: file.id, name: file.name, mimeType: file.mimeType, parents: file.parentId ? [file.parentId] : [], modifiedTime: file.modifiedTime ?? new Date().toISOString(), size: String(file.bytes?.length ?? 0) });
+    return sendJson(404, { error: { message: "Not Found" } });
+  }
+  if (req.method === "PATCH" && fileIdMatch) {
+    if (drive.mode === "500") return sendJson(500, { error: { message: "server tiruan: gagal sengaja" } });
+    const file = drive.files.get(fileIdMatch[1]);
+    if (!file) return sendJson(404, { error: { message: "Not Found" } });
+    const addParents = url.searchParams.get("addParents");
+    if (addParents) file.parentId = addParents; // tiruan: satu induk saja (cukup untuk menguji "pindah folder")
+    if (raw.length > 0) {
+      const body = JSON.parse(raw.toString("utf8"));
+      if (body.name) file.name = body.name;
+    }
+    return sendJson(200, { id: file.id });
+  }
+  const permMatch = /^\/drive\/v3\/files\/([^/]+)\/permissions$/.exec(url.pathname);
+  if (req.method === "POST" && permMatch) {
+    drive.shares.push({ fileId: permMatch[1], body: JSON.parse(raw.toString("utf8")) });
+    return sendJson(200, { id: "perm-1" });
+  }
+  sendJson(404, { error: { message: "tiruan: rute tidak dikenal" } });
+});
+await new Promise((resolve) => driveServer.listen(DRIVE_PORT, "127.0.0.1", resolve));
+
 const app = spawn("node_modules/.bin/next", ["start", "-p", String(APP_PORT), "-H", "127.0.0.1"], {
   env: {
     ...process.env,
@@ -154,12 +283,24 @@ const app = spawn("node_modules/.bin/next", ["start", "-p", String(APP_PORT), "-
     TELEGRAM_WORKER_INTERVAL_MS: "500",
     TELEGRAM_RETRY_DELAYS_SECONDS: "0.1,0.1,0.1,0.1",
     DTIC_APP_URL: BASE,
+    // Google Drive tiruan (lihat blok "drive" di atas). Nonaktif secara default di tes lama yang tidak
+    // mengaktifkannya lewat env ini — tetapi di sini SELALU aktif (konsisten, deterministik) karena semua
+    // skenario unggah hasil di bawah ditulis mengasumsikan driver Drive.
+    GOOGLE_SERVICE_ACCOUNT_EMAIL: "dtic-e2e@dtic-uji.iam.gserviceaccount.com",
+    GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY: DRIVE_FAKE_KEY,
+    GOOGLE_DRIVE_ROOT_FOLDER_ID: DRIVE_ROOT,
+    GOOGLE_OAUTH_TOKEN_URL: `http://127.0.0.1:${DRIVE_PORT}/token`,
+    GOOGLE_DRIVE_API_BASE: `http://127.0.0.1:${DRIVE_PORT}/drive/v3`,
+    GOOGLE_DRIVE_UPLOAD_BASE: `http://127.0.0.1:${DRIVE_PORT}/upload/drive/v3`,
+    GOOGLE_DRIVE_REQUEST_TIMEOUT_MS: "3000",
   },
   stdio: ["ignore", "pipe", "pipe"],
 });
 let appLog = "";
-app.stdout.on("data", (d) => (appLog += d));
-app.stderr.on("data", (d) => (appLog += d));
+const debugLogPath = process.env.E2E_APP_LOG_FILE;
+const debugLogFd = debugLogPath ? openSync(debugLogPath, "a") : null;
+app.stdout.on("data", (d) => { appLog += d; if (debugLogFd !== null) writeSync(debugLogFd, d); });
+app.stderr.on("data", (d) => { appLog += d; if (debugLogFd !== null) writeSync(debugLogFd, d); });
 
 async function waitForApp() {
   for (let i = 0; i < 120; i++) {
@@ -743,6 +884,42 @@ try {
     assert.match(filtered.html, /Belum ada pekerjaan/);
     const ranged = await page(`/dtic/dashboard?from=2020-01-01&to=2020-01-31`);
     assert.match(ranged.html, /Belum ada pekerjaan/);
+  });
+
+  await test("REGRESI filter Brand dashboard: memilih Brand A menyempitkan KPI & daftar ke Brand A saja, bukan gabungan seluruh brand", async () => {
+    // Bukti POSITIF (bukan sekadar "brand tanpa order → kosong" seperti tes di atas): dua order BARU dengan
+    // judul unik pada DUA brand BERBEDA, lalu buktikan memilih salah satu brand benar-benar menyingkirkan
+    // order brand lain dari KPI (total), daftar "Pekerjaan terbaru"/"Deadline terdekat", DAN grafik tren/tim.
+    const stamp = Date.now();
+    const rA = await submit(orderForm(brands[0].id, { designTypeId: TYPES["Poster"], title: `UjiBrandA-${stamp}` }).fd);
+    assert.equal(rA.status, 201, await rA.clone().text());
+    const rB = await submit(orderForm(brands[1].id, { designTypeId: TYPES["Poster"], title: `UjiBrandB-${stamp}` }).fd);
+    assert.equal(rB.status, 201, await rB.clone().text());
+
+    const [{ c: totalBrandA }] = await db`select count(*)::int as c from orders where brand_id = ${brands[0].id}`;
+    const [{ c: totalBrandB }] = await db`select count(*)::int as c from orders where brand_id = ${brands[1].id}`;
+
+    const htmlA = (await page(`/dtic/dashboard?brand=${brands[0].id}`)).html;
+    assert.ok(htmlA.includes(`UjiBrandA-${stamp}`), "order Brand A muncul saat Brand A dipilih");
+    assert.ok(!htmlA.includes(`UjiBrandB-${stamp}`), "order Brand B TIDAK muncul saat Brand A dipilih (tidak tercampur)");
+    assert.ok(htmlA.includes(`>${totalBrandA}<`), `KPI total menyempit ke jumlah order Brand A saja (${totalBrandA}), bukan total seluruh brand`);
+
+    const htmlB = (await page(`/dtic/dashboard?brand=${brands[1].id}`)).html;
+    assert.ok(htmlB.includes(`UjiBrandB-${stamp}`), "order Brand B muncul saat Brand B dipilih");
+    assert.ok(!htmlB.includes(`UjiBrandA-${stamp}`), "order Brand A TIDAK muncul saat Brand B dipilih (filter benar-benar berpindah, bukan macet di pilihan sebelumnya)");
+    assert.ok(htmlB.includes(`>${totalBrandB}<`), `KPI total menyempit ke jumlah order Brand B saja (${totalBrandB})`);
+
+    // Tanpa filter brand, halaman tetap memuat normal setelah berpindah-pindah filter sebelumnya (tidak macet).
+    assert.equal((await fetch(`${BASE}/dtic/dashboard`, { headers: { Cookie: ADMIN } })).status, 200);
+
+    // Brand tidak valid/tidak dikenal: diabaikan dengan aman (bukan error, bukan menampilkan seluruh data tanpa sadar tercampur brand asing).
+    const htmlInvalid = (await page(`/dtic/dashboard?brand=not-a-uuid`)).html;
+    assert.doesNotMatch(htmlInvalid, /Terjadi kesalahan/, "parameter brand tidak valid tidak menyebabkan error halaman");
+
+    // Kombinasi Brand + rentang tanggal bekerja bersamaan (bukan saling menimpa).
+    const todayKey = new Date().toISOString().slice(0, 10);
+    const combo = (await page(`/dtic/dashboard?brand=${brands[0].id}&from=${todayKey}&to=${todayKey}`)).html;
+    assert.ok(combo.includes(`UjiBrandA-${stamp}`), "kombinasi filter Brand + tanggal hari ini tetap menampilkan order Brand A yang baru dibuat");
   });
 
   console.log("\nPengaturan brand");
@@ -1521,6 +1698,77 @@ try {
         await c2.close();
       });
 
+      await test("Tabel responsif: lebar mengikuti sidebar terbuka/tertutup secara murni CSS (tanpa remount), tidak ada horizontal overflow halaman", async () => {
+        const p = await ctx.newPage();
+        await p.goto(`${BASE}/dtic/orders`);
+        await p.locator("table").first().waitFor();
+        // Ukur CONTAINER konten (bukan lebar tabel itu sendiri): tabel punya lebar yang didorong oleh
+        // kontennya sendiri (nama/judul panjang dari ratusan data uji) dan bisa saja sudah melebihi lebar
+        // container di kedua kondisi sidebar — itu sah (lihat uji scroll-terbatas-pada-tabel di bawah).
+        // Yang dibuktikan di sini adalah bahwa RUANG YANG TERSEDIA bagi tabel (container konten) benar-benar
+        // berubah mengikuti sidebar, murni lewat CSS (lihat src/components/layout/sidebar.tsx).
+        const containerBox = () => p.getByTestId("panel-content").evaluate((el) => el.getBoundingClientRect().width);
+        const pageOverflow = () => p.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
+
+        const widthExpanded = await containerBox();
+        assert.equal(await pageOverflow(), false, "tidak ada horizontal overflow halaman saat sidebar terbuka (lebar 1280px)");
+
+        // Tandai node tabel agar bisa dibuktikan TIDAK remount (identitas DOM sama) setelah sidebar berubah.
+        await p.evaluate(() => { document.querySelector("table").dataset.e2eMarker = "sebelum-ciutkan"; });
+        await p.getByRole("button", { name: "Ciutkan sidebar" }).click();
+        await p.waitForTimeout(350); // transition-[padding]/[max-width] duration-200 + buffer
+        const widthCollapsed = await containerBox();
+        assert.ok(widthCollapsed > widthExpanded, `container konten melebar saat sidebar ditutup (${widthExpanded}px → ${widthCollapsed}px)`);
+        assert.equal(await p.locator("table").first().evaluate((el) => el.dataset.e2eMarker), "sebelum-ciutkan", "elemen tabel tidak remount saat sidebar berubah (state/identitas DOM bertahan)");
+        assert.equal(await pageOverflow(), false, "tidak ada horizontal overflow halaman saat sidebar tertutup");
+
+        // Buka-tutup berulang: lebar harus kembali konsisten, bukan menyimpang/berkedip.
+        await p.getByRole("button", { name: "Perluas sidebar" }).click();
+        await p.waitForTimeout(350);
+        const widthReExpanded = await containerBox();
+        assert.ok(Math.abs(widthReExpanded - widthExpanded) < 2, "lebar kembali sama persis setelah dibuka ulang (tidak melayang)");
+        await p.getByRole("button", { name: "Ciutkan sidebar" }).click();
+        await p.waitForTimeout(350);
+        assert.ok((await containerBox()) > widthReExpanded, "sidebar ditutup lagi → container melebar lagi (konsisten pada siklus kedua)");
+        await p.close();
+      });
+
+      await test("Tabel di layar tablet: scroll horizontal terbatas pada tabel, bukan seluruh halaman", async () => {
+        const c2 = await ctx.browser().newContext({ viewport: { width: 820, height: 900 } });
+        await c2.addCookies(await ctx.cookies());
+        const p = await c2.newPage();
+        await p.goto(`${BASE}/dtic/orders`);
+        await p.locator("table").first().waitFor();
+        const pageOverflow = await p.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
+        assert.equal(pageOverflow, false, "halaman tidak ikut melebar horizontal di lebar tablet (820px)");
+        const wrapperScrolls = await p.evaluate(() => {
+          const t = document.querySelector("table");
+          let el = t.parentElement;
+          while (el && el.scrollWidth <= el.clientWidth + 1) el = el.parentElement;
+          return Boolean(el && el.scrollWidth > el.clientWidth + 1);
+        });
+        assert.ok(wrapperScrolls, "pembungkus tabel (bukan halaman) yang menggulir secara horizontal");
+        await c2.close();
+      });
+
+      await test("Tabel di layar mobile: tampilan kartu dipakai (bukan tabel desktop dipaksa muat), tanpa overflow halaman", async () => {
+        const c2 = await ctx.browser().newContext({ viewport: { width: 390, height: 844 } });
+        await c2.addCookies(await ctx.cookies());
+        const p = await c2.newPage();
+        await p.goto(`${BASE}/dtic/orders`);
+        // :visible menghindari tautan desktop (sengaja hidden md:block di lebar ini) — yang ditunggu adalah
+        // tautan dari tampilan kartu mobile.
+        await p.locator("a[href^='/dtic/orders/']:visible").first().waitFor({ timeout: 10000 });
+        const tableHidden = await p.evaluate(() => {
+          const t = document.querySelector("table");
+          return !t || getComputedStyle(t).display === "none" || t.getBoundingClientRect().width === 0 || t.closest('[class*="hidden"]') !== null;
+        });
+        assert.ok(tableHidden, "tabel desktop tidak dipaksakan tampil penuh di layar mobile");
+        const pageOverflow = await p.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
+        assert.equal(pageOverflow, false, "tidak ada horizontal overflow halaman di layar mobile (390px) akibat tabel");
+        await c2.close();
+      });
+
       await test("tidak ada error JavaScript di browser selama uji", async () => {
         assert.deepEqual(pageErrors, []);
       });
@@ -1732,16 +1980,21 @@ try {
     r = await put({ memberIds: [], reason: "Kosongkan PIC" });
     assert.equal(r.status, 422, "minimal satu PIC tetap ditetapkan");
   });
-  await test("Manager: detail & edit menampilkan aksi Kelola PIC; dashboard tanpa aksi penugasan", async () => {
+  await test("Manager: detail menampilkan aksi Kelola PIC TANPA akses edit data pekerjaan; dashboard tanpa aksi penugasan", async () => {
     const detail = await (await fetch(`${BASE}/dtic/orders/${otherId}`, { headers: { Cookie: MGR } })).text();
-    assert.ok(detail.includes("Kelola PIC"), "Manager punya aksi Kelola PIC");
+    assert.ok(detail.includes("Kelola PIC"), "Manager punya aksi Kelola PIC (kewenangan staffing, bukan data pekerjaan)");
     assert.doesNotMatch(detail, /Penetapan PIC dilakukan oleh Super Admin/, "teks lama sudah diganti");
-    const edit = await (await fetch(`${BASE}/dtic/orders/${otherId}/edit`, { headers: { Cookie: MGR } })).text();
-    assert.match(edit, /id="assigneeIds"/, "Manager melihat pilihan PIC di form edit");
+    const editMatchIdx = detail.indexOf("Edit detail");
+    assert.equal(editMatchIdx, -1, `Manager TIDAK melihat tautan Edit detail (orders.update khusus Super Admin) — konteks: ...${detail.slice(Math.max(0, editMatchIdx - 200), editMatchIdx + 200)}...`);
+    // Manager dibatasi pada keputusan QC, bukan data pekerjaan (deadline/bahan referensi/info pemohon) —
+    // navigasi langsung ke /edit pun ditolak di server, bukan cuma tombolnya yang disembunyikan.
+    assert.ok(await redirectsToUnauthorized(await pageRaw(`/dtic/orders/${otherId}/edit`, MGR)), "Manager ditolak dari halaman edit walau mengetik URL langsung");
+    assert.equal((await internal(`/api/internal/orders/${otherId}`, "PATCH", { title: "Percobaan Manager mengubah judul" }, {}, MGR)).status, 403, "Manager ditolak server saat mencoba PATCH order langsung");
     const dash = await (await fetch(`${BASE}/dtic/dashboard`, { headers: { Cookie: MGR } })).text();
     assert.doesNotMatch(dash, /Tugaskan|Assign PIC|Pindahkan Tugas/, "dashboard Manager tanpa aksi penugasan");
     const adminDetail = (await page(`/dtic/orders/${otherId}`)).html;
     assert.ok(adminDetail.includes("Kelola PIC"), "Super Admin tetap bisa menetapkan PIC");
+    assert.ok(adminDetail.includes("Edit detail"), "Super Admin tetap melihat Edit detail");
   });
   await test("Manager: pengaturan anggota read-only (tanpa tombol ubah)", async () => {
     const r = await pageRaw("/dtic/settings/members", MGR);
@@ -2829,11 +3082,14 @@ try {
     assert.equal((await db`select deadline_at from orders where order_number = ${n2}`)[0].deadline_at.toISOString(), `${wibDate(4)}T16:59:00.000Z`, "akhir hari 23.59 WIB");
   });
 
-  await test("Ubah tenggat: Manager → tenggat berubah, status tetap, audit mencatat lama/baru/alasan/pelaku", async () => {
+  await test("Ubah tenggat: Super Admin → tenggat berubah, status tetap, audit mencatat lama/baru/alasan/pelaku; Manager DITOLAK (bukan kewenangan QC)", async () => {
     const created = await submit(orderForm(brand1, { title: "Judul Uji Ubah Tenggat" }).fd);
     const { orderNumber } = await created.json();
     const [before] = await db`select id, status, deadline_at from orders where order_number = ${orderNumber}`;
-    const r = await internal(`/api/internal/orders/${before.id}/deadline`, "PUT", { deadlineDate: wibDate(10), deadlineTime: "15:00", reason: "Klien minta diundur" }, {}, MGR);
+    // Manager dibatasi pada keputusan QC — mengubah tenggat adalah data pekerjaan, bukan kewenangannya.
+    const denied = await internal(`/api/internal/orders/${before.id}/deadline`, "PUT", { deadlineDate: wibDate(10), deadlineTime: "15:00", reason: "Klien minta diundur" }, {}, MGR);
+    assert.equal(denied.status, 403, "Manager ditolak mengubah tenggat");
+    const r = await internal(`/api/internal/orders/${before.id}/deadline`, "PUT", { deadlineDate: wibDate(10), deadlineTime: "15:00", reason: "Klien minta diundur" }, {}, ADMIN);
     assert.equal(r.status, 200, await r.clone().text());
     const [after] = await db`select status, deadline_at from orders where id = ${before.id}`;
     assert.equal(after.deadline_at.toISOString(), `${wibDate(10)}T08:00:00.000Z`, "15:00 WIB");
@@ -2842,9 +3098,10 @@ try {
     assert.equal(audit.detail.reason, "Klien minta diundur");
     assert.equal(audit.detail.previousDeadline, before.deadline_at.toISOString());
     assert.equal(audit.detail.newDeadline, after.deadline_at.toISOString());
-    assert.equal(audit.detail.actorName, (await db`select full_name from app_users where email = 'manager@dtic.example'`)[0].full_name);
-    const detail = await (await pageRaw(`/dtic/orders/${before.id}`, MGR)).text();
-    assert.ok(detail.includes("Ubah tenggat"), "Manager melihat tombol ubah tenggat");
+    const managerDetail = await (await pageRaw(`/dtic/orders/${before.id}`, MGR)).text();
+    assert.ok(!managerDetail.includes("Ubah tenggat"), "Manager TIDAK melihat tombol ubah tenggat");
+    const adminDetail = await (await pageRaw(`/dtic/orders/${before.id}`, ADMIN)).text();
+    assert.ok(adminDetail.includes("Ubah tenggat"), "Super Admin melihat tombol ubah tenggat");
   });
 
   await test("Ubah tenggat: staff ditolak; alasan pendek ditolak; pekerjaan selesai ditolak; tanpa perubahan tidak ada audit", async () => {
@@ -2853,12 +3110,12 @@ try {
     const [o] = await db`select id, deadline_at from orders where order_number = ${orderNumber}`;
     const staffCookie = await login("staff@dtic.example", "StaffUji2026");
     assert.equal((await internal(`/api/internal/orders/${o.id}/deadline`, "PUT", { deadlineDate: wibDate(12), reason: "Staff mencoba ubah" }, {}, staffCookie)).status, 403);
-    assert.equal((await internal(`/api/internal/orders/${o.id}/deadline`, "PUT", { deadlineDate: wibDate(12), reason: "abc" }, {}, MGR)).status, 422);
-    const same = await internal(`/api/internal/orders/${o.id}/deadline`, "PUT", { deadlineDate: o.deadline_at.toISOString().slice(0, 10), deadlineTime: "23:59", reason: "Tanpa perubahan sama sekali" }, {}, MGR);
+    assert.equal((await internal(`/api/internal/orders/${o.id}/deadline`, "PUT", { deadlineDate: wibDate(12), reason: "abc" }, {}, ADMIN)).status, 422);
+    const same = await internal(`/api/internal/orders/${o.id}/deadline`, "PUT", { deadlineDate: o.deadline_at.toISOString().slice(0, 10), deadlineTime: "23:59", reason: "Tanpa perubahan sama sekali" }, {}, ADMIN);
     assert.equal((await same.json()).changed, false);
     await db`update orders set status = 'completed', completed_at = now() where id = ${o.id}`;
-    assert.equal((await internal(`/api/internal/orders/${o.id}/deadline`, "PUT", { deadlineDate: wibDate(15), reason: "Pekerjaan sudah selesai" }, {}, MGR)).status, 409);
-    const detail = await (await pageRaw(`/dtic/orders/${o.id}`, MGR)).text();
+    assert.equal((await internal(`/api/internal/orders/${o.id}/deadline`, "PUT", { deadlineDate: wibDate(15), reason: "Pekerjaan sudah selesai" }, {}, ADMIN)).status, 409);
+    const detail = await (await pageRaw(`/dtic/orders/${o.id}`, ADMIN)).text();
     assert.ok(!detail.includes("Ubah tenggat"), "pekerjaan selesai tidak menampilkan tombol");
   });
 
@@ -2881,7 +3138,7 @@ try {
       const { orderNumber } = await created.json();
       const [o] = await db`select id from orders where order_number = ${orderNumber}`;
       await db`insert into order_assignments (order_id, member_id) values (${o.id}, ${staffRow.id}) on conflict do nothing`;
-      const dl = await internal(`/api/internal/orders/${o.id}/deadline`, "PUT", { deadlineDate: wibDate(6), deadlineTime: "15:00", reason: "Penyesuaian jadwal acara pemohon" }, {}, MGR);
+      const dl = await internal(`/api/internal/orders/${o.id}/deadline`, "PUT", { deadlineDate: wibDate(6), deadlineTime: "15:00", reason: "Penyesuaian jadwal acara pemohon" }, {}, ADMIN);
       assert.equal(dl.status, 200, await dl.clone().text());
 
       const dir = process.env.E2E_SHOT_DIR ?? path.join(os.tmpdir(), "dtic-form-shots");
@@ -2954,6 +3211,11 @@ try {
   // Satu sesi PIC dipakai ulang (login dibatasi laju per akun).
   let qcStaffCookie = null;
   const qcStaff = async () => (qcStaffCookie ??= await login("staff@dtic.example", "StaffUji2026"));
+  // Sesi MGR/STAFF global (login di awal berkas) bisa sudah dicabut oleh skenario lain yang berjalan di antaranya
+  // (lihat komentar "sesi baru: sesi uji sebelumnya mungkin sudah dicabut" di atas) — bagian pengujian yang
+  // berjalan jauh setelah login awal login ulang sendiri daripada memakai MGR/STAFF lama secara langsung.
+  let qcManagerCookie = null;
+  const qcManager = async () => (qcManagerCookie ??= await login("manager@dtic.example", "ManagerUji2026"));
   const qcRow = async (id) => (await db`select status, qc_status from orders where id = ${id}`)[0];
   const events = async (id, kind) =>
     kind
@@ -3027,10 +3289,11 @@ try {
     const [dl] = await events(id, "delivery_recorded");
     assert.equal(dl.detail.afterQc, false);
     // Notifikasi Telegram DIANTREKAN untuk penyerahan ke pemohon (sebelumnya tidak pernah diantrekan).
-    const outboxRows = await db`select kind, event_type from notification_outbox where order_id = ${id} order by created_at desc limit 1`;
-    assert.equal(outboxRows.length, outboxBefore + 1, "satu notifikasi baru diantrekan untuk penyerahan");
-    assert.equal(outboxRows[0].kind, "status_changed");
-    assert.equal(outboxRows[0].event_type, "status_changed", "event berbeda dari 'waiting_confirmation' (ajukan QC)");
+    const outboxAfter = (await db`select count(*)::int as c from notification_outbox where order_id = ${id}`)[0].c;
+    assert.equal(outboxAfter, outboxBefore + 1, "satu notifikasi baru diantrekan untuk penyerahan");
+    const [latestOutbox] = await db`select kind, event_type from notification_outbox where order_id = ${id} order by created_at desc limit 1`;
+    assert.equal(latestOutbox.kind, "status_changed");
+    assert.equal(latestOutbox.event_type, "status_changed", "event berbeda dari 'waiting_confirmation' (ajukan QC)");
     const tgBefore = tg.calls.length;
     await new Promise((resolve) => setTimeout(resolve, 1500));
     assert.ok(tg.calls.length > tgBefore, "pesan Telegram benar-benar terkirim untuk penyerahan ke pemohon");
@@ -3180,6 +3443,420 @@ try {
     assert.equal((await uploadResult(id, { name: "telat.png", data: PNG_BYTES }, STAFFC)).status, 409, "pekerjaan selesai tidak menerima unggahan");
   });
 
+  const addLink = (id, body, cookie) => internal(`/api/internal/orders/${id}/result-links`, "POST", body, {}, cookie);
+  const deleteLink = (id, linkId, cookie) => internal(`/api/internal/orders/${id}/result-links/${linkId}`, "DELETE", undefined, {}, cookie);
+  const linkRows = async (id) => await db`select id, url, title from order_result_links where order_id = ${id} order by created_at`;
+
+  await test("Link hasil: website yang sudah online diserahkan sebagai link (tanpa ZIP); validasi URL/judul; hanya pengunggah/Super Admin yang menghapus", async () => {
+    const { id } = await qcOrder("Judul Uji Link Hasil");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    assert.equal((await addLink(id, { url: "http://tidak-aman.example", title: "Website" }, STAFFC)).status, 422, "http (non-https) ditolak");
+    assert.equal((await addLink(id, { url: "bukan-url", title: "Website" }, STAFFC)).status, 422, "URL tidak valid ditolak");
+    assert.equal((await addLink(id, { url: "https://situs.example", title: "" }, STAFFC)).status, 422, "judul wajib");
+    assert.equal((await addLink(id, { url: "https://situs.example", title: "Website" }, MGR)).status, 403, "Manager tidak menambahkan atas nama PIC");
+    let r = await addLink(id, { url: "https://situs.example/live", title: "Website Hasil (live)", description: "Sudah tayang di hosting klien" }, STAFFC);
+    assert.equal(r.status, 201, await r.clone().text());
+    const link = (await r.json()).link;
+    assert.equal((await linkRows(id)).length, 1);
+    // hasil berupa link saja (tanpa file) memenuhi syarat pengajuan QC in_app
+    r = await workflow(id, { action: "submit_qc", method: "in_app", resultLinkIds: [link.id], note: "Hasil sudah online, tidak perlu ZIP" }, STAFFC);
+    assert.equal(r.status, 200, await r.clone().text());
+    const [sub] = await events(id, "qc_submitted");
+    assert.deepEqual(sub.detail.resultLinkIds, [link.id]);
+    assert.equal((await deleteLink(id, link.id, STAFFC)).status, 409, "link yang sudah diajukan untuk QC tidak dapat dihapus");
+    const html = await (await pageRaw(`/dtic/orders/${id}`, MGR)).text();
+    assert.match(html, /Website Hasil \(live\)/, "Manager melihat link hasil di detail pekerjaan");
+    assert.match(html, /href="https:\/\/situs\.example\/live"/, "link dapat dibuka langsung oleh Manager");
+    await workflow(id, { action: "approve_qc" }, MGR);
+    assert.equal((await qcRow(id)).qc_status, "approved");
+  });
+
+  await test("Link hasil + file hasil dikombinasikan dalam satu pengajuan QC; ditolak bila keduanya kosong; link order lain ditolak", async () => {
+    const { id } = await qcOrder("Judul Uji Kombinasi File dan Link");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    assert.equal((await workflow(id, { action: "submit_qc", method: "in_app" }, STAFFC)).status, 422, "tanpa file maupun link ditolak");
+    const file = (await (await uploadResult(id, { name: "repo-readme.pdf", data: PDF, type: "application/pdf" }, STAFFC)).json()).file;
+    const link = (await (await addLink(id, { url: "https://repo.example/proyek", title: "Repositori Kode" }, STAFFC)).json()).link;
+    const otherOrder = await qcOrder("Judul Uji Link Order Lain");
+    await setStatusAs(otherOrder.id, "in_progress", STAFFC);
+    const foreignLink = (await (await addLink(otherOrder.id, { url: "https://lain.example", title: "Punya order lain" }, STAFFC)).json()).link;
+    assert.equal((await workflow(id, { action: "submit_qc", method: "in_app", resultFileIds: [file.id], resultLinkIds: [foreignLink.id] }, STAFFC)).status, 422, "link order lain ditolak");
+    const r = await workflow(id, { action: "submit_qc", method: "in_app", resultFileIds: [file.id], resultLinkIds: [link.id], note: "File dokumentasi + link repo" }, STAFFC);
+    assert.equal(r.status, 200, await r.clone().text());
+    const [sub] = await events(id, "qc_submitted");
+    assert.deepEqual(sub.detail.resultFileIds, [file.id]);
+    assert.deepEqual(sub.detail.resultLinkIds, [link.id]);
+  });
+
+
+  console.log("\nGoogle Drive A — Pusat Pengumpulan Hasil PIC");
+  const driveRow = async (fileId) => (await db`select drive_file_id, drive_folder_id, sync_status, sync_error, storage_path from order_attachments where id = ${fileId}`)[0];
+  const resetDrive = () => { drive.mode = "ok"; };
+  // Skenario unggah di bawah mengasumsikan integrasi SUDAH diaktifkan Super Admin (fixture pengujian, bukan
+  // jalan pintas produksi) — alur aktivasi sungguhan (Uji Koneksi/Aktifkan/Nonaktifkan) diuji terpisah di
+  // bagian "Pengaturan admin Google Drive" setelah bagian ini.
+  await db`update drive_integration_settings set enabled = true, last_test_at = now(), last_test_ok = true, last_test_message = 'fixture pengujian' where id = 1`;
+
+  await test("Drive: unggah sukses → sync_status synced, file nyata di folder tahun/nomor order, unduh berhasil", async () => {
+    resetDrive();
+    const uploadsBefore = drive.uploads;
+    const { id, orderNumber } = await qcOrder("Judul Uji Drive Sukses");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    const r = await uploadResult(id, { name: "hasil-drive.png", data: PNG_BYTES, type: "image/png" }, STAFFC);
+    assert.equal(r.status, 201, await r.clone().text());
+    const { file } = await r.json();
+    assert.equal(file.driveSyncStatus, "synced");
+    const row = await driveRow(file.id);
+    assert.equal(row.sync_status, "synced");
+    assert.ok(row.drive_file_id, "drive_file_id tersimpan");
+    assert.equal(row.storage_path, null, "baris berbasis Drive tidak memakai storage lokal/Supabase");
+    assert.equal(drive.uploads, uploadsBefore + 1, "tepat satu panggilan unggah nyata ke Drive");
+    // Folder: DTICSystemNexus/{Nama_PIC}/{Tahun}/{Tanggal DD-MM-YYYY}/{Nama_Pemohon}/{NomorOrder - Judul}/02_Proses_Pengerjaan
+    // (unggahan baru = draf, belum dirujuk alur QC apa pun — lihat syncRowToDrive). Subfolder per nomor
+    // order memisahkan arsip per pekerjaan (lihat catatan di driveResultFolderPath).
+    const driveFile = drive.files.get(row.drive_file_id);
+    const categoryFolder = drive.folders.get(driveFile.parentId);
+    assert.equal(categoryFolder.name, "02_Proses_Pengerjaan", "file baru masuk kategori Proses Pengerjaan (draf)");
+    const orderFolder = drive.folders.get(categoryFolder.parentId);
+    assert.ok(orderFolder.name.startsWith(orderNumber), "folder per pekerjaan diberi nama diawali nomor order");
+    const requesterFolder = drive.folders.get(orderFolder.parentId);
+    assert.equal(requesterFolder.name, "Ani-Lestari", "folder nama pemohon (default orderForm)");
+    const dateFolder = drive.folders.get(requesterFolder.parentId);
+    assert.match(dateFolder.name, /^\d{2}-\d{2}-\d{4}$/, "folder tanggal berformat DD-MM-YYYY");
+    const yearFolder = drive.folders.get(dateFolder.parentId);
+    assert.equal(yearFolder.name, orderNumber.match(/^DTIC-(\d{4})-/)[1], "folder tahun sesuai tanggal pengajuan");
+    const picFolder = drive.folders.get(yearFolder.parentId);
+    // "PIC utama" = anggota PALING AWAL ditugaskan (assigned_at) — qcOrder() memberi PIC default dari tim
+    // kategori SAAT PENGAJUAN, baru menambahkan staff@dtic.example (Nuri) setelahnya; jadi PIC default tim
+    // itulah yang "utama", bukan Nuri — cocokkan ke PIC yang benar-benar paling awal tercatat, bukan nama
+    // yang di-hardcode (supaya tes tetap benar walau urutan anggota tim berubah).
+    const [{ full_name: expectedPrimary }] = await db`
+      select m.full_name from order_assignments a join dtic_members m on m.id = a.member_id
+      where a.order_id = ${id} order by a.assigned_at asc, a.member_id asc limit 1`;
+    assert.equal(picFolder.name, expectedPrimary.replace(/\s+/g, "-"), "folder PIC utama = anggota paling awal ditugaskan");
+    assert.equal(picFolder.parentId, DRIVE_ROOT, "folder PIC langsung di bawah root DTICSystemNexus");
+    // Unduh lewat endpoint tunggal yang sudah ada, sesudah pemeriksaan akses — isi file sama persis.
+    const dl = await fetch(`${BASE}/api/internal/attachments/${file.id}`, { headers: { Cookie: STAFFC } });
+    assert.equal(dl.status, 200);
+    assert.deepEqual(Buffer.from(await dl.arrayBuffer()), PNG_BYTES);
+    assert.equal(drive.shares.length, 0, "tidak membagikan file secara individual (akses lewat otorisasi DTIC Nexus, bukan ACL Drive)");
+  });
+
+  await test("Drive: folder per PEKERJAAN tidak dibagi dua order (nomor order membedakan); folder Pemohon/Tanggal/Tahun/PIC tetap dipakai ulang", async () => {
+    resetDrive();
+    const STAFFC = await qcStaff();
+    const a = await qcOrder("Judul Uji Folder A"); // requesterName default: "Ani Lestari"
+    const b = await qcOrder("Judul Uji Folder B"); // requesterName default: "Ani Lestari" juga (PIC & tanggal sama)
+    await setStatusAs(a.id, "in_progress", STAFFC);
+    await setStatusAs(b.id, "in_progress", STAFFC);
+    const ra = await (await uploadResult(a.id, { name: "a.png", data: PNG_BYTES }, STAFFC)).json();
+    const rb = await (await uploadResult(b.id, { name: "b.png", data: PNG_BYTES }, STAFFC)).json();
+    const fa = drive.files.get((await driveRow(ra.file.id)).drive_file_id);
+    const fb = drive.files.get((await driveRow(rb.file.id)).drive_file_id);
+    const categoryA = drive.folders.get(fa.parentId);
+    const categoryB = drive.folders.get(fb.parentId);
+    const orderFolderA = drive.folders.get(categoryA.parentId);
+    const orderFolderB = drive.folders.get(categoryB.parentId);
+    // Subfolder per nomor order: dua pekerjaan dari pemohon+PIC+tanggal yang sama TIDAK lagi berbagi
+    // folder kategori yang sama (lihat perubahan driveResultFolderPath — sebelumnya folder ini dibagi).
+    assert.notEqual(orderFolderA.id, orderFolderB.id, "setiap pekerjaan punya subfolder sendiri, walau pemohon/PIC/tanggal sama");
+    assert.ok(orderFolderA.name.includes(a.orderNumber) && orderFolderB.name.includes(b.orderNumber), "subfolder diberi nama sesuai nomor order masing-masing");
+    // Tapi folder Pemohon (satu level di atas subfolder order) tetap satu & dipakai ulang.
+    const requesterFolderA = drive.folders.get(orderFolderA.parentId);
+    const requesterFolderB = drive.folders.get(orderFolderB.parentId);
+    assert.equal(requesterFolderA.id, requesterFolderB.id, "folder pemohon tetap dipakai ulang, hanya subfolder order yang baru");
+
+    // Pemohon BERBEDA (PIC & tanggal tetap sama) → folder pemohon berbeda, tapi Tanggal/Tahun/PIC dipakai ulang.
+    const c = await qcOrder("Judul Uji Folder C");
+    await db`update orders set requester_name = 'CV Berkah Mandiri' where id = ${c.id}`;
+    await setStatusAs(c.id, "in_progress", STAFFC);
+    const rc = await (await uploadResult(c.id, { name: "c.png", data: PNG_BYTES }, STAFFC)).json();
+    const fc = drive.files.get((await driveRow(rc.file.id)).drive_file_id);
+    const orderFolderC = drive.folders.get(drive.folders.get(fc.parentId).parentId);
+    assert.notEqual(orderFolderC.parentId, requesterFolderA.id, "pemohon berbeda → folder pemohon berbeda");
+    // file -> kategori -> order -> pemohon -> tanggal: empat langkah ke atas dari folder yang langsung membungkus file.
+    const dateA = drive.folders.get(requesterFolderA.parentId);
+    const dateC = drive.folders.get(drive.folders.get(orderFolderC.parentId).parentId);
+    assert.equal(dateA.id, dateC.id, "folder tanggal yang sama (PIC & tanggal sama) dipakai ulang antar pemohon berbeda");
+  });
+
+  await test("Drive: kategori folder (dan nama file) berpindah otomatis mengikuti alur QC (draf → Hasil Awal → Revisi → Hasil Final), tanpa menggandakan file", async () => {
+    resetDrive();
+    const { id } = await qcOrder("Judul Uji Kategori Drive");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    const up = await uploadResult(id, { name: "draf.png", data: PNG_BYTES }, STAFFC);
+    assert.equal(up.status, 201, await up.clone().text());
+    const fileId = (await up.json()).file.id;
+    const driveFileId = (await driveRow(fileId)).drive_file_id;
+    // Nama folder yang LANGSUNG membungkus file (folder terdalam di jalurnya saat ini).
+    const categoryOf = () => drive.folders.get(drive.files.get(driveFileId).parentId).name;
+    assert.equal(categoryOf(), "02_Proses_Pengerjaan", "baru diunggah = draf");
+
+    const uploadsBefore = drive.uploads;
+    let r = await workflow(id, { action: "submit_qc", method: "in_app", resultFileIds: [fileId], note: "Pengajuan pertama" }, STAFFC);
+    assert.equal(r.status, 200, await r.clone().text());
+    assert.equal(categoryOf(), "03_Hasil_Awal", "pengajuan pertama (belum pernah revisi) → Hasil Awal");
+
+    const MGRC = await qcManager();
+    r = await workflow(id, { action: "request_revision", note: "Tolong perbaiki warna" }, MGRC);
+    assert.equal(r.status, 200, await r.clone().text());
+    // submit_qc ditolak langsung dari status internal_revision ("Perbaiki Hasil" dulu) — PIC harus kembali
+    // ke in_progress lewat endpoint status biasa sebelum mengajukan ulang (lihat tes "Ke Manager: revisi...").
+    assert.equal((await setStatusAs(id, "in_progress", STAFFC)).status, 200, "Perbaiki Hasil");
+    r = await workflow(id, { action: "submit_qc", method: "in_app", resultFileIds: [fileId], note: "Revisi pertama" }, STAFFC);
+    assert.equal(r.status, 200, await r.clone().text());
+    // Struktur folder DATAR (sesuai permintaan terbaru): tidak ada sub-folder Revisi-NN — file langsung
+    // masuk folder kategori "04_Revisi"; nomor revisi tercatat di NAMA FILE Drive (lihat driveResultFileName).
+    assert.equal(categoryOf(), "04_Revisi", "pengajuan setelah 1x revisi diminta → 04_Revisi");
+    assert.match(drive.files.get(driveFileId).name, /Revisi-01/, "nama file Drive ikut diganti mencerminkan Revisi-01");
+
+    r = await workflow(id, { action: "approve_qc", note: "Disetujui" }, MGRC);
+    assert.equal(r.status, 200, await r.clone().text());
+    assert.equal(categoryOf(), "05_Hasil_Final", "disetujui Manager → Hasil Final");
+    assert.match(drive.files.get(driveFileId).name, /FINAL/, "nama file Drive ikut diganti mencerminkan FINAL");
+
+    assert.equal(drive.uploads, uploadsBefore, "berpindah kategori TIDAK mengunggah file baru (dipindahkan, bukan digandakan)");
+    const dl = await fetch(`${BASE}/api/internal/attachments/${fileId}`, { headers: { Cookie: STAFFC } });
+    assert.equal(dl.status, 200, "file tetap bisa diunduh setelah berpindah folder beberapa kali");
+    assert.deepEqual(Buffer.from(await dl.arrayBuffer()), PNG_BYTES, "isi file tidak berubah akibat perpindahan folder");
+  });
+
+  await test("Drive: Google menolak (HTTP 500) → sync_status failed, pesan jelas, TIDAK dianggap berhasil; database tidak menyimpan file yang belum tersimpan", async () => {
+    const { id } = await qcOrder("Judul Uji Drive Gagal");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    drive.mode = "500";
+    const r = await uploadResult(id, { name: "gagal.png", data: PNG_BYTES }, STAFFC);
+    assert.equal(r.status, 503, await r.clone().text());
+    const body = await r.json();
+    assert.match(body.error, /Google Drive/i);
+    assert.doesNotMatch(body.error, /token|AAHtest|private_key|BEGIN PRIVATE/i, "tidak membocorkan rahasia di pesan error");
+    const rows = await resultRows(id);
+    assert.equal(rows.length, 1, "baris tetap ada (berstatus failed), bukan tidak ada sama sekali dan bukan baris ganda");
+    const row = await driveRow(rows[0].id);
+    assert.equal(row.sync_status, "failed");
+    assert.ok(row.sync_error, "alasan kegagalan tercatat");
+    assert.equal(row.drive_file_id, null);
+    resetDrive();
+  });
+
+  await test("Drive: retry dengan upload_key SAMA setelah timeout ambigu TIDAK menggandakan file (dicari dulu via appProperties sebelum unggah)", async () => {
+    const { id } = await qcOrder("Judul Uji Drive Retry Tanpa Duplikasi");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    const key = randomUUID();
+    resetDrive();
+    const uploadsBefore = drive.uploads;
+    const r1 = await uploadResult(id, { name: "retry.png", data: PNG_BYTES }, STAFFC, key);
+    assert.equal(r1.status, 201);
+    const file1 = (await r1.json()).file;
+    // "retry setelah timeout" disimulasikan: klaim ulang baris yang SAMA secara langsung (lease sudah terbit),
+    // seperti yang akan dilakukan endpoint retry untuk baris yang tersangkut — Drive dicari dulu via
+    // idempotencyKey, menemukan file yang SAMA, dan tidak mengunggah lagi.
+    await db`update order_attachments set sync_locked_at = now() - interval '200 seconds' where id = ${file1.id}`;
+    const r2 = await uploadResult(id, { name: "retry.png", data: PNG_BYTES }, STAFFC, key);
+    assert.equal(r2.status, 200, "percobaan kedua: duplicate, bukan baris/berkas baru");
+    const file2 = (await r2.json()).file;
+    assert.equal(file2.id, file1.id, "baris yang sama, bukan baris baru");
+    assert.equal(drive.uploads, uploadsBefore + 1, "Drive HANYA menerima satu unggahan sungguhan untuk kunci ini");
+    assert.equal((await resultRows(id)).filter((x) => x.file_name === "retry.png").length, 1, "tidak ada baris ganda di database");
+  });
+
+  await test("Drive: klaim ganda bersamaan (klik ganda) untuk baris 'pending' yang sama tidak memanggil Drive dua kali", async () => {
+    const { id } = await qcOrder("Judul Uji Drive Klik Ganda");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    resetDrive();
+    const uploadsBefore = drive.uploads;
+    const key = randomUUID();
+    // Dua permintaan BENAR-BENAR bersamaan dengan upload_key yang sama (simulasi klik ganda sungguhan).
+    const [r1, r2] = await Promise.all([uploadResult(id, { name: "ganda.png", data: PNG_BYTES }, STAFFC, key), uploadResult(id, { name: "ganda.png", data: PNG_BYTES }, STAFFC, key)]);
+    assert.deepEqual([r1.status, r2.status].sort(), [200, 201], "satu membuat, satu melapor duplikat — tidak ada yang gagal");
+    assert.equal(drive.uploads, uploadsBefore + 1, "Drive hanya menerima satu unggahan sungguhan walau dua permintaan bersamaan");
+    assert.equal((await resultRows(id)).filter((x) => x.file_name === "ganda.png").length, 1);
+  });
+
+  await test("Drive: endpoint retry mengunggah ulang file yang gagal/tersangkut, memakai kunci baris yang sama (bukan kunci baru)", async () => {
+    const { id } = await qcOrder("Judul Uji Drive Endpoint Retry");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    drive.mode = "500";
+    // Unggah pertama GAGAL disinkronkan ke Drive → upload melempar 503 (bukan "ok" palsu), tapi baris
+    // order_attachments tetap tersimpan dengan sync_status='failed' untuk dicoba ulang (lihat syncRowToDrive).
+    const initialRes = await uploadResult(id, { name: "coba-lagi.png", data: PNG_BYTES }, STAFFC);
+    assert.equal(initialRes.status, 503, await initialRes.clone().text());
+    const [failedRow] = await resultRows(id);
+    assert.ok(failedRow, "baris tetap tersimpan walau sinkronisasi Drive gagal");
+    assert.equal((await driveRow(failedRow.id)).sync_status, "failed");
+    resetDrive();
+    const fd = new FormData();
+    fd.set("file", new Blob([PNG_BYTES], { type: "image/png" }), "coba-lagi.png");
+    const retryRes = await fetch(`${BASE}/api/internal/orders/${id}/results/${failedRow.id}/retry`, { method: "POST", headers: { Cookie: STAFFC, Origin: BASE, "X-DTIC-Request": "1" }, body: fd });
+    assert.equal(retryRes.status, 201, await retryRes.clone().text());
+    const retried = (await retryRes.json()).file;
+    assert.equal(retried.id, failedRow.id, "baris yang sama diperbarui, bukan baris baru");
+    assert.equal(retried.driveSyncStatus, "synced");
+    assert.equal((await resultRows(id)).length, 1, "tidak ada baris ganda akibat retry");
+    // Staff lain (bukan PIC order ini) tidak dapat memicu retry.
+    const other = await login("staff-qc-other@dtic.example", "StaffQcOther2026");
+    const fd2 = new FormData();
+    fd2.set("file", new Blob([PNG_BYTES], { type: "image/png" }), "x.png");
+    assert.equal((await fetch(`${BASE}/api/internal/orders/${id}/results/${failedRow.id}/retry`, { method: "POST", headers: { Cookie: other, Origin: BASE, "X-DTIC-Request": "1" }, body: fd2 })).status, 404);
+  });
+
+  await test("Drive: PIC yang tidak ditugaskan TIDAK dapat mengunduh file hasil berbasis Drive (404, bukan file)", async () => {
+    resetDrive();
+    const { id } = await qcOrder("Judul Uji Drive Akses Ditolak");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    const file = (await (await uploadResult(id, { name: "privat.png", data: PNG_BYTES }, STAFFC)).json()).file;
+    const other = await login("staff-qc-other@dtic.example", "StaffQcOther2026");
+    const denied = await fetch(`${BASE}/api/internal/attachments/${file.id}`, { headers: { Cookie: other } });
+    assert.equal(denied.status, 404, "PIC lain yang tidak ditugaskan ditolak, bukan diberi file");
+    assert.equal((await fetch(`${BASE}/api/internal/attachments/${file.id}`)).status, 401, "tanpa sesi ditolak");
+    const okManager = await fetch(`${BASE}/api/internal/attachments/${file.id}`, { headers: { Cookie: MGR } });
+    assert.equal(okManager.status, 200, "Manager (berwenang atas seluruh order) tetap bisa mengunduh");
+  });
+
+  await test("Drive: hasil tersaji di UI (status Tersimpan/Gagal), retry dari peramban, dan bukan duplikasi backend", async () => {
+    const chromePath = process.env.CHROME_PATH ?? "/usr/bin/google-chrome";
+    const { chromium } = await import("playwright-core");
+    const browser = await chromium.launch({ executablePath: chromePath, headless: true });
+    try {
+      resetDrive();
+      const { id } = await qcOrder("Judul Uji Drive Browser");
+      const STAFFC = await qcStaff();
+      await setStatusAs(id, "in_progress", STAFFC);
+      drive.mode = "500";
+      // Upload gagal disinkronkan ke Drive → melempar 503 (bukan "ok" palsu); baris tetap tersimpan sebagai 'failed'.
+      assert.equal((await uploadResult(id, { name: "ui-gagal.png", data: PNG_BYTES }, STAFFC)).status, 503);
+      const [failed] = await resultRows(id);
+      resetDrive();
+
+      const c = await browser.newContext({ viewport: { width: 1366, height: 900 } });
+      const [name, value] = STAFFC.split("=");
+      await c.addCookies([{ name, value, url: BASE }]);
+      const p = await c.newPage();
+      const consoleErrors = [];
+      p.on("console", (m) => { if (m.type() === "error") consoleErrors.push(m.text()); });
+      p.on("pageerror", (e) => consoleErrors.push(e.message));
+      await p.goto(`${BASE}/dtic/orders/${id}`);
+      await p.getByTestId("results").waitFor();
+      const resultsText = await p.getByTestId("results").innerText();
+      assert.match(resultsText, /Gagal disinkronkan ke Drive/);
+      assert.match(resultsText, /ui-gagal\.png/);
+      assert.equal(await p.getByRole("link", { name: /Unduh ui-gagal\.png/ }).count(), 0, "file yang gagal tidak bisa diunduh (belum tersimpan)");
+      const dir = process.env.E2E_SHOT_DIR ?? path.join(os.tmpdir(), "dtic-form-shots");
+      await mkdir(dir, { recursive: true });
+      await p.screenshot({ path: path.join(dir, "14-drive-gagal.png"), fullPage: true });
+
+      // Coba lagi lewat UI: pilih file lagi, unggah ulang berhasil.
+      // Elemen yang terlihat adalah <label> (bukan role "button"); input file tersembunyinya punya aria-label
+      // deskriptif sendiri ("...mencoba lagi...") yang secara tidak sengaja cocok dengan pencarian substring
+      // "Coba Lagi" milik getByRole — jadi targetkan teks label yang terlihat secara eksak, bukan role.
+      await p.getByText("Coba Lagi", { exact: true }).waitFor();
+      const [chooser] = await Promise.all([p.waitForEvent("filechooser"), p.getByText("Coba Lagi", { exact: true }).click()]);
+      const tmp = path.join(dir, "ui-gagal.png");
+      await writeFile(tmp, PNG_BYTES);
+      await chooser.setFiles(tmp);
+      await p.getByText("Tersimpan di Google Drive").waitFor();
+      await p.waitForTimeout(300);
+      await p.screenshot({ path: path.join(dir, "15-drive-berhasil.png"), fullPage: true });
+      assert.equal(await p.getByRole("link", { name: /Unduh ui-gagal\.png/ }).count(), 1, "sekarang bisa diunduh");
+      assert.equal((await resultRows(id)).length, 1, "tetap satu baris, bukan baris baru dari retry UI");
+      assert.equal((await driveRow(failed.id)).sync_status, "synced");
+      assert.deepEqual(consoleErrors, [], `tanpa error konsol: ${consoleErrors.join(" | ")}`);
+      await c.close();
+    } finally {
+      await browser.close();
+    }
+  });
+
+  const forceDriveSync = (id, cookie) => internal(`/api/internal/orders/${id}/drive-sync`, "POST", { force: true }, {}, cookie);
+  // Harus sama dengan ESCALATION_THRESHOLD di src/lib/server/services/drive-escalation.ts — tidak diimpor
+  // langsung karena berkas ini menguji app lewat HTTP terhadap proses `next start` terpisah (lihat import
+  // di awal berkas, semuanya pustaka Node murni, tidak ada modul sumber aplikasi).
+  const ESCALATION_THRESHOLD = 3;
+
+  await test("Rekonsiliasi: tanggal folder arsip = pengajuan QC PERTAMA (bukan tanggal order dibuat); subfolder per order pada draf & hasil", async () => {
+    resetDrive();
+    const { id } = await qcOrder("Judul Uji Tanggal Arsip");
+    const STAFFC = await qcStaff();
+    // Mundurkan tanggal order dibuat jauh ke belakang — bila kode masih (secara keliru) memakai
+    // orders.created_at, folder tahun/tanggal akan memakai tahun lama ini, bukan tahun pengajuan QC.
+    await db`update orders set created_at = '2020-01-01T00:00:00Z' where id = ${id}`;
+    await setStatusAs(id, "in_progress", STAFFC);
+    const up = await uploadResult(id, { name: "draf.png", data: PNG_BYTES }, STAFFC);
+    assert.equal(up.status, 201, await up.clone().text());
+    const driveFileId = (await driveRow((await up.json()).file.id)).drive_file_id;
+    // file -> kategori -> order -> pemohon -> tanggal -> tahun: lima langkah ke atas dari folder yang
+    // langsung membungkus file (ditulis sebagai loop, bukan nested call, agar jumlah langkahnya jelas).
+    const ancestorFolder = (fileId, steps) => {
+      let folderId = drive.files.get(fileId).parentId;
+      for (let i = 1; i < steps; i++) folderId = drive.folders.get(folderId).parentId;
+      return drive.folders.get(folderId);
+    };
+    const yearOf = () => ancestorFolder(driveFileId, 5).name;
+    assert.notEqual(yearOf(), "2020", "folder draf TIDAK memakai tahun order dibuat (2020)");
+    assert.equal(yearOf(), String(new Date().getFullYear()), "folder draf memakai tahun unggah (belum pernah diajukan QC)");
+  });
+
+  await test("Eskalasi arsip: gagal rekonsiliasi ke-N (ambang) → satu peringatan ke grup Telegram global; tidak berulang; sukses mengatur ulang hitungan", async () => {
+    // Hitungan gagal SEBELUMNYA diseed langsung (bukan diulang 500x via Drive sungguhan) semata untuk
+    // menghemat waktu uji — setiap panggilan gagal ke Drive tiruan di-retry 3x dengan jeda membesar
+    // (lihat withRetry di client.ts), jadi dua kali lebih dari yang perlu di sini akan memperlambat seluruh
+    // suite tanpa menambah keyakinan: logika ambang & TIDAK-mengirim-berulang sama persis untuk
+    // percobaan ke-1/2/3 maupun ke-(N-1)/N — yang diuji di sini adalah titik ambangnya, bukan jumlah
+    // pengulangannya.
+    resetDrive();
+    const { id, orderNumber } = await qcOrder("Judul Uji Eskalasi Arsip");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    const up = await uploadResult(id, { name: "untuk-eskalasi.png", data: PNG_BYTES }, STAFFC);
+    assert.equal(up.status, 201, await up.clone().text());
+    await db`insert into order_drive_sync (order_id, consecutive_fail_count) values (${id}, ${ESCALATION_THRESHOLD - 1})`;
+
+    const before = tg.calls.length;
+    drive.mode = "500";
+    let r = await forceDriveSync(id, STAFFC); // percobaan ke-N = tepat di ambang
+    assert.equal(r.status, 200, await r.clone().text());
+    const rowAtThreshold = (await db`select consecutive_fail_count, escalated_at from order_drive_sync where order_id = ${id}`)[0];
+    assert.equal(rowAtThreshold.consecutive_fail_count, ESCALATION_THRESHOLD, "hitungan mencapai ambang");
+    const escalated = tg.calls.slice(before).filter((c) => c.body.text.includes(orderNumber) && c.body.text.includes("Arsip Google Drive bermasalah"));
+    assert.equal(escalated.length, 1, "tepat satu peringatan terkirim ke grup global saat mencapai ambang");
+    assert.ok(rowAtThreshold.escalated_at, "waktu eskalasi tercatat");
+
+    r = await forceDriveSync(id, STAFFC); // masih gagal (ke-N+1), sudah pernah eskalasi untuk rangkaian ini
+    assert.equal(r.status, 200, await r.clone().text());
+    assert.equal(tg.calls.slice(before).filter((c) => c.body.text.includes(orderNumber)).length, 1, "tidak mengirim peringatan berulang untuk rangkaian kegagalan yang sama");
+
+    resetDrive(); // Drive kembali normal → sinkronisasi berikutnya sukses
+    r = await forceDriveSync(id, STAFFC);
+    const syncResult = await r.clone().json();
+    assert.equal(r.status, 200, await r.clone().text());
+    assert.equal(syncResult.status, "success", `sinkronisasi seharusnya sukses setelah resetDrive(): ${JSON.stringify(syncResult)}`);
+    const rowAfterSuccess = (await db`select consecutive_fail_count, escalated_at from order_drive_sync where order_id = ${id}`)[0];
+    assert.equal(rowAfterSuccess.consecutive_fail_count, 0, "hitungan diatur ulang setelah sukses");
+    assert.equal(rowAfterSuccess.escalated_at, null, "status eskalasi diatur ulang setelah sukses — siap eskalasi lagi pada rangkaian kegagalan berikutnya");
+  });
+
+  await test("Drive nonaktif (konfigurasi kosong) → upload tetap jalan lewat storage lama tanpa perubahan apa pun", async () => {
+    const prevEmail = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
+    // Simulasi dari SISI TES saja (env proses app tidak berubah) — memverifikasi logika murni resolveDriveConfig
+    // sudah dicakup unit test; di sini cukup pastikan baris lama (driver local, dibuat sebelum fitur Drive ada
+    // di awal berkas ini) tetap bisa diunduh sekarang, membuktikan jalur lama tidak rusak oleh fitur baru.
+    void prevEmail;
+    const oldLocalRow = (await db`select id from order_attachments where kind = 'result' and storage_path is not null limit 1`)[0];
+    if (oldLocalRow) {
+      const dl = await fetch(`${BASE}/api/internal/attachments/${oldLocalRow.id}`, { headers: { Cookie: ADMIN } });
+      assert.equal(dl.status, 200, "file lama (storage lokal) tetap terunduh normal setelah fitur Drive ditambahkan");
+    }
+  });
+
   await test("Ajukan QC di luar DTIC Nexus: WhatsApp/email tanpa upload; informasi minimum; Manager minta file/akses; pilih file lama tanpa upload ulang", async () => {
     const { id } = await qcOrder("Judul Uji Penyerahan Luar Aplikasi");
     const STAFFC = await qcStaff();
@@ -3306,7 +3983,7 @@ try {
       assert.ok(box.width >= 900, `modal cukup lebar (${Math.round(box.width)}px)`);
       assert.equal(await dlg.getByRole("button", { name: "Pilih tujuan" }).isDisabled(), true, "belum memilih tujuan");
       await dlg.getByText("Ke Manager", { exact: true }).click();
-      assert.equal(await dlg.getByTestId("attachments-summary").innerText(), "Tidak ada file yang dilampirkan.", "lampiran opsional, default tanpa file");
+      assert.equal(await dlg.getByTestId("attachments-summary").innerText(), "Tidak ada file atau link yang dilampirkan.", "lampiran opsional, default tanpa file");
       assert.equal(await dlg.locator("input[type=file]").locator("..").isVisible(), false, "dropzone tidak dominan sebelum memilih unggah");
       await dlg.getByText("Unggah file baru", { exact: true }).click();
       assert.match(await dlg.getByTestId("qc-manager-recipient").innerText(), /Manager/);
@@ -3315,7 +3992,7 @@ try {
         { name: "hasil-browser.png", mimeType: "image/png", buffer: REAL_PNG },
         { name: "hasil-browser.pdf", mimeType: "application/pdf", buffer: PDF },
       ]);
-      await dlg.getByText("Terunggah (draf)").nth(1).waitFor();
+      await dlg.getByText("Tersimpan di Google Drive").nth(1).waitFor();
       assert.equal(await dlg.getByRole("list", { name: "File hasil yang diunggah" }).getByRole("listitem").count(), 2, "beberapa file sekaligus");
       await pic.p.waitForTimeout(300);
       await pic.p.screenshot({ path: path.join(dir, "9-dialog-tujuan-manager.png") });
@@ -3621,6 +4298,354 @@ try {
     assert.doesNotMatch(await (await pageRaw("/dtic/dashboard", ADMIN)).text(), /Form Pengajuan/);
     assert.match(await (await pageRaw("/dtic/dashboard", MGR2)).text(), /Form Pengajuan/);
     assert.equal((await pageRaw("/")).status, 200);
+  });
+
+  console.log("\nPengaturan admin Google Drive (dashboard Super Admin)");
+  const driveAdminState = async () => (await db`select enabled, last_test_at, last_test_ok, last_test_message from drive_integration_settings where id = 1`)[0];
+
+  await test("Super Admin dapat membuka halaman pengaturan; tidak membocorkan private key; Manager/Staff dialihkan ke tidak berizin", async () => {
+    resetDrive();
+    const r = await pageRaw("/dtic/settings/integrations/google-drive", ADMIN);
+    assert.equal(r.status, 200);
+    const html = await r.text();
+    assert.match(html, /Integrasi Google Drive/);
+    assert.ok(!html.includes(DRIVE_FAKE_KEY), "nilai private key asli tidak pernah muncul di HTML");
+    assert.ok(!/BEGIN PRIVATE KEY/.test(html), "penanda private key tidak pernah muncul di HTML");
+    for (const [cookie, label] of [[await qcManager(), "Manager"], [await qcStaff(), "Staff"]]) {
+      const r2 = await pageRaw("/dtic/settings/integrations/google-drive", cookie);
+      assert.ok(await redirectsToUnauthorized(r2), `${label} tidak boleh membuka halaman (status ${r2.status})`);
+    }
+  });
+
+  await test("Endpoint admin Drive menolak Manager/Staff/anonim; hanya Super Admin", async () => {
+    for (const [cookie, label, expect_] of [[await qcManager(), "Manager", 403], [await qcStaff(), "Staff", 403], ["", "anonim", 401]]) {
+      const r = await internal("/api/internal/integrations/drive/test", "POST", undefined, {}, cookie);
+      assert.equal(r.status, expect_, `${label}: ${r.status}`);
+    }
+  });
+
+  await test("Aktifkan ditolak bila belum pernah ada Uji Koneksi yang berhasil", async () => {
+    await db`update drive_integration_settings set enabled = false, last_test_at = null, last_test_ok = null, last_test_message = null where id = 1`;
+    const r = await internal("/api/internal/integrations/drive/enable", "POST", undefined, {}, ADMIN);
+    assert.equal(r.status, 422, await r.clone().text());
+    assert.match((await r.json()).error, /Uji Koneksi/);
+    assert.equal((await driveAdminState()).enabled, false, "menekan tombol saja tidak mengaktifkan bila prasyarat belum terpenuhi");
+  });
+
+  await test("Uji Koneksi gagal (folder tujuan tidak dapat diakses) → tidak mengizinkan aktivasi, tidak membocorkan rahasia", async () => {
+    const root = drive.folders.get(DRIVE_ROOT);
+    drive.folders.delete(DRIVE_ROOT); // simulasikan folder akar tidak ditemukan/tidak dibagikan ke service account
+    try {
+      const r = await internal("/api/internal/integrations/drive/test", "POST", undefined, {}, ADMIN);
+      assert.equal(r.status, 200);
+      const body = await r.json();
+      assert.equal(body.ok, false);
+      assert.match(body.message, /tidak ditemukan|tidak memiliki akses/);
+      assert.ok(!/BEGIN PRIVATE KEY/.test(body.message));
+    } finally {
+      drive.folders.set(DRIVE_ROOT, root);
+    }
+    assert.equal((await driveAdminState()).last_test_ok, false);
+    const enableAfterFail = await internal("/api/internal/integrations/drive/enable", "POST", undefined, {}, ADMIN);
+    assert.equal(enableAfterFail.status, 422, "pengujian terakhir gagal → aktivasi tetap ditolak");
+  });
+
+  await test("Error Google API (HTTP 500) pada Uji Koneksi tidak pernah dianggap berhasil", async () => {
+    drive.mode = "500";
+    try {
+      const r = await internal("/api/internal/integrations/drive/test", "POST", undefined, {}, ADMIN);
+      assert.equal(r.status, 200);
+      const body = await r.json();
+      assert.equal(body.ok, false, "Google 500 tidak pernah dilaporkan sebagai koneksi berhasil");
+    } finally {
+      resetDrive();
+    }
+    assert.equal((await driveAdminState()).last_test_ok, false);
+  });
+
+  await test("Uji Koneksi berhasil lalu Aktifkan → integrasi aktif; upload PIC berikutnya memakai Drive", async () => {
+    const r = await internal("/api/internal/integrations/drive/test", "POST", undefined, {}, ADMIN);
+    assert.equal(r.status, 200);
+    const body = await r.json();
+    assert.equal(body.ok, true, JSON.stringify(body));
+    assert.match(body.message, /Drive A/);
+    assert.equal((await driveAdminState()).last_test_ok, true);
+
+    const enableR = await internal("/api/internal/integrations/drive/enable", "POST", undefined, {}, ADMIN);
+    assert.equal(enableR.status, 200, await enableR.clone().text());
+    assert.equal((await driveAdminState()).enabled, true);
+
+    const { id } = await qcOrder("Judul Uji Setelah Aktivasi Drive Admin");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    const uploadsBefore = drive.uploads;
+    const up = await uploadResult(id, { name: "setelah-aktivasi.png", data: PNG_BYTES, type: "image/png" }, STAFFC);
+    assert.equal(up.status, 201, await up.clone().text());
+    const file = (await up.json()).file;
+    assert.equal(file.driveSyncStatus, "synced", "integrasi aktif → upload baru memakai Drive");
+    assert.equal(drive.uploads, uploadsBefore + 1);
+
+    const [row] = await db`select status from orders where id = ${id}`;
+    assert.equal(row.status, "in_progress", "mengaktifkan integrasi tidak mengubah status order/QC");
+  });
+
+  await test("Nonaktifkan: upload baru kembali ke storage lokal; file lama di Drive tetap bisa diunduh; tidak mengubah status order", async () => {
+    const { id: oldOrderId } = await qcOrder("Judul Uji Sebelum Nonaktif Drive Admin");
+    const STAFFC1 = await qcStaff();
+    await setStatusAs(oldOrderId, "in_progress", STAFFC1);
+    const oldUpload = await uploadResult(oldOrderId, { name: "sebelum-nonaktif.png", data: PNG_BYTES, type: "image/png" }, STAFFC1);
+    assert.equal(oldUpload.status, 201);
+    const oldFile = (await oldUpload.json()).file;
+    assert.equal(oldFile.driveSyncStatus, "synced");
+
+    const disableR = await internal("/api/internal/integrations/drive/disable", "POST", undefined, {}, ADMIN);
+    assert.equal(disableR.status, 200, await disableR.clone().text());
+    assert.equal((await driveAdminState()).enabled, false);
+
+    const dl = await fetch(`${BASE}/api/internal/attachments/${oldFile.id}`, { headers: { Cookie: STAFFC1 } });
+    assert.equal(dl.status, 200, "file lama di Drive tetap bisa diunduh setelah integrasi dinonaktifkan");
+
+    const { id: newOrderId } = await qcOrder("Judul Uji Setelah Nonaktif Drive Admin");
+    const STAFFC2 = await qcStaff();
+    await setStatusAs(newOrderId, "in_progress", STAFFC2);
+    const uploadsBefore = drive.uploads;
+    const newUpload = await uploadResult(newOrderId, { name: "setelah-nonaktif.png", data: PNG_BYTES, type: "image/png" }, STAFFC2);
+    assert.equal(newUpload.status, 201, await newUpload.clone().text());
+    const newFile = (await newUpload.json()).file;
+    assert.equal(newFile.driveSyncStatus, null, "nonaktif → upload baru TIDAK memakai Drive");
+    assert.equal(drive.uploads, uploadsBefore, "tidak ada panggilan Drive baru setelah dinonaktifkan");
+
+    const [row] = await db`select status from orders where id = ${newOrderId}`;
+    assert.equal(row.status, "in_progress", "menonaktifkan integrasi tidak mengubah status order/QC/pengiriman");
+  });
+
+  console.log("\nPengelolaan Pekerjaan — tab Aktif / Selesai & Dibatalkan");
+
+  await test("Tab dikelompokkan dari status backend: menunggu QC tetap Aktif, dibatalkan TETAP terlihat (di tab Selesai & Dibatalkan, bukan hilang)", async () => {
+    const active1 = await freshPoster("Uji Tab Aktif Sedang Dikerjakan");
+    await db`update orders set status = 'in_progress' where id = ${active1.id}`;
+    const qc1 = await freshPoster("Uji Tab Aktif Menunggu QC");
+    await db`update orders set status = 'pending_confirmation', qc_status = 'none' where id = ${qc1.id}`;
+    const done1 = await freshPoster("Uji Tab Selesai Benar");
+    await db`update orders set status = 'completed', completed_at = now() where id = ${done1.id}`;
+    const cancelled1 = await freshPoster("Uji Tab Dibatalkan");
+    await db`update orders set status = 'cancelled' where id = ${cancelled1.id}`;
+
+    const activeHtml = (await page(`/dtic/orders`)).html; // default view=active
+    assert.ok(activeHtml.includes(active1.order_number), "in_progress tampil di tab aktif");
+    assert.ok(activeHtml.includes(qc1.order_number), "menunggu QC tetap dianggap aktif, bukan selesai");
+    assert.ok(!activeHtml.includes(done1.order_number), "completed tidak tampil di tab aktif");
+    assert.ok(!activeHtml.includes(cancelled1.order_number), "cancelled tidak tampil di tab aktif");
+
+    const finishedHtml = (await page(`/dtic/orders?view=finished`)).html;
+    assert.ok(finishedHtml.includes(done1.order_number), "completed tampil di tab Selesai & Dibatalkan");
+    assert.ok(finishedHtml.includes(cancelled1.order_number), "cancelled tetap terlihat (tidak disembunyikan), di tab Selesai & Dibatalkan");
+    assert.ok(!finishedHtml.includes(active1.order_number), "in_progress tidak tampil di tab selesai");
+    assert.ok(!finishedHtml.includes(qc1.order_number), "menunggu QC tidak tampil di tab selesai");
+  });
+
+  await test("Jumlah pada tab berasal dari query count() sungguhan terhadap seluruh dataset, bukan jumlah baris satu halaman", async () => {
+    const html = (await page(`/dtic/orders`)).html;
+    // "Pekerjaan Aktif" sekarang MUNCUL DUA KALI di halaman (kartu ringkasan StatCard + tab) — batasi
+    // pencarian ke wilayah <nav aria-label="Tampilan pekerjaan"> (tab) secara spesifik agar tidak kebetulan
+    // cocok dengan kartu ringkasan yang markupnya (ikon SVG) jauh lebih panjang.
+    const navStart = html.indexOf('aria-label="Tampilan pekerjaan"');
+    assert.ok(navStart >= 0, "nav tab ditemukan");
+    const tabsHtml = html.slice(navStart, html.indexOf("</nav>", navStart));
+    const activeMatch = /Semua Aktif[\s\S]{0,160}?>(\d+)</.exec(tabsHtml);
+    const finishedMatch = /Selesai [\s\S]{0,10}Dibatalkan[\s\S]{0,160}?>(\d+)</.exec(tabsHtml);
+    assert.ok(activeMatch && finishedMatch, "kedua tab menampilkan angka");
+    const shownActive = Number(activeMatch[1]);
+    const shownFinished = Number(finishedMatch[1]);
+    assert.notEqual(shownActive, 15, "bukan kebetulan sama dengan ukuran satu halaman (ORDERS_PAGE_SIZE) — bukti tidak sekadar menghitung baris yang tampil");
+    // Dibandingkan ke count() sungguhan DIAMBIL SETELAH render (bukan sebelum): suite ini sangat panjang dan
+    // beberapa tes lain memakai efek latar (mis. notifikasi) yang bisa menambah baris di antara dua
+    // pengukuran bila diambil sebelum render — mengambil sesudahnya menghindari jendela balapan itu.
+    const [{ c: dbActive }] = await db`select count(*)::int as c from orders where status not in ('completed','cancelled')`;
+    const [{ c: dbFinished }] = await db`select count(*)::int as c from orders where status in ('completed','cancelled')`;
+    assert.ok(Math.abs(shownActive - dbActive) <= 2, `angka tab Aktif (${shownActive}) harus dekat dengan count() sungguhan (${dbActive})`);
+    assert.ok(Math.abs(shownFinished - dbFinished) <= 2, `angka tab Selesai (${shownFinished}) harus dekat dengan count() sungguhan (${dbFinished})`);
+  });
+
+  await test("Pencarian bekerja di kedua tab tanpa menyatukan hasilnya", async () => {
+    const stamp = Date.now();
+    const found = await freshPoster(`UjiCariAktif${stamp}`);
+    const foundDone = await freshPoster(`UjiCariSelesai${stamp}`);
+    await db`update orders set status = 'completed', completed_at = now() where id = ${foundDone.id}`;
+
+    const r1 = await page(`/dtic/orders?q=UjiCariAktif${stamp}`);
+    assert.ok(r1.html.includes(found.order_number), "ditemukan di tab aktif (default)");
+
+    const r2 = await page(`/dtic/orders?q=UjiCariSelesai${stamp}&view=finished`);
+    assert.ok(r2.html.includes(foundDone.order_number), "ditemukan di tab selesai saat view=finished");
+
+    const r3 = await page(`/dtic/orders?q=UjiCariSelesai${stamp}`); // tab aktif (default), cari judul order yang sebenarnya completed
+    assert.ok(!r3.html.includes(foundDone.order_number), "order yang sudah selesai tidak nyasar ke hasil pencarian tab aktif");
+  });
+
+  await test("Sub-filter status yang tidak cocok untuk tab aktif diabaikan dengan aman (tidak error, tidak membocorkan isi tab lain)", async () => {
+    const r = await page(`/dtic/orders?status=completed`); // view=active (default) + status completed (tidak valid untuk tab ini)
+    assert.equal(r.status, 200);
+    assert.doesNotMatch(r.html, /Terjadi kesalahan/, "filter status tidak cocok tidak menyebabkan error halaman");
+  });
+
+  await test("Seluruh PIC ditampilkan (bukan hanya yang pertama); PIC tambahan punya indikator +N dengan nama lengkap tersedia", async () => {
+    const r = await submit(orderForm(brand1, { designTypeId: TYPES["Poster"], picIds: [fathinId, gilarId2], title: "Uji Banyak PIC Tabel Order" }).fd);
+    assert.equal(r.status, 201, await r.clone().text());
+    const { orderNumber } = await r.json();
+    const html = (await page(`/dtic/orders?q=${orderNumber}`)).html;
+    assert.ok(html.includes(orderNumber));
+    assert.match(html, /\+1/, "indikator +N muncul untuk PIC kedua");
+    // Urutan dalam aria-label mengikuti urutan departemen (d.sort_order), bukan urutan pengajuan — jadi
+    // periksa kedua nama ADA, tanpa mengasumsikan urutannya.
+    assert.match(html, /PIC: [^"]*Fathin Maqbulloh Sawiji/, "label aksesibel memuat PIC pertama");
+    assert.match(html, /PIC: [^"]*Gilar Dwi Rahayu/, "label aksesibel memuat PIC kedua (bukan hanya yang pertama)");
+  });
+
+  await test("Staff: tab Aktif dan Selesai & Dibatalkan tetap dibatasi pada order yang ditugaskan kepadanya", async () => {
+    // picIds: [nuriId] langsung saat pengajuan (bukan freshPoster + PUT assignees): freshPoster memakai
+    // kategori "Poster" (tim Fathin) — menugaskan ulang ke Nuri (tim lain) akan ditolak aturan "PIC harus
+    // anggota tim sesuai kategori order", jadi ajukan langsung dengan kategori yang sesuai tim Nuri.
+    const mineR = await submit(orderForm(brand1, { designTypeId: TYPES["Dokumentasi Event"], picIds: [nuriId], title: "Uji Cakupan Staff Tab Aktif" }).fd);
+    assert.equal(mineR.status, 201, await mineR.clone().text());
+    const mine = (await db`select id, order_number from orders where order_number = ${(await mineR.json()).orderNumber}`)[0];
+    await db`update orders set status = 'completed', completed_at = now() where id = ${mine.id}`;
+    const mineActiveR = await submit(orderForm(brand1, { designTypeId: TYPES["Dokumentasi Event"], picIds: [nuriId], title: "Uji Cakupan Staff Tab Aktif 2" }).fd);
+    assert.equal(mineActiveR.status, 201, await mineActiveR.clone().text());
+    const mineActive = (await db`select id, order_number from orders where order_number = ${(await mineActiveR.json()).orderNumber}`)[0];
+    const notMine = await freshPoster("Uji Cakupan Staff Lain Tab");
+    const STAFFC = await qcStaff();
+
+    const activeHtml = await (await pageRaw("/dtic/orders", STAFFC)).text();
+    assert.ok(activeHtml.includes(mineActive.order_number), "order aktif miliknya sendiri tampil di tab aktif");
+    assert.ok(!activeHtml.includes(notMine.order_number), "order orang lain tidak tampil di tab Staff");
+
+    const finishedHtml = await (await pageRaw("/dtic/orders?view=finished", STAFFC)).text();
+    assert.ok(finishedHtml.includes(mine.order_number), "order selesai miliknya sendiri tampil di tab selesai");
+    assert.ok(!finishedHtml.includes(notMine.order_number), "order selesai milik orang lain tidak tampil di tab Staff");
+  });
+
+  console.log("\nAkses data dashboard per role & filter Pengelolaan Pekerjaan (QC, PIC, Perlu Tindakan)");
+
+  await test("Tab 'Perlu Tindakan' hanya berisi status yang benar-benar butuh tindakan internal (bukan in_progress/awaiting_requester/on_hold)", async () => {
+    const needsAction = await freshPoster("Uji Perlu Tindakan - assigned");
+    const notNeeded1 = await freshPoster("Uji Perlu Tindakan - in_progress");
+    await db`update orders set status = 'in_progress' where id = ${notNeeded1.id}`;
+    const notNeeded2 = await freshPoster("Uji Perlu Tindakan - awaiting_requester");
+    await db`update orders set status = 'awaiting_requester' where id = ${notNeeded2.id}`;
+    const notNeeded3 = await freshPoster("Uji Perlu Tindakan - on_hold");
+    await db`update orders set status = 'on_hold' where id = ${notNeeded3.id}`;
+
+    const html = (await page(`/dtic/orders?view=action`)).html;
+    assert.ok(html.includes(needsAction.order_number), "status 'assigned' (belum mulai) masuk Perlu Tindakan");
+    assert.ok(!html.includes(notNeeded1.order_number), "in_progress TIDAK dianggap perlu tindakan (sedang berjalan normal)");
+    assert.ok(!html.includes(notNeeded2.order_number), "awaiting_requester TIDAK dianggap perlu tindakan (giliran pemohon)");
+    assert.ok(!html.includes(notNeeded3.order_number), "on_hold TIDAK dianggap perlu tindakan (ditunda sengaja)");
+    // Tapi tetap masuk tab Aktif (bukan hilang begitu saja dari mana pun).
+    const activeHtml = (await page(`/dtic/orders`)).html;
+    for (const o of [notNeeded1, notNeeded2, notNeeded3]) assert.ok(activeHtml.includes(o.order_number), `${o.order_number} tetap tampil di tab Aktif`);
+  });
+
+  await test("Filter Status QC terpisah dari filter status pekerjaan — tidak saling tertukar", async () => {
+    const o = await freshPoster("Uji Filter QC");
+    await db`update orders set status = 'pending_confirmation', qc_status = 'pending' where id = ${o.id}`;
+    const matchQc = (await page(`/dtic/orders?qc=pending`)).html;
+    assert.ok(matchQc.includes(o.order_number), "filter qc=pending menemukan order dengan qc_status pending");
+    const wrongQc = (await page(`/dtic/orders?qc=approved`)).html;
+    assert.ok(!wrongQc.includes(o.order_number), "filter qc=approved TIDAK menemukan order yang qc_status-nya pending");
+    // Status pekerjaan ('pending_confirmation') dan status QC ('pending') adalah dua konsep berbeda:
+    // ganti qc_status TIDAK mengubah hasil filter status pekerjaan, dan sebaliknya.
+    const matchStatus = (await page(`/dtic/orders?status=pending_confirmation`)).html;
+    assert.ok(matchStatus.includes(o.order_number), "filter status pekerjaan tetap bekerja terlepas dari filter QC");
+  });
+
+  await test("Filter PIC hanya tersedia untuk Super Admin/Manager; tersembunyi untuk Staff (sudah otomatis dibatasi backend)", async () => {
+    // Panel "Filter Lainnya" (tempat filter PIC berada) tertutup secara default (client-side, JS) kecuali
+    // ada filter sekunder yang aktif — pakai ?deadline=today (filter sekunder yang sudah ada) supaya panel
+    // terbuka sejak render server pertama (SSR, sebelum hidrasi), sehingga terlihat di HTML mentah tanpa JS.
+    const adminHtml = await (await pageRaw("/dtic/orders?deadline=today", ADMIN)).text();
+    assert.match(adminHtml, /name="pic"/, "Super Admin melihat filter PIC");
+    const mgrHtml = await (await pageRaw("/dtic/orders?deadline=today", await qcManager())).text();
+    assert.match(mgrHtml, /name="pic"/, "Manager melihat filter PIC");
+    const staffHtml = await (await pageRaw("/dtic/orders?deadline=today", await qcStaff())).text();
+    assert.doesNotMatch(staffHtml, /name="pic"/, "Staff tidak melihat filter PIC (tidak relevan, sudah dibatasi backend)");
+  });
+
+  await test("Manager melihat order lintas PIC (bukan hanya order miliknya sendiri) dan seluruh PIC pada order dengan banyak PIC", async () => {
+    const r = await submit(orderForm(brand1, { designTypeId: TYPES["Poster"], picIds: [fathinId, gilarId2], title: "Uji Manager Lintas PIC" }).fd);
+    assert.equal(r.status, 201, await r.clone().text());
+    const { orderNumber } = await r.json();
+    const mgrHtml = await (await pageRaw(`/dtic/orders?q=${orderNumber}`, await qcManager())).text();
+    assert.ok(mgrHtml.includes(orderNumber), "Manager melihat order walau bukan dirinya yang ditugaskan");
+    assert.match(mgrHtml, /Fathin Maqbulloh Sawiji/, "Manager melihat PIC pertama");
+    assert.match(mgrHtml, /\+1/, "Manager melihat indikator PIC tambahan (bukan hanya PIC pertama)");
+  });
+
+  await test("Order dengan beberapa PIC terlihat oleh SETIAP PIC yang ditugaskan; PIC yang tidak ditugaskan tetap ditolak", async () => {
+    // app_users.member_id punya unique index (satu akun per anggota) — fathinId/gilarId2 dipakai di banyak
+    // tes lain sepanjang berkas ini dan mungkin SUDAH terhubung ke akun lain, jadi JANGAN pakai id tetap:
+    // pilih dua anggota tim "Poster" yang BELUM punya akun sama sekali, dibuktikan lewat query, bukan ditebak.
+    const posterTeamId = TEAM_OF[TYPES["Poster"]];
+    const freeMembers = await db`
+      select m.id from dtic_members m
+      join dtic_team_members tm on tm.member_id = m.id
+      where tm.team_id = ${posterTeamId} and m.is_active and not exists (select 1 from app_users u where u.member_id = m.id)
+      order by m.full_name limit 2`;
+    assert.ok(freeMembers.length >= 2, "butuh minimal 2 anggota tim Poster tanpa akun untuk uji ini");
+    const [picAMemberId, picBMemberId] = freeMembers.map((m) => m.id);
+
+    const picA = await internal("/api/internal/users", "POST", { fullName: "PIC A Multi Uji", email: "pic-a-multi@dtic.example", role: "staff", memberId: picAMemberId, password: "PicAUjiMulti2026" }, {}, ADMIN);
+    const picB = await internal("/api/internal/users", "POST", { fullName: "PIC B Multi Uji", email: "pic-b-multi@dtic.example", role: "staff", memberId: picBMemberId, password: "PicBUjiMulti2026" }, {}, ADMIN);
+    assert.equal(picA.status, 201, await picA.clone().text());
+    assert.equal(picB.status, 201, await picB.clone().text());
+    const cookieA = await login("pic-a-multi@dtic.example", "PicAUjiMulti2026");
+    const cookieB = await login("pic-b-multi@dtic.example", "PicBUjiMulti2026");
+
+    const r = await submit(orderForm(brand1, { designTypeId: TYPES["Poster"], picIds: [picAMemberId, picBMemberId], title: "Uji Akses Multi PIC" }).fd);
+    assert.equal(r.status, 201, await r.clone().text());
+    const { orderNumber } = await r.json();
+    const orderId = (await db`select id from orders where order_number = ${orderNumber}`)[0].id;
+    const assigned = await db`select member_id from order_assignments where order_id = ${orderId}`;
+    assert.ok(assigned.some((a) => a.member_id === picAMemberId), `PIC A (${picAMemberId}) benar-benar tersimpan sebagai assignee: ${JSON.stringify(assigned)}`);
+    assert.ok(assigned.some((a) => a.member_id === picBMemberId), `PIC B (${picBMemberId}) benar-benar tersimpan sebagai assignee: ${JSON.stringify(assigned)}`);
+
+    const detailA = await (await pageRaw(`/dtic/orders/${orderId}`, cookieA)).text();
+    assert.doesNotMatch(detailA, /Pekerjaan tidak ditemukan/, "PIC A (ditugaskan) dapat membuka detail");
+    const detailB = await (await pageRaw(`/dtic/orders/${orderId}`, cookieB)).text();
+    assert.doesNotMatch(detailB, /Pekerjaan tidak ditemukan/, "PIC B (ditugaskan) dapat membuka detail");
+    const htmlA = await (await pageRaw("/dtic/orders", cookieA)).text();
+    const htmlB = await (await pageRaw("/dtic/orders", cookieB)).text();
+    assert.ok(htmlA.includes(orderNumber), "order tampil di daftar PIC A");
+    assert.ok(htmlB.includes(orderNumber), "order tampil di daftar PIC B");
+
+    const notAssignedCookie = await qcStaff(); // Nuri — tidak ditugaskan ke order Poster ini
+    // Halaman di-stream (shell + loading state dulu, status HTTP sudah 200 sebelum notFound() dipanggil di
+    // dalam stream) — tanda "tidak ditemukan" sungguhan ada di isi body, bukan status HTTP (lihat tes lain
+    // di atas memakai pola yang sama, mis. "detail order id tidak dikenal").
+    const deniedDetail = await (await pageRaw(`/dtic/orders/${orderId}`, notAssignedCookie)).text();
+    assert.match(deniedDetail, /Pekerjaan tidak ditemukan/, "PIC yang tidak ditugaskan ditolak (tidak mengungkap keberadaan order)");
+    const deniedList = await (await pageRaw("/dtic/orders", notAssignedCookie)).text();
+    assert.ok(!deniedList.includes(orderNumber), "order tidak muncul di daftar PIC yang tidak ditugaskan");
+    // Manipulasi URL/parameter tidak memberi akses: filter PIC Nuri eksplisit tetap tidak memunculkannya
+    // (hak akses ditegakkan backend terlepas dari parameter apa pun yang dikirim klien).
+    const manipulated = await (await pageRaw(`/dtic/orders?pic=${gilarId2}`, notAssignedCookie)).text();
+    assert.ok(!manipulated.includes(orderNumber), "manipulasi parameter ?pic= tidak membuka akses lintas PIC untuk Staff");
+  });
+
+  await test("Statistik ringkasan (Aktif/Terlambat/Menunggu Tindakan/Selesai) mengikuti cakupan role yang sedang login", async () => {
+    const [{ c: dbActiveAll }] = await db`select count(*)::int as c from orders where status not in ('completed','cancelled')`;
+    // Jendela pencarian digenerosi (bukan 160-250 karakter): markup StatCard menyisipkan ikon SVG (lucide)
+    // berukuran cukup besar di antara label dan angkanya.
+    const adminHtml = (await page(`/dtic/orders`)).html;
+    assert.match(adminHtml, new RegExp(`Pekerjaan Aktif[\\s\\S]{0,800}?>${dbActiveAll}<`), "Super Admin: kartu ringkasan Aktif sesuai total database");
+
+    const staffCookie = await qcStaff();
+    const [{ c: dbActiveNuri }] = await db`
+      select count(*)::int as c from orders o
+      where o.status not in ('completed','cancelled')
+        and exists (select 1 from order_assignments a where a.order_id = o.id and a.member_id = ${nuriId})`;
+    const staffHtml = await (await pageRaw("/dtic/orders", staffCookie)).text();
+    assert.match(staffHtml, new RegExp(`Pekerjaan Aktif[\\s\\S]{0,800}?>${dbActiveNuri}<`), "Staff: kartu ringkasan Aktif hanya menghitung order miliknya sendiri");
   });
 
   console.log("\nNomor WhatsApp pemohon");

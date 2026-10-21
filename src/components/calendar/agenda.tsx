@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { cn } from "@/components/ui/cn";
+import { TableScroll } from "@/components/ui/table-scroll";
 import { CAL_OVERDUE_STYLE, CAL_STATUS_STYLE } from "@/lib/calendar-colors";
 import { formatDate, getZonedParts } from "@/lib/dates";
 import type { CalendarSort } from "@/lib/calendar";
@@ -95,8 +96,8 @@ const SORT_LABEL: Record<CalendarSort, string> = { deadline: "Deadline", status:
 /** Tampilan Daftar: tabel yang dapat diurutkan. Pengurutan dilakukan di server lewat parameter `sort`. */
 export function ListView({ orders, sort, sortHref, now }: { orders: OrderListItem[]; sort: CalendarSort; sortHref: (s: CalendarSort) => string; now: Date }) {
   return (
-    <div className="overflow-x-auto rounded-xl border border-line bg-surface">
-      <table className="w-full min-w-[720px] text-left text-sm">
+    <TableScroll minWidthPx={720} className="rounded-xl border border-line bg-surface">
+      <table className="w-full text-left text-sm">
         <caption className="sr-only">Pekerjaan periode ini, diurutkan menurut {SORT_LABEL[sort]}</caption>
         <thead className="border-b border-line bg-subtle text-xs font-medium tracking-wide text-ink-3 uppercase">
           <tr>
@@ -130,6 +131,6 @@ export function ListView({ orders, sort, sortHref, now }: { orders: OrderListIte
           })}
         </tbody>
       </table>
-    </div>
+    </TableScroll>
   );
 }

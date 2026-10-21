@@ -1,8 +1,10 @@
 import "server-only";
 import { sql } from "@/lib/server/db";
-import { FINISHED_STATUSES, ORDER_STATUSES, type OrderStatus } from "@/lib/status";
+import { ACTION_NEEDED_STATUSES, FINISHED_STATUSES, ORDER_STATUSES, type OrderStatus } from "@/lib/status";
 import { fromOrders, listColumns, mapListItem, type OrderRow, scopeWhere } from "@/lib/server/repositories/orders";
 import { dayKeysBetween } from "@/lib/dates";
+
+const ACTION_NEEDED = ACTION_NEEDED_STATUSES as unknown as string[];
 
 const FINISHED = FINISHED_STATUSES as unknown as string[];
 
@@ -18,6 +20,8 @@ export type DashboardFilters = {
 export type DashboardStats = {
   total: number;
   overdue: number;
+  /** assigned + pending_confirmation + internal_revision — lihat ACTION_NEEDED_STATUSES di src/lib/status.ts. */
+  actionNeeded: number;
   /** Jumlah order per status (status baru). */
   byStatus: Record<OrderStatus, number>;
 };
@@ -33,7 +37,7 @@ export async function getDashboardData(filters: DashboardFilters, now = new Date
     ${filters.to ? db`and o.created_at < ${filters.to}` : db``}
     ${filters.brandId ? db`and o.brand_id = ${filters.brandId}` : db``}`;
 
-  const [statusRows, [overdueRow], brandRows, recentRows, upcomingRows] = await Promise.all([
+  const [statusRows, [overdueRow], brandRows, recentRows, upcomingRows, actionRows] = await Promise.all([
     db<{ status: OrderStatus; count: number }[]>`
       select o.status, count(*)::int as count from orders o ${where} group by o.status`,
     db<{ count: number }[]>`
@@ -58,6 +62,12 @@ export async function getDashboardData(filters: DashboardFilters, now = new Date
       select ${listColumns(db)} from ${fromOrders(db)} ${where}
       and o.status not in ${db(FINISHED)}
       order by o.deadline_at asc limit 6`,
+    // "Perlu Tindakan" (assigned/pending_confirmation/internal_revision — lihat ACTION_NEEDED_STATUSES di
+    // src/lib/status.ts, definisi yang SAMA dipakai tab Pengelolaan Pekerjaan agar angka tidak pernah beda).
+    db<OrderRow[]>`
+      select ${listColumns(db)} from ${fromOrders(db)} ${where}
+      and o.status in ${db(ACTION_NEEDED)}
+      order by o.deadline_at asc limit 6`,
   ]);
 
   const byStatus = Object.fromEntries(ORDER_STATUSES.map((s) => [s, 0])) as Record<OrderStatus, number>;
@@ -66,6 +76,7 @@ export async function getDashboardData(filters: DashboardFilters, now = new Date
   const stats: DashboardStats = {
     total: Object.values(byStatus).reduce((a, b) => a + b, 0),
     overdue: overdueRow.count,
+    actionNeeded: ACTION_NEEDED_STATUSES.reduce((sum, s) => sum + byStatus[s], 0),
     byStatus,
   };
 
@@ -78,7 +89,7 @@ export async function getDashboardData(filters: DashboardFilters, now = new Date
     overdue: r.overdue,
   }));
 
-  return { stats, brands, recent: recentRows.map(mapListItem), upcoming: upcomingRows.map(mapListItem) };
+  return { stats, brands, recent: recentRows.map(mapListItem), upcoming: upcomingRows.map(mapListItem), actionNeeded: actionRows.map(mapListItem) };
 }
 
 export type DayCount = { day: string; intake: number; completed: number };

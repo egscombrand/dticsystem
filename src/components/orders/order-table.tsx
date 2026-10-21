@@ -1,21 +1,23 @@
-import { ChevronRight } from "lucide-react";
+import { AlertTriangle, ChevronRight } from "lucide-react";
 import { OrderRowActions } from "@/components/orders/order-row-actions";
 import Link from "next/link";
 import { AssigneeList } from "@/components/assignments/assignee-list";
 import { DeadlineText } from "@/components/orders/deadline-text";
-import { OverdueBadge, PriorityBadge, StatusBadge } from "@/components/ui/badge";
-import { formatDate } from "@/lib/dates";
+import { Badge, OverdueBadge, PriorityBadge, QcBadge, StatusBadge } from "@/components/ui/badge";
+import { TableScroll } from "@/components/ui/table-scroll";
+import { formatDate, formatDateTime } from "@/lib/dates";
 import { isOverdue } from "@/lib/status";
-import type { OrderListItem } from "@/lib/types";
+import { RESULT_COLLECTION_LABEL, RESULT_COLLECTION_TONE } from "@/lib/result-collection";
+import type { OrderListItemWithDocs } from "@/lib/server/repositories/orders";
 
 /** superAdmin: tampilkan aksi kirim ulang Telegram & hapus (izin tetap diperiksa di server). */
-export function OrderTable({ orders, now, superAdmin = false }: { orders: OrderListItem[]; now: Date; superAdmin?: boolean }) {
+export function OrderTable({ orders, now, superAdmin = false }: { orders: OrderListItemWithDocs[]; now: Date; superAdmin?: boolean }) {
   return (
     <>
       {/* Tablet & desktop */}
-      <div className="hidden overflow-x-auto md:block">
-        <table className="w-full min-w-[1120px] text-left text-sm">
-          <thead>
+      <TableScroll minWidthPx={1120} className="hidden md:block">
+        <table className="w-full text-left text-sm">
+          <thead className="sticky top-0 z-10">
             <tr className="border-b border-line bg-subtle text-xs font-medium tracking-wide text-ink-3 uppercase">
               <th scope="col" className="px-5 py-3 font-medium">Order</th>
               <th scope="col" className="px-4 py-3 font-medium">Kategori</th>
@@ -25,6 +27,7 @@ export function OrderTable({ orders, now, superAdmin = false }: { orders: OrderL
               <th scope="col" className="px-4 py-3 font-medium">Deadline</th>
               <th scope="col" className="px-4 py-3 font-medium">Prioritas</th>
               <th scope="col" className="px-4 py-3 font-medium">Status</th>
+              <th scope="col" className="px-4 py-3 font-medium">Dokumen</th>
               <th scope="col" className="px-4 py-3 font-medium">Masuk</th>
               <th scope="col" className={superAdmin ? "py-3 pr-4 text-right" : "w-12 py-3 pr-4"}><span className="sr-only">Aksi</span></th>
             </tr>
@@ -47,7 +50,7 @@ export function OrderTable({ orders, now, superAdmin = false }: { orders: OrderL
                     <span className="block truncate text-xs text-ink-3">{o.department}</span>
                   </td>
                   <td className="px-4 py-3.5">
-                    <div className="w-[190px] max-w-[190px]"><AssigneeList assignees={o.assignees} names /></div>
+                    <div className="w-[190px] max-w-[190px]"><AssigneeList assignees={o.assignees} compact /></div>
                   </td>
                   <td className="px-4 py-3.5 whitespace-nowrap">
                     <div className="flex flex-col items-start gap-1">
@@ -56,7 +59,24 @@ export function OrderTable({ orders, now, superAdmin = false }: { orders: OrderL
                     </div>
                   </td>
                   <td className="px-4 py-3.5"><PriorityBadge name={o.priorityName} tone={o.priorityTone} /></td>
-                  <td className="px-4 py-3.5"><StatusBadge status={o.status} /></td>
+                  <td className="px-4 py-3.5">
+                    <div className="flex flex-col items-start gap-1">
+                      <StatusBadge status={o.status} />
+                      {o.qcStatus !== "none" && <QcBadge status={o.qcStatus} />}
+                    </div>
+                  </td>
+                  <td className="px-4 py-3.5">
+                    <div className="flex flex-col items-start gap-1">
+                      <Badge tone={RESULT_COLLECTION_TONE[o.collectionStatus]}>{RESULT_COLLECTION_LABEL[o.collectionStatus]}</Badge>
+                      <span className="text-[11px] text-ink-3">{o.referenceCount} bahan · {o.resultCount} hasil</span>
+                      {(o.resultPendingCount > 0 || o.resultReconcileCount > 0) && (
+                        <span className="inline-flex items-center gap-1 text-[11px] text-warn" title={o.lastSyncAt ? `Sinkron terakhir: ${formatDateTime(o.lastSyncAt)}` : "Belum pernah disinkronkan"}>
+                          <AlertTriangle className="size-3" aria-hidden="true" />
+                          {o.resultPendingCount > 0 ? `${o.resultPendingCount} belum sinkron` : `${o.resultReconcileCount} perlu diperiksa`}
+                        </span>
+                      )}
+                    </div>
+                  </td>
                   <td className="px-4 py-3.5 whitespace-nowrap text-[13px] text-ink-3">{formatDate(o.createdAt)}</td>
                   <td className="py-3.5 pr-4 text-right">
                     <div className="flex items-center justify-end gap-1">
@@ -76,7 +96,7 @@ export function OrderTable({ orders, now, superAdmin = false }: { orders: OrderL
             })}
           </tbody>
         </table>
-      </div>
+      </TableScroll>
 
       {/* Mobile */}
       <ul className="divide-y divide-line md:hidden">
@@ -89,13 +109,20 @@ export function OrderTable({ orders, now, superAdmin = false }: { orders: OrderL
                   <p className="mt-0.5 text-sm font-medium text-ink">{o.title}</p>
                   <p className="mt-0.5 text-xs text-ink-3">{o.teamName ? `${o.teamName} · ` : ""}{o.brandName} · {o.requesterName}</p>
                 </div>
-                <StatusBadge status={o.status} />
+                <div className="flex shrink-0 flex-col items-end gap-1">
+                  <StatusBadge status={o.status} />
+                  {o.qcStatus !== "none" && <QcBadge status={o.qcStatus} />}
+                </div>
               </div>
               <div className="mt-3 flex flex-wrap items-center gap-2">
                 <PriorityBadge name={o.priorityName} tone={o.priorityTone} />
                 {isOverdue(o.deadlineAt, o.status, now) && <OverdueBadge />}
                 <AssigneeList assignees={o.assignees} names className="max-w-full" />
                 <span className="ml-auto"><DeadlineText deadlineAt={o.deadlineAt} status={o.status} now={now} compact /></span>
+              </div>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <Badge tone={RESULT_COLLECTION_TONE[o.collectionStatus]}>{RESULT_COLLECTION_LABEL[o.collectionStatus]}</Badge>
+                <span className="text-[11px] text-ink-3">{o.referenceCount} bahan · {o.resultCount} hasil</span>
               </div>
             </Link>
             {superAdmin && (

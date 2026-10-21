@@ -80,6 +80,7 @@ async function DashboardContent({ searchParams }: { searchParams: PageProps<"/dt
         <StatCard label="Selesai" value={stats.byStatus.completed} icon={CheckCircle2} tone="success" hint="Sudah dikonfirmasi" href={listLink({ status: "completed" })} />
         <StatCard label="Dibatalkan" value={stats.byStatus.cancelled} icon={XCircle} tone="neutral" hint="Alasan tercatat" href={listLink({ status: "cancelled" })} />
         <StatCard label="Terlambat" value={stats.overdue} icon={AlarmClock} tone="danger" hint="Lewat deadline, belum selesai" href={listLink({ deadline: "overdue" })} />
+        <StatCard label="Menunggu Tindakan" value={stats.actionNeeded} icon={Hourglass} tone="warning" hint="Belum mulai, menunggu QC, atau perlu revisi" href={`/dtic/orders?view=action`} />
       </div>
 
       <div className="mt-6 grid gap-6 xl:grid-cols-3">

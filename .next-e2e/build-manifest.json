@@ -7,9 +7,9 @@
     "static/chunks/0cz1d0mv5g_q7.js"
   ],
   "lowPriorityFiles": [
-    "static/HZTJS1MRb6KVLl30qJOnX/_buildManifest.js",
-    "static/HZTJS1MRb6KVLl30qJOnX/_ssgManifest.js",
-    "static/HZTJS1MRb6KVLl30qJOnX/_clientMiddlewareManifest.js"
+    "static/FyCKQWgX8nUdFNxI2Ssly/_buildManifest.js",
+    "static/FyCKQWgX8nUdFNxI2Ssly/_ssgManifest.js",
+    "static/FyCKQWgX8nUdFNxI2Ssly/_clientMiddlewareManifest.js"
   ],
   "rootMainFiles": [
     "static/chunks/1x6obpmlu1_c2.js",
@@ -141,6 +141,17 @@
         94553
       ]
     },
+    "/dtic/(panel)/qc-history/page": {
+      "otherChunks": [
+        "static/chunks/1x6obpmlu1_c2.js",
+        "static/chunks/0ssqr03lk-c8r.js",
+        "static/chunks/0p_w__bs2_j30.js",
+        "static/chunks/41knbbi1ie2-4.js"
+      ],
+      "runtimeModuleIds": [
+        94553
+      ]
+    },
     "/dtic/(panel)/settings/page": {
       "otherChunks": [
         "static/chunks/1x6obpmlu1_c2.js",
@@ -186,6 +197,17 @@
       ]
     },
     "/dtic/(panel)/settings/integrations/brands/page": {
+      "otherChunks": [
+        "static/chunks/1x6obpmlu1_c2.js",
+        "static/chunks/0ssqr03lk-c8r.js",
+        "static/chunks/0p_w__bs2_j30.js",
+        "static/chunks/41knbbi1ie2-4.js"
+      ],
+      "runtimeModuleIds": [
+        94553
+      ]
+    },
+    "/dtic/(panel)/settings/integrations/google-drive/page": {
       "otherChunks": [
         "static/chunks/1x6obpmlu1_c2.js",
         "static/chunks/0ssqr03lk-c8r.js",

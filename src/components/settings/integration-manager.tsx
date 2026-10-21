@@ -7,6 +7,7 @@ import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader } from "@/components/ui/card";
+import { TableScroll } from "@/components/ui/table-scroll";
 import { ApiError, internalRequest } from "@/lib/client/api";
 import { formatDateTime } from "@/lib/dates";
 import type { IntegrationStatus } from "@/lib/server/services/telegram";
@@ -148,8 +149,8 @@ export function IntegrationManager({ status }: { status: IntegrationStatus }) {
         {outbox.recent.length === 0 ? (
           <p className="p-5 text-sm text-ink-3">Belum ada pengajuan yang masuk ke antrean Telegram.</p>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[560px] text-left text-sm">
+          <TableScroll minWidthPx={560}>
+            <table className="w-full text-left text-sm">
               <thead className="border-b border-line text-xs uppercase tracking-wide text-ink-3">
                 <tr>
                   <th scope="col" className="px-4 py-3 font-medium">Order</th>
@@ -174,7 +175,7 @@ export function IntegrationManager({ status }: { status: IntegrationStatus }) {
                 ))}
               </tbody>
             </table>
-          </div>
+          </TableScroll>
         )}
       </Card>
     </div>

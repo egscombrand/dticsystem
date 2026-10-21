@@ -1,0 +1,3 @@
+{
+  "/api/internal/orders/[id]/drive-sync/route": "app/api/internal/orders/[id]/drive-sync/route.js"
+}

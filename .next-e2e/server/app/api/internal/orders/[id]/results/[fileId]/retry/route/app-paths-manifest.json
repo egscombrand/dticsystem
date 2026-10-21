@@ -1,0 +1,3 @@
+{
+  "/api/internal/orders/[id]/results/[fileId]/retry/route": "app/api/internal/orders/[id]/results/[fileId]/retry/route.js"
+}

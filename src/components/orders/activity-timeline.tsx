@@ -62,7 +62,7 @@ export function ActivityTimeline({ history, events, audit, fileNames = {} }: { h
           const extras = [
             it.e.kind === "qc_submitted" && it.e.detail.method === "external"
               ? `diserahkan di luar DTIC Nexus via ${HANDOVER_CHANNEL_LABEL[it.e.detail.channel as HandoverChannel] ?? "media lain"}${typeof it.e.detail.recipient === "string" ? ` kepada ${it.e.detail.recipient}` : ""}${typeof it.e.detail.handedAt === "string" ? ` pada ${formatDateTime(it.e.detail.handedAt)}` : ""} (keterangan PIC)`
-              : it.e.kind === "qc_submitted" && it.e.detail.method === "in_app" ? "file di DTIC Nexus" : null,
+              : it.e.kind === "qc_submitted" && it.e.detail.method === "in_app" ? `via ${HANDOVER_CHANNEL_LABEL.dtic_nexus}` : null,
             (it.e.kind === "delivery_recorded" && typeof it.e.detail.sentAt === "string") || (it.e.kind === "qc_submitted" && it.e.detail.method === "in_app" && typeof it.e.detail.handedAt === "string")
               ? `diserahkan ${formatDateTime((it.e.detail.sentAt ?? it.e.detail.handedAt) as string)}`
               : null,

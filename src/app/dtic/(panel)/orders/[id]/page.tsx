@@ -16,8 +16,12 @@ import { QcFlowActions } from "@/components/orders/qc-flow-actions";
 import { WhatsappMessageButton } from "@/components/orders/whatsapp-message";
 import type { WaContext } from "@/lib/smart-whatsapp";
 import { ResultFiles, type ResultFileView } from "@/components/orders/result-files";
-import { latestResultIds, resultFileHistory, RESULT_STAGE_LABEL, type ResultStage } from "@/lib/result-status";
-import { listResultFiles } from "@/lib/server/repositories/results";
+import { latestResultIds, latestResultLinkIds, resultFileHistory, resultLinksUsed, RESULT_STAGE_LABEL, type ResultStage } from "@/lib/result-status";
+import { listResultFiles, listResultLinks } from "@/lib/server/repositories/results";
+import { ResultLinks, type ResultLinkView } from "@/components/orders/result-links";
+import { syncOrderDriveMetadata } from "@/lib/server/repositories/drive-sync";
+import { WorkStepper } from "@/components/orders/work-stepper";
+import { deriveWorkStage } from "@/lib/work-stage";
 import { resultMaxFileBytes } from "@/lib/server/config";
 import { StatusChanger } from "@/components/orders/status-changer";
 import { RichTextView } from "@/components/rich-text/rich-text-view";
@@ -93,7 +97,11 @@ async function OrderDetailContent({ params }: { params: PageProps<"/dtic/orders/
   const viewAll = can(session.role, "orders.view_all");
   const order = await getOrderDetail(id);
   if (!order) notFound();
-  const [members, workloads, qcStatus, events, audit, managerNames, results, contacted] = await Promise.all([
+  // Sinkronisasi otomatis saat halaman dibuka (Fase 4) — DIBATASI oleh jendela dedupe di repository
+  // (dilewati diam-diam bila < 2 menit lalu), jadi membuka halaman berulang tidak memicu panggilan Drive
+  // berulang. Dijalankan SEBELUM listResultFiles di bawah agar file yang baru ditemukan langsung tampil.
+  await syncOrderDriveMetadata(id);
+  const [members, workloads, qcStatus, events, audit, managerNames, results, contacted, resultLinks] = await Promise.all([
     listTeamMemberOptions(order.teamId),
     canAssign && order.teamId ? getMemberWorkloads(order.teamId) : Promise.resolve([]),
     getQcStatus(order.id),
@@ -103,6 +111,7 @@ async function OrderDetailContent({ params }: { params: PageProps<"/dtic/orders/
     listActiveManagerNames(),
     listResultFiles(id),
     hasContactedRequester(id, session.userId),
+    listResultLinks(id),
   ]);
   if (!qcStatus) notFound();
 
@@ -129,9 +138,20 @@ async function OrderDetailContent({ params }: { params: PageProps<"/dtic/orders/
       stageLabel: RESULT_STAGE_LABEL[h.stage], stageTone: STAGE_TONE[h.stage],
       trail: h.trail.map((t) => ({ label: t.label, atLabel: formatDateTime(t.at) })),
       canDelete: h.stage === "draft" && !h.usedInCompletion && !finished && (session.role === "super_admin" || r.uploadedBy === session.userId),
+      driveSyncStatus: r.driveSyncStatus,
+      driveSyncError: r.driveSyncError,
     };
   });
-  const existingResults = results.map((r) => ({ id: r.id, fileName: r.fileName, fileSize: r.fileSize, statusLabel: RESULT_STAGE_LABEL[resultHist[r.id].stage] }));
+  const linkUsed = resultLinksUsed(resultLinks.map((l) => l.id), events);
+  const resultLinkViews: ResultLinkView[] = resultLinks.map((l) => ({
+    id: l.id, url: l.url, title: l.title, description: l.description, createdByName: l.createdByName,
+    used: linkUsed[l.id] ?? false,
+    canDelete: !finished && (session.role === "super_admin" || l.createdBy === session.userId),
+  }));
+  // Hanya file yang sudah benar-benar tersedia (bukan masih menunggu/gagal disinkronkan ke Drive) yang bisa dipilih untuk diserahkan.
+  const existingResults = results
+    .filter((r) => r.driveSyncStatus === null || r.driveSyncStatus === "synced")
+    .map((r) => ({ id: r.id, fileName: r.fileName, fileSize: r.fileSize, statusLabel: RESULT_STAGE_LABEL[resultHist[r.id].stage] }));
   // Konteks Smart WhatsApp: hanya dari peristiwa yang benar-benar tercatat.
   const workEvents = events.filter((e) => e.kind !== "whatsapp_opened");
   const lastWork = workEvents[0];
@@ -163,6 +183,8 @@ async function OrderDetailContent({ params }: { params: PageProps<"/dtic/orders/
     ...(hasSize ? [["Ukuran / dimensi output", order.designSize] as [string, string]] : []),
     ...(order.briefYear ? [["Tahun", String(order.briefYear)] as [string, string]] : []),
   ];
+  const hasEverRequestedRevision = events.some((e) => e.kind === "qc_revision_requested");
+  const workStage = deriveWorkStage({ orderStatus: order.status, qcStatus, hasDraftResults: results.length > 0, hasEverRequestedRevision });
 
   return (
     <div className="flex flex-col gap-6">
@@ -203,6 +225,10 @@ async function OrderDetailContent({ params }: { params: PageProps<"/dtic/orders/
         )}
       </header>
 
+      <div className="rounded-2xl border border-line bg-surface p-4 shadow-card">
+        <WorkStepper current={workStage} cancelled={order.status === "cancelled"} hasEverRequestedRevision={hasEverRequestedRevision} />
+      </div>
+
       {/*
         Desktop: kolom utama (brief → bahan → penyerahan → riwayat) + panel samping (langkah berikutnya di atas).
         Mobile: langkah berikutnya tampil tepat di bawah header, lalu brief, lalu info sekunder.
@@ -235,6 +261,8 @@ async function OrderDetailContent({ params }: { params: PageProps<"/dtic/orders/
                     maxResultBytes={resultMaxFileBytes()}
                     existingResults={existingResults}
                     defaultResultIds={latestResultIds(events)}
+                    resultLinks={resultLinks}
+                    defaultResultLinkIds={latestResultLinkIds(events)}
                   />
                 )}
                 {statusActions.some((t) => t.to === "cancelled" || t.to === "on_hold") && (
@@ -349,6 +377,7 @@ async function OrderDetailContent({ params }: { params: PageProps<"/dtic/orders/
           <Section title="Hasil pekerjaan" icon={<FileCheck2 className="size-5 text-accent" aria-hidden="true" />} id="hasil" testId="results">
             <p className="-mt-2 mb-4 text-sm text-ink-2">File output yang diunggah PIC; terpisah dari bahan referensi pemohon.</p>
             <ResultFiles orderId={order.id} files={resultViews} />
+            <ResultLinks orderId={order.id} links={resultLinkViews} />
           </Section>
 
           <Section title="Penyerahan hasil & QC" icon={<Send className="size-5 text-accent" aria-hidden="true" />} id="penyerahan" testId="qc-panel">
@@ -385,6 +414,12 @@ async function OrderDetailContent({ params }: { params: PageProps<"/dtic/orders/
                       {lastResult.summary && <p className="mt-1 whitespace-pre-wrap text-ink-2">{lastResult.summary}</p>}
                       <p className="mt-1 text-[13px] text-ink-2">Keterangan dari PIC; sistem tidak memverifikasi penerimaan. Manager dapat meminta file atau akses bila belum bisa memeriksa.</p>
                     </div>
+                  )}
+                  {lastResult.kind === "qc_submitted" && lastResult.detail.method === "in_app" && (
+                    <p className="mt-1.5 text-[15px] text-ink" data-testid="qc-dtic-nexus-handover">
+                      Diserahkan melalui <span className="font-medium">{HANDOVER_CHANNEL_LABEL.dtic_nexus}</span>
+                      {lastResult.actorName && <> oleh <span className="font-medium">{lastResult.actorName}</span></>} pada {formatDateTime(lastResult.at)} · <span className="font-medium">{QC_STATUS_LABEL[qcStatus]}</span>.
+                    </p>
                   )}
                   <ul className="mt-1.5 flex flex-col gap-1">
                     {fileIdsOf(lastResult).map((fid) => {
@@ -459,7 +494,7 @@ async function OrderDetailContent({ params }: { params: PageProps<"/dtic/orders/
 
           <SideCard title="Catatan internal DTIC">
             <p className="-mt-1 mb-3 text-sm text-ink-2">Untuk koordinasi antar-PIC; tidak terlihat oleh pemohon.</p>
-            <NotesEditor orderId={order.id} notes={order.internalNotes} />
+            <NotesEditor orderId={order.id} notes={order.internalNotes} editable={canEdit} />
           </SideCard>
         </aside>
       </div>
