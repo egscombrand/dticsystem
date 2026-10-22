@@ -17,8 +17,13 @@ export const STATUS_META: Record<OrderStatus, { label: string; tone: StatusTone;
   in_progress: { label: "Sedang Dikerjakan", tone: "info", description: "Staff sedang mengerjakan request." },
   // Kode lama dipertahankan demi kompatibilitas data; maknanya: hasil menunggu pemeriksaan (QC) Manager.
   pending_confirmation: { label: "Menunggu QC Manager", tone: "violet", description: "Hasil diserahkan dan menunggu pemeriksaan QC Manager." },
-  internal_revision: { label: "Perlu Revisi Internal", tone: "danger", description: "Manager meminta perbaikan sebelum hasil dapat dilanjutkan." },
-  awaiting_requester: { label: "Menunggu Masukan Pemohon", tone: "warning", description: "Hasil sudah dikirim ke pemohon; menunggu tanggapan." },
+  // Deskripsi tidak menyebut "Manager" secara spesifik — status ini juga dipakai saat PEMOHON yang
+  // meminta revisi (lihat record_feedback di applyWorkflowAction); siapa yang meminta tercatat di
+  // riwayat aktivitas (actor_name per peristiwa), bukan di teks status yang statis ini.
+  internal_revision: { label: "Perlu Revisi Internal", tone: "danger", description: "Ada permintaan perbaikan sebelum hasil dapat dilanjutkan — lihat riwayat aktivitas untuk detail peminta." },
+  // Deskripsi tidak mengandaikan pengiriman sudah tercatat — status ini juga tercapai langsung setelah
+  // Manager menyetujui (Jalur A), sebelum ada catatan pengiriman apa pun ke pemohon.
+  awaiting_requester: { label: "Menunggu Masukan Pemohon", tone: "warning", description: "Hasil siap/sudah disetujui untuk pemohon; menunggu konfirmasi pengiriman dan tanggapannya." },
   on_hold: { label: "Ditunda", tone: "warning", description: "Pekerjaan dihentikan sementara (alasan tercatat)." },
   completed: { label: "Selesai", tone: "success", description: "Hasil dikonfirmasi dan request ditutup." },
   cancelled: { label: "Dibatalkan", tone: "muted", description: "Request dibatalkan (alasan tercatat)." },
@@ -86,6 +91,20 @@ export function isFinishedStatus(status: OrderStatus): boolean {
 export function isOverdue(deadlineAt: Date | string, status: OrderStatus, now: Date = new Date()): boolean {
   if (isFinishedStatus(status)) return false;
   return new Date(deadlineAt).getTime() < now.getTime();
+}
+
+/** SLA penugasan: order sudah punya PIC (status 'assigned') tapi belum mulai dikerjakan selama ini. */
+export const ASSIGNMENT_SLA_HOURS = 24;
+
+/**
+ * true bila order sudah di status 'assigned' lebih lama dari ASSIGNMENT_SLA_HOURS tanpa berpindah ke
+ * in_progress — SLA "belum ditindaklanjuti", BERBEDA dari deadline pekerjaan (isOverdue di atas).
+ * `assignedAt` = waktu order terakhir MASUK status 'assigned' (lihat order_status_history); null bila
+ * order tidak sedang berstatus assigned (SLA ini hanya relevan pada status itu).
+ */
+export function isAssignmentStale(assignedAt: Date | string | null, status: OrderStatus, now: Date = new Date()): boolean {
+  if (status !== "assigned" || !assignedAt) return false;
+  return now.getTime() - new Date(assignedAt).getTime() > ASSIGNMENT_SLA_HOURS * 60 * 60 * 1000;
 }
 
 /** Warna badge yang valid (dipakai juga untuk level prioritas dari database). */

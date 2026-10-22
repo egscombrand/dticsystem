@@ -15,7 +15,7 @@ const PAGE_MS = 12_000;
 const PAGE_SIZE = 5;
 const TOAST_MS = 9000;
 const MAX_TOASTS = 3;
-const ENDPOINT = "/api/internal/display/orders";
+const ENDPOINT = "/api/public/display/orders";
 
 /* ---------- preferensi lokal (tema & suara) ---------- */
 function makeStore(key: string, fallback: string) {

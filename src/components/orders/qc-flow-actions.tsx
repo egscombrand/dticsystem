@@ -24,6 +24,19 @@ type AttachMode = "existing" | "upload" | "none";
 
 const URL_RE = /^https?:\/\/\S+$/i;
 
+/**
+ * Checklist konfirmasi penutupan (dialog "complete") — mengingatkan PIC bahwa QC disetujui BUKAN berarti
+ * seluruh tanggung jawab nyata (termasuk yang terjadi di luar aplikasi) sudah tuntas. Murni UI/pengingat;
+ * tidak dikirim ke server sebagai field terpisah (penyelesaian tetap dicatat lewat note yang sudah ada).
+ */
+const CLOSURE_CHECKLIST = [
+  "Hasil pekerjaan sudah benar-benar diserahkan kepada pemohon (lewat aplikasi atau media lain).",
+  "Komunikasi dan koordinasi yang menjadi tanggung jawab saya untuk pekerjaan ini sudah tuntas.",
+  "Tidak ada pekerjaan lanjutan, dokumen, atau file yang masih tertinggal.",
+  "File hasil dan dokumentasi yang diwajibkan sudah tersimpan di lokasi yang ditentukan sistem.",
+  "Seluruh tanggung jawab saya untuk pekerjaan ini sudah selesai.",
+] as const;
+
 /** datetime-local (WIB) → ISO; kosong = tidak diketahui (tidak diisi otomatis dengan waktu sekarang). */
 const wibToIso = (v: string) => (v ? new Date(`${v}:00+07:00`).toISOString() : undefined);
 
@@ -81,6 +94,9 @@ export function QcFlowActions({
   const [handedAt, setHandedAt] = useState("");
   const [confirmSent, setConfirmSent] = useState(false);
   const [needsRevision, setNeedsRevision] = useState<boolean | null>(null);
+  // Checklist penyelesaian (dialog "complete") — SEMUA harus dicentang sebelum pekerjaan benar-benar
+  // ditutup, supaya PIC tidak menutup hanya karena QC sudah disetujui (lihat CLOSURE_CHECKLIST di bawah).
+  const [closureChecks, setClosureChecks] = useState<boolean[]>(() => CLOSURE_CHECKLIST.map(() => false));
 
   const [attachMode, setAttachMode] = useState<AttachMode>("none");
   const [channel, setChannel] = useState<HandoverChannel | "">("");
@@ -131,6 +147,7 @@ export function QcFlowActions({
     keyRef.current = crypto.randomUUID();
     setError(null);
     setFieldError({});
+    setClosureChecks(CLOSURE_CHECKLIST.map(() => false));
     setFlash(null);
     setNote("");
     setLink(next === "handover" || next === "complete" ? (lastLink ?? "") : "");
@@ -217,7 +234,7 @@ export function QcFlowActions({
     }
     if (dialog === "request_revision" || dialog === "request_access") return note.trim().length > 0;
     if (dialog === "record_feedback") return needsRevision !== null && note.trim().length > 0;
-    if (dialog === "complete") return (!completionNeedsNote || note.trim().length >= COMPLETION_NOTE_MIN) && linkOk;
+    if (dialog === "complete") return (!completionNeedsNote || note.trim().length >= COMPLETION_NOTE_MIN) && linkOk && closureChecks.every(Boolean);
     return true;
   })();
 
@@ -227,7 +244,7 @@ export function QcFlowActions({
     approve_qc: { title: "Setujui hasil?", description: "Persetujuan tercatat atas nama Anda. PIC dapat melanjutkan pengiriman ke pemohon atau menyelesaikan pekerjaan.", confirm: "Ya, Setujui" },
     request_access: { title: "Minta file atau akses", description: "Gunakan bila hasil belum dapat diperiksa (file belum diterima atau tidak bisa dibuka). Pengajuan dikembalikan ke PIC tanpa keputusan atas hasil.", confirm: "Kirim Permintaan" },
     request_revision: { title: "Minta revisi", description: "Tulis apa yang perlu diperbaiki agar PIC tidak perlu menebak. Pekerjaan kembali ke PIC.", confirm: "Kirim Permintaan Revisi" },
-    record_feedback: { title: "Catat masukan pemohon", description: "Ringkas tanggapan pemohon (mis. dari WhatsApp). Tanpa pencatatan, sistem tidak menganggap pemohon menyetujui hasil.", confirm: "Simpan Masukan" },
+    record_feedback: { title: "Catat masukan pemohon", description: "Ringkas tanggapan pemohon (mis. dari WhatsApp). Tanpa pencatatan, sistem tidak menganggap pemohon menyetujui hasil. Memilih \"Tidak ada revisi\" belum otomatis menyelesaikan pekerjaan — lanjutkan ke Selesaikan Pekerjaan setelah ini.", confirm: "Simpan Masukan" },
     complete: {
       title: "Selesaikan Pekerjaan?",
       description: "Pastikan pekerjaan ini sudah selesai. Jika penyelesaian telah dibahas atau disepakati di luar aplikasi, kamu dapat mencatatnya di sini agar status dan riwayat pekerjaan tetap akurat.",
@@ -343,7 +360,11 @@ export function QcFlowActions({
           return <Button key={a} variant="secondary" icon={<CheckCircle2 className="size-4" />} onClick={() => open("complete")} className="w-full justify-center">{ACTION_LABEL.complete}</Button>;
         })}
         {!canManager && canRequester && (
-          <Button variant="secondary" icon={<Send className="size-4" />} onClick={() => open("handover")} className="w-full justify-center">Kirim Ulang ke Pemohon</Button>
+          <Button variant="secondary" icon={<Send className="size-4" />} onClick={() => open("handover")} className="w-full justify-center">
+            {/* Manager sudah ACC & "Ke Manager" tidak lagi ditawarkan (lihat checkWorkflowAction) — ini
+                giliran PERTAMA meneruskan hasil yang sudah disetujui ke pemohon, bukan "kirim ULANG". */}
+            {qcStatus === "approved" ? "Ajukan ke Pemohon" : "Kirim Ulang ke Pemohon"}
+          </Button>
         )}
       </div>
 
@@ -516,7 +537,7 @@ export function QcFlowActions({
           {dialog === "record_feedback" && (
             <fieldset className="flex flex-col gap-2" disabled={busy}>
               <legend className="mb-1 text-sm font-medium text-ink">Apakah pemohon meminta revisi?<span className="ml-0.5 text-bad" aria-hidden="true">*</span></legend>
-              {([[true, "Ada revisi", "Pekerjaan kembali ke Sedang Dikerjakan."], [false, "Tidak ada revisi", "Hanya dicatat. Pekerjaan belum otomatis selesai."]] as const).map(([v, label, hint]) => (
+              {([[true, "Ada revisi", "Status menjadi Perlu Revisi — PIC perbaiki hasil lalu ajukan ulang."], [false, "Tidak ada revisi (pemohon menyetujui)", "Belum otomatis Selesai — lanjutkan ke Selesaikan Pekerjaan setelah ini untuk menutup pekerjaan."]] as const).map(([v, label, hint]) => (
                 <label key={label} className={cn("flex cursor-pointer gap-3 rounded-xl border p-3 text-sm", needsRevision === v ? "border-accent bg-accent-soft" : "border-line")}>
                   <input type="radio" name={`${uid}-rev`} checked={needsRevision === v} onChange={() => setNeedsRevision(v)} className="mt-1 accent-[#0f766e]" />
                   <span><span className="block font-medium text-ink">{label}</span><span className="block text-ink-2">{hint}</span></span>
@@ -528,8 +549,22 @@ export function QcFlowActions({
           {dialog === "complete" && (
             <>
               {completionNeedsNote && (
-                <Alert kind="info">Belum ada pengiriman yang tercatat di aplikasi. Tuliskan keterangan sesuai kondisi sebenarnya, mis. &quot;Hasil sudah dikirim melalui WhatsApp&quot; atau &quot;Penyelesaian sudah disepakati langsung&quot;. Penyelesaian tidak membuat catatan pengiriman atau persetujuan Manager.</Alert>
+                <Alert kind="info">Pemohon belum tercatat menyetujui hasil ini (baik karena belum ada pengiriman yang tercatat, maupun sudah dikirim tapi belum ada keputusan pemohon). Tuliskan keterangan sesuai kondisi sebenarnya, mis. &quot;Hasil sudah dikirim melalui WhatsApp&quot; atau &quot;Penyelesaian sudah disepakati langsung dengan pemohon&quot;. Penyelesaian tidak membuat catatan pengiriman atau persetujuan baru.</Alert>
               )}
+              <fieldset className="flex flex-col gap-2 rounded-xl border border-line p-3" disabled={busy}>
+                <legend className="px-1 text-sm font-medium text-ink">Pastikan sebelum menutup pekerjaan ini<span className="ml-0.5 text-bad" aria-hidden="true">*</span></legend>
+                {CLOSURE_CHECKLIST.map((item, i) => (
+                  <label key={item} className="flex items-start gap-2.5 text-sm text-ink">
+                    <input
+                      type="checkbox"
+                      checked={closureChecks[i] ?? false}
+                      onChange={(e) => setClosureChecks((prev) => prev.map((c, j) => (j === i ? e.target.checked : c)))}
+                      className="mt-0.5 size-4 accent-[#0f766e]"
+                    />
+                    <span>{item}</span>
+                  </label>
+                ))}
+              </fieldset>
               {resultsBlock}
               <p className="text-[13px] text-ink-2">Upload file tidak wajib bila pekerjaan tidak menghasilkan file. Penyelesaian tidak menandai file sebagai terkirim.</p>
               <Field label="Tautan referensi hasil" htmlFor={`${uid}-clink`} error={fieldError.link} hint="Opsional.">

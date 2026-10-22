@@ -25,6 +25,11 @@ export function deriveWorkStage(input: { orderStatus: OrderStatus; qcStatus: QcS
   if (input.orderStatus === "internal_revision") return "needs_revision";
   if (input.qcStatus === "approved") return "approved";
   if (input.qcStatus === "pending") return input.hasEverRequestedRevision ? "pending_rereview" : "pending_review";
+  // Jalur A (langsung ke pemohon, TANPA Manager — qcStatus tetap 'none' sepanjang jalur ini): status
+  // 'awaiting_requester' berarti menunggu keputusan pemohon, SAMA PERSIS maknanya dengan "menunggu
+  // pemeriksaan" di Jalur B (Manager) — sebelumnya TIDAK TERTANGANI sama sekali di sini, sehingga
+  // pekerjaan Jalur A yang sudah diajukan ke pemohon keliru tampil seolah "Menunggu Dikerjakan".
+  if (input.orderStatus === "awaiting_requester") return input.hasEverRequestedRevision ? "pending_rereview" : "pending_review";
   if (input.orderStatus === "in_progress") return input.hasDraftResults ? "draft_result" : "in_progress";
   return "waiting_start";
 }

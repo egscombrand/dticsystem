@@ -1,7 +1,7 @@
 import "server-only";
 import type postgres from "postgres";
 import type { Role } from "@/lib/auth/permissions";
-import { checkWorkflowAction, handoverProblem, type DeliveryStatus, type HandoverChannel, type QcContext, type QcStatus, type WorkflowEventKind } from "@/lib/qc";
+import { checkWorkflowAction, deriveRequesterDecision, handoverProblem, type DeliveryStatus, type HandoverChannel, type QcContext, type QcStatus, type WorkflowEventKind } from "@/lib/qc";
 import { sql } from "@/lib/server/db";
 import { AppError, NotFoundError } from "@/lib/server/errors";
 import { enqueueOrderNotification } from "@/lib/server/repositories/notifications";
@@ -11,7 +11,8 @@ import { assertResultFiles, assertResultLinks, moveResultFilesToCategory } from 
 import type { ResultCategory } from "@/lib/drive";
 import type { WorkflowActionInput } from "@/lib/validation/workflow";
 
-export type QcActorInfo = { userId: string; name: string; role: Role; memberId: string | null };
+/** userId null = pemohon publik (lihat isPublicRequester) — actor_user_id disimpan NULL (FK nullable), actor_name tetap tercatat. */
+export type QcActorInfo = { userId: string | null; name: string; role: Role; memberId: string | null; isPublicRequester?: boolean };
 
 export type WorkflowEvent = {
   id: string;
@@ -125,9 +126,16 @@ export async function applyWorkflowAction(orderId: string, input: WorkflowAction
 
     const assignees = (await tx<{ member_id: string }[]>`select member_id from order_assignments where order_id = ${orderId}`).map((r) => r.member_id);
     const isAssignee = !!actor.memberId && assignees.includes(actor.memberId);
-    const ctx: QcContext = { status: o.status, qcStatus: o.qc_status };
+    // Dibaca DI DALAM transaksi yang sudah mengunci baris order (for update di atas) — permintaan bersamaan
+    // untuk order yang sama diserialkan, jadi requesterDecision di sini selalu konsisten dengan peristiwa
+    // yang SUDAH benar-benar tersimpan, tidak bisa "balapan" dengan delivery_recorded/feedback_recorded lain.
+    const decisionEvents = await tx<{ kind: WorkflowEventKind; created_at: Date; needs_revision: boolean | null }[]>`
+      select kind, created_at, needs_revision from order_workflow_events
+      where order_id = ${orderId} and kind in ('delivery_recorded', 'feedback_recorded')`;
+    const requesterDecision = deriveRequesterDecision(decisionEvents.map((e) => ({ kind: e.kind, at: e.created_at.toISOString(), needsRevision: e.needs_revision })));
+    const ctx: QcContext = { status: o.status, qcStatus: o.qc_status, requesterDecision };
     const note = input.note ?? null;
-    const check = checkWorkflowAction({ action: input.action, ctx, actor: { role: actor.role, isAssignee }, note, confirmSent: input.action === "record_delivery" ? input.confirmSent : undefined });
+    const check = checkWorkflowAction({ action: input.action, ctx, actor: { role: actor.role, isAssignee, isPublicRequester: actor.isPublicRequester }, note, confirmSent: input.action === "record_delivery" ? input.confirmSent : undefined });
     if (!check.ok) throw new AppError(check.message, check.status, check.field ? { [check.field]: check.message } : undefined);
     if (input.action === "record_delivery" && input.sentAt && new Date(input.sentAt).getTime() > Date.now() + SENT_AT_FUTURE_MS) {
       throw new AppError("Waktu pengiriman tidak boleh di masa depan.", 422, { sentAt: "Waktu pengiriman tidak boleh di masa depan." });
@@ -167,9 +175,12 @@ export async function applyWorkflowAction(orderId: string, input: WorkflowAction
         };
         if (fileIds.length > 0) {
           // Pengajuan pertama (belum pernah diminta revisi) → Hasil Awal; setelah revisi diminta N kali →
-          // Revisi-NN (N = jumlah 'qc_revision_requested' SEBELUM pengajuan ini).
+          // Revisi-NN (N = jumlah permintaan revisi SEBELUM pengajuan ini — Jalur A: 'qc_revision_requested'
+          // oleh Manager, ATAU Jalur B: 'feedback_recorded' dengan needs_revision oleh pemohon; keduanya
+          // dihitung sama supaya penomoran revisi konsisten terlepas dari jalur mana yang meminta).
           const [{ c: revisionCount }] = await tx<{ c: number }[]>`
-            select count(*)::int as c from order_workflow_events where order_id = ${orderId} and kind = 'qc_revision_requested'`;
+            select count(*)::int as c from order_workflow_events
+            where order_id = ${orderId} and (kind = 'qc_revision_requested' or (kind = 'feedback_recorded' and needs_revision = true))`;
           driveMove = revisionCount === 0 ? { fileIds, category: "hasil_awal" } : { fileIds, category: "revisi", revisionNumber: revisionCount };
         }
         break;
@@ -177,7 +188,11 @@ export async function applyWorkflowAction(orderId: string, input: WorkflowAction
         to = "in_progress"; qc = "none"; kind = "qc_withdrawn";
         break;
       case "approve_qc":
-        to = "in_progress"; qc = "approved"; kind = "qc_approved"; notify = true;
+        // Disetujui Manager → LANGSUNG menunggu keputusan pemohon (Jalur A), bukan kembali ke Sedang
+        // Dikerjakan — PIC tidak perlu mengajukan ulang hasil yang sama. Jalur B (langsung ke pemohon,
+        // lihat "record_delivery") sudah lebih dulu mencapai status yang sama tanpa melalui Manager sama
+        // sekali; keduanya bertemu di satu status "menunggu keputusan pemohon" yang sudah ada & teruji.
+        to = "awaiting_requester"; qc = "approved"; kind = "qc_approved"; notify = true;
         {
           // Persetujuan berlaku untuk versi yang diajukan terakhir (file & tautan yang sama).
           const [sub] = await tx<{ link: string | null; detail: Record<string, unknown> }[]>`
@@ -204,8 +219,16 @@ export async function applyWorkflowAction(orderId: string, input: WorkflowAction
         ev = { stage: input.stage ?? null, link: input.link, detail: { afterQc: o.qc_status === "approved", qcStatusAtSend: o.qc_status, sentAt: input.sentAt ?? null, channel: input.channel ?? null, resultFileIds: fileIds, resultLinkIds: linkIds } };
         break;
       case "record_feedback":
+        // Pemohon minta revisi = setara "request_revision" Manager (Jalur A): "Perlu Revisi", bukan
+        // langsung "Sedang Dikerjakan" — PIC harus menekan "Perbaiki Hasil" dulu sebelum mengerjakan
+        // ulang, sama seperti jalur Manager, supaya kedua jalur konsisten.
+        // Pemohon TIDAK minta revisi = QC Pemohon disetujui — TAPI ini TIDAK PERNAH menutup pekerjaan
+        // secara otomatis (lihat "complete" di bawah): PIC masih bertanggung jawab memastikan seluruh
+        // pekerjaan NYATA (komunikasi, penyerahan, tindak lanjut) benar-benar tuntas sebelum menutup
+        // sendiri lewat aksi "complete" terpisah. Status TETAP apa adanya di sini — hanya "sudah
+        // disetujui pemohon" yang dicatat (dibaca dari peristiwa ini, bukan dari status).
         kind = "feedback_recorded"; ev = { needsRevision: input.needsRevision };
-        if (input.needsRevision) { to = "in_progress"; qc = "none"; }
+        if (input.needsRevision) { to = "internal_revision"; qc = "revision"; }
         break;
       case "complete":
         // Tidak membuat catatan pengiriman/persetujuan: hanya penyelesaian beserta keterangannya.

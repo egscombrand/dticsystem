@@ -94,6 +94,8 @@ export type OrderDetail = OrderListItem & {
   /** Tautan hasil akhir yang boleh dilihat pemohon. */
   resultUrl: string | null;
   hasTrackingCode: boolean;
+  /** Ada notifikasi Telegram terkait order ini yang masih berstatus gagal (lihat notification_outbox). */
+  telegramNotifyFailed: boolean;
   attachments: OrderAttachment[];
   history: StatusHistoryEntry[];
 };

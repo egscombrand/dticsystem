@@ -38,11 +38,16 @@
     (select count(*)::int from order_attachments a where a.order_id = o.id and a.kind = 'result' and a.drive_file_id is not null and a.reconcile_status is null) as result_count,
     (select count(*)::int from order_attachments a where a.order_id = o.id and a.kind = 'result' and a.sync_status in ('pending','failed')) as result_pending_count,
     (select count(*)::int from order_attachments a where a.order_id = o.id and a.kind = 'result' and a.reconcile_status is not null) as result_reconcile_count,
-    ods.last_sync_at, ods.last_sync_status`}
+    ods.last_sync_at, ods.last_sync_status,
+    exists(select 1 from notification_outbox n where n.order_id = o.id and n.channel = 'telegram' and n.status = 'failed') as telegram_notify_failed,
+    (select h.changed_at from order_status_history h where h.order_id = o.id and h.new_status = 'assigned' order by h.changed_at desc limit 1) as assigned_at,
+    (o.status not in ('completed', 'cancelled')
+      and (select e.needs_revision from order_workflow_events e where e.order_id = o.id and e.kind = 'feedback_recorded' order by e.created_at desc limit 1) = false
+    ) as needs_pic_closure`}
       from ${l(e)} ${e`left join order_drive_sync ods on ods.order_id = o.id`}
       ${v}
       order by ${e.unsafe(o[a.sort??"newest"])}
-      limit ${b.z} offset ${q}`,e`select count(*)::int as total from ${l(e)} ${v}`]);return{items:w.map(a=>{var b,c;return{...i(a),...(b=a.status,c=a.qc_status,{referenceCount:a.reference_count,resultCount:a.result_count,resultPendingCount:a.result_pending_count,resultReconcileCount:a.result_reconcile_count,collectionStatus:(0,f.q)({orderStatus:b,qcStatus:c,resultCount:a.result_count}),lastSyncAt:a.last_sync_at?.toISOString()??null,lastSyncStatus:a.last_sync_status})}}),total:x,page:h,pageSize:b.z}}async function s(a,b=new Date){let c=(0,d.f)(),f=a.q?.trim(),g=f?`%${m(f)}%`:null,i=a.deadline?n(a.deadline,b):null,j=(d,e)=>c`
+      limit ${b.z} offset ${q}`,e`select count(*)::int as total from ${l(e)} ${v}`]);return{items:w.map(a=>{var b,c;return{...i(a),...(b=a.status,c=a.qc_status,{referenceCount:a.reference_count,resultCount:a.result_count,resultPendingCount:a.result_pending_count,resultReconcileCount:a.result_reconcile_count,collectionStatus:(0,f.q)({orderStatus:b,qcStatus:c,resultCount:a.result_count}),lastSyncAt:a.last_sync_at?.toISOString()??null,lastSyncStatus:a.last_sync_status,telegramNotifyFailed:a.telegram_notify_failed,assignedAt:a.assigned_at?.toISOString()??null,needsPicClosure:a.needs_pic_closure})}}),total:x,page:h,pageSize:b.z}}async function s(a,b=new Date){let c=(0,d.f)(),f=a.q?.trim(),g=f?`%${m(f)}%`:null,i=a.deadline?n(a.deadline,b):null,j=(d,e)=>c`
     where true
     and o.status in ${c(d)}
     ${e?c`and o.deadline_at < ${b}`:c``}
@@ -86,7 +91,8 @@
     select ${j(b)}, o.design_size, o.brief, o.brief_year, o.brief_reference, o.design_requirements,
            o.internal_notes, o.updated_at, o.completed_at, b.is_active as brand_is_active,
            o.design_order_type_id, o.brief_rich, o.drive_url, o.requester_message, o.result_url, o.requester_whatsapp,
-           false as has_tracking
+           false as has_tracking,
+           exists(select 1 from notification_outbox n where n.order_id = o.id and n.channel = 'telegram' and n.status = 'failed') as telegram_notify_failed
     from ${l(b)}
     where o.id = ${a}`)[0];if(!c)return null;let[e,f]=await Promise.all([b`
       select id, file_name, mime_type, file_size, created_at
@@ -94,7 +100,7 @@
       select h.id, h.previous_status, h.new_status, h.changed_at, h.notes, u.full_name as changed_by_name,
              h.previous_status is null as is_first
       from order_status_history h left join app_users u on u.id = h.changed_by
-      where h.order_id = ${a} order by h.changed_at desc, h.id desc`]);return{...i(c),designSize:c.design_size,brief:c.brief,briefYear:c.brief_year,briefReference:c.brief_reference,designRequirements:c.design_requirements,internalNotes:c.internal_notes,updatedAt:c.updated_at.toISOString(),completedAt:c.completed_at?.toISOString()??null,brandIsActive:c.brand_is_active,designOrderTypeId:c.design_order_type_id,teamId:c.team_id,briefRich:c.brief_rich??null,driveUrl:c.drive_url,requesterMessage:c.requester_message,resultUrl:c.result_url,requesterWhatsapp:c.requester_whatsapp,hasTrackingCode:!1,attachments:e.map(a=>({id:a.id,fileName:a.file_name,mimeType:a.mime_type,fileSize:Number(a.file_size),createdAt:a.created_at.toISOString()})),history:f.map(a=>({id:a.id,previousStatus:a.previous_status,newStatus:a.new_status,changedAt:a.changed_at.toISOString(),notes:a.notes,actor:a.changed_by_name??(a.is_first?"Pemohon (form pengajuan)":"Sistem")}))}}async function x(a){let b=await (0,d.f)()`
+      where h.order_id = ${a} order by h.changed_at desc, h.id desc`]);return{...i(c),designSize:c.design_size,brief:c.brief,briefYear:c.brief_year,briefReference:c.brief_reference,designRequirements:c.design_requirements,internalNotes:c.internal_notes,updatedAt:c.updated_at.toISOString(),completedAt:c.completed_at?.toISOString()??null,brandIsActive:c.brand_is_active,designOrderTypeId:c.design_order_type_id,teamId:c.team_id,briefRich:c.brief_rich??null,driveUrl:c.drive_url,requesterMessage:c.requester_message,resultUrl:c.result_url,requesterWhatsapp:c.requester_whatsapp,hasTrackingCode:!1,telegramNotifyFailed:c.telegram_notify_failed,attachments:e.map(a=>({id:a.id,fileName:a.file_name,mimeType:a.mime_type,fileSize:Number(a.file_size),createdAt:a.created_at.toISOString()})),history:f.map(a=>({id:a.id,previousStatus:a.previous_status,newStatus:a.new_status,changedAt:a.changed_at.toISOString(),notes:a.notes,actor:a.changed_by_name??(a.is_first?"Pemohon (form pengajuan)":"Sistem")}))}}async function x(a){let b=await (0,d.f)()`
     select l.id::text as id, l.action, l.created_at, u.full_name as actor_name, l.detail
     from auth_audit_log l left join app_users u on u.id = l.actor_user_id
     where l.action in ('order_pic_changed', 'order_deadline_changed') and l.detail->>'orderId' = ${a}

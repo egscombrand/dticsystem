@@ -185,6 +185,11 @@ const driveServer = http.createServer(async (req, res) => {
     return sendJson(200, { access_token: "fake-drive-access-token", expires_in: 3600 });
   }
   if (req.method === "GET" && url.pathname === "/drive/v3/files" && !url.pathname.match(/\/files\//)) {
+    // Mode uji KHUSUS rekonsiliasi: pencarian folder (findFolder, dipakai findResultCategoryFolder) gagal
+    // sengaja sementara GET metadata file-per-ID tetap normal — mensimulasikan kegagalan SEBAGIAN yang nyata
+    // (sebagian langkah gagal, sebagian berhasil dalam SATU percobaan), bukan seluruh Drive down (mode "500").
+    if (drive.mode === "partial") return sendJson(500, { error: { message: "server tiruan: pencarian folder gagal sengaja (partial)" } });
+    if (drive.mode === "403") return sendJson(403, { error: { message: "server tiruan: service account tidak memiliki izin pada folder ini" } });
     const q = url.searchParams.get("q") ?? "";
     const parent = /'([^']+)' in parents/.exec(q)?.[1];
     const nameMatch = /name = '((?:[^'\\]|\\.)*)'/.exec(q);
@@ -224,6 +229,7 @@ const driveServer = http.createServer(async (req, res) => {
   const fileIdMatch = /^\/drive\/v3\/files\/([^/]+)$/.exec(url.pathname);
   if (req.method === "GET" && fileIdMatch) {
     if (drive.mode === "500") return sendJson(500, { error: { message: "server tiruan: gagal sengaja" } });
+    if (drive.mode === "403") return sendJson(403, { error: { message: "server tiruan: service account tidak memiliki izin pada file ini" } });
     const id = fileIdMatch[1];
     if (url.searchParams.get("alt") === "media") {
       const file = drive.files.get(id);
@@ -282,6 +288,10 @@ const app = spawn("node_modules/.bin/next", ["start", "-p", String(APP_PORT), "-
     TELEGRAM_WORKER: process.env.E2E_WORKER_LIVE === "1" ? "on" : "off",
     TELEGRAM_WORKER_INTERVAL_MS: "500",
     TELEGRAM_RETRY_DELAYS_SECONDS: "0.1,0.1,0.1,0.1",
+    // Jaring pengaman pemulihan gagal-permanen (lihat reviveStaleFailedOutbox) — cooldown & interval
+    // pemeriksaan dipercepat drastis HANYA di pengujian (nilai produksi: 30 menit / 5 menit).
+    TELEGRAM_REVIVE_COOLDOWN_MINUTES: "0.02", // ~1,2 detik
+    TELEGRAM_REVIVE_CHECK_INTERVAL_MS: "600",
     DTIC_APP_URL: BASE,
     // Google Drive tiruan (lihat blok "drive" di atas). Nonaktif secara default di tes lama yang tidak
     // mengaktifkannya lewat env ini — tetapi di sini SELALU aktif (konsisten, deterministik) karena semua
@@ -392,7 +402,10 @@ const workflow = (id, body, cookie = ADMIN) =>
   }, {}, cookie);
 /** Alur penyerahan lengkap: ajukan ke Manager → setujui → catat pengiriman → selesaikan. */
 async function finishViaQc(id, cookie = ADMIN) {
-  for (const body of [{ action: "submit_qc" }, { action: "approve_qc" }, { action: "record_delivery", confirmSent: true, stage: "final" }, { action: "complete" }]) {
+  // "complete" butuh catatan KECUALI pemohon benar-benar sudah menyetujui (lihat completionNeedsNote di
+  // qc.ts) — helper ini tidak mencatat keputusan pemohon (record_feedback), jadi catatan tetap disertakan
+  // di sini, sama seperti PIC sungguhan yang menutup tanpa persetujuan pemohon yang tercatat.
+  for (const body of [{ action: "submit_qc" }, { action: "approve_qc" }, { action: "record_delivery", confirmSent: true, stage: "final" }, { action: "complete", note: "Disepakati tuntas (uji otomatis)" }]) {
     const r = await workflow(id, body, cookie);
     assert.equal(r.status, 200, `${body.action}: ${await r.clone().text()}`);
   }
@@ -525,6 +538,35 @@ try {
       assert.equal(tg.calls.slice(callsBefore).filter((c) => c.body.text.includes(orderNumber)).length, 1, "tick berikutnya tidak mengirim ulang");
       assert.ok(appLog.includes("dipindahkan ke antrean kirim"), "pemindahan tercatat di log server");
       assert.ok(!appLog.includes(TG_TOKEN), "token tidak tercatat");
+    });
+
+    await test("worker live: notifikasi gagal-permanen (galat SEMENTARA, retry habis) dipulihkan otomatis setelah cooldown — sekali, tanpa duplikasi", async () => {
+      const r = await submit(orderForm(brand1).fd);
+      assert.equal(r.status, 201, await r.clone().text());
+      const { orderNumber } = await r.json();
+      const row = async () => (await db`select n.id, n.status, n.attempts, n.max_attempts, n.updated_at from notification_outbox n join orders o on o.id = n.order_id where o.order_number = ${orderNumber} and n.event_ref = ''`)[0];
+      const first = await row();
+      // Simulasikan: seluruh jadwal retry sudah habis karena galat SEMENTARA (timeout/5xx), bukan permanen
+      // (token/chat salah) — persis skenario DTIC-2026-00014 di produksi yang memicu perbaikan ini.
+      // updated_at dimundurkan melewati cooldown uji (TELEGRAM_REVIVE_COOLDOWN_MINUTES=0.02 ≈ 1,2 detik).
+      await db`update notification_outbox set status = 'failed', error_kind = 'transient', attempts = max_attempts, last_error = 'Percobaan habis (uji).', updated_at = now() - interval '5 minutes' where id = ${first.id}`;
+      const callsBefore = tg.calls.length;
+      const end = Date.now() + 15000;
+      while (Date.now() < end && (await row()).status !== "sent") await new Promise((resolve) => setTimeout(resolve, 200));
+      const revived = await row();
+      assert.equal(revived.status, "sent", "dipulihkan & terkirim otomatis tanpa intervensi manual");
+      assert.equal(revived.max_attempts, first.max_attempts + 1, "max_attempts bertambah tepat 1 (satu kesempatan tambahan)");
+      const sent = tg.calls.slice(callsBefore).filter((c) => c.body.text.includes(orderNumber));
+      assert.equal(sent.length, 1, "tepat satu pesan terkirim, tidak digandakan");
+      assert.ok(appLog.includes("dipulihkan untuk satu percobaan tambahan"), "pemulihan tercatat di log server");
+
+      // Baris yang SAMA tidak boleh dipulihkan untuk KEDUA kalinya walau "gagal" lagi nanti dan cooldown
+      // terlampaui lagi — max_attempts sudah naik dari nilai bawaan, jadi tidak lagi memenuhi syarat.
+      await db`update notification_outbox set status = 'failed', error_kind = 'transient', attempts = max_attempts, updated_at = now() - interval '5 minutes' where id = ${first.id}`;
+      await new Promise((resolve) => setTimeout(resolve, 2000)); // ±3 pemeriksaan cooldown uji
+      const after = await row();
+      assert.equal(after.status, "failed", "tidak dipulihkan kedua kalinya (dibatasi sekali per baris)");
+      assert.equal(after.max_attempts, first.max_attempts + 1, "max_attempts tidak bertambah lagi");
     });
   }
   if (process.env.E2E_WORKER_LIVE !== "1") {
@@ -761,7 +803,9 @@ try {
     }
     await finishViaQc(order1.id);
     const hist = await db`select previous_status, new_status, notes, changed_by from order_status_history where order_id = ${order1.id} order by changed_at, id`;
-    assert.deepEqual(hist.map((h) => h.new_status), ["assigned", "in_progress", "pending_confirmation", "in_progress", "awaiting_requester", "completed"]);
+    // ACC Manager (approve_qc) → LANGSUNG awaiting_requester (bukan singgah di in_progress dulu); record_delivery
+    // sesudahnya tidak menghasilkan baris riwayat baru (status sudah sama, tidak ada perubahan nyata).
+    assert.deepEqual(hist.map((h) => h.new_status), ["assigned", "in_progress", "pending_confirmation", "awaiting_requester", "completed"]);
     assert.equal(hist[1].notes, "Mulai dikerjakan");
     assert.ok(hist.slice(1).every((h) => h.changed_by), "setiap perubahan mencatat pelaku");
     const [o] = await db`select status, completed_at from orders where id = ${order1.id}`;
@@ -1790,6 +1834,12 @@ try {
   });
   const search = (orderNumber) =>
     fetch(`${BASE}/api/public/tracking`, { method: "POST", headers: { "Content-Type": "application/json", "x-forwarded-for": freshIp() }, body: JSON.stringify({ orderNumber }) });
+  const publicDecide = (orderNumber, deliveryId, decision, note, requestKey = randomUUID()) =>
+    fetch(`${BASE}/api/public/tracking/decision`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-forwarded-for": freshIp() },
+      body: JSON.stringify({ orderNumber, deliveryId, decision, note, requestKey }),
+    });
   await test("cari dengan nomor order → status awal 'Request Diterima' dari database", async () => {
     const r = await search(trackOrder.orderNumber);
     assert.equal(r.status, 200, await r.clone().text());
@@ -3055,6 +3105,28 @@ try {
     assert.equal(await countOrders(), before + 1, "tepat satu pekerjaan dari dua permintaan");
   });
 
+  await test("pengajuan: TIGA pemohon BERBEDA mengajukan hampir bersamaan → semua tersimpan DAN semua notifikasi Telegram terkirim, tidak ada yang terlewat", async () => {
+    tg.mode = "ok";
+    const before = await countOrders();
+    const callsBefore = tg.calls.length;
+    const titles = ["Judul Uji Bersamaan A", "Judul Uji Bersamaan B", "Judul Uji Bersamaan C"];
+    const responses = await Promise.all(titles.map((title) => submit(orderForm(brand1, { title }).fd)));
+    const bodies = await Promise.all(responses.map(async (r) => { assert.equal(r.status, 201, await r.clone().text()); return r.json(); }));
+    assert.equal(new Set(bodies.map((b) => b.orderNumber)).size, 3, "tiga nomor order berbeda, tidak ada yang saling menimpa");
+    assert.equal(await countOrders(), before + 3, "ketiga pekerjaan tersimpan");
+    // Titik inti laporan masalah: "3 masuk, 2 notifikasi hilang" — pastikan KETIGANYA benar-benar tercatat
+    // berhasil, bukan cuma order-nya yang tersimpan.
+    for (const b of bodies) assert.equal(b.notification.state, "sent", `notifikasi ${b.orderNumber} harus 'sent', bukan tertinggal`);
+    for (const b of bodies) {
+      const sent = tg.calls.slice(callsBefore).filter((c) => c.body.text.includes(b.orderNumber));
+      assert.equal(sent.length, 1, `tepat satu pesan Telegram untuk ${b.orderNumber} (tidak hilang, tidak ganda)`);
+    }
+    for (const b of bodies) {
+      const row = (await db`select status, attempts from notification_outbox where order_id = (select id from orders where order_number = ${b.orderNumber}) and channel = 'telegram' and event_ref = ''`)[0];
+      assert.equal(row.status, "sent", `baris antrean ${b.orderNumber} berstatus sent di database`);
+    }
+  });
+
   await test("pengajuan: pemeriksaan status (rekonsiliasi) menemukan pengajuan tersimpan; kunci acak → 404; kunci rusak → 400", async () => {
     const key = randomUUID();
     const r = await submit(orderForm(brand1, { submissionKey: key, title: "Judul Uji Rekonsiliasi" }).fd);
@@ -3240,11 +3312,13 @@ try {
     const [a, b] = await Promise.all([workflow(id, { action: "approve_qc" }, MGR), workflow(id, { action: "approve_qc" }, ADMIN)]);
     assert.deepEqual([a.status, b.status].sort(), [200, 409], "satu berhasil, satu ditolak");
     assert.equal((await events(id, "qc_approved")).length, 1);
-    assert.deepEqual(await qcRow(id), { status: "in_progress", qc_status: "approved" });
+    // Disetujui Manager → LANGSUNG menunggu keputusan pemohon (bukan kembali ke Sedang Dikerjakan);
+    // PIC tidak perlu mengajukan ulang hasil yang sama.
+    assert.deepEqual(await qcRow(id), { status: "awaiting_requester", qc_status: "approved" });
     const [sub] = await events(id, "qc_submitted");
     assert.equal(sub.link, "https://drive.example/v1", "versi yang diperiksa tercatat");
     assert.ok(sub.actor_name && sub.created_at, "aktor & waktu");
-    // Setelah disetujui, pengiriman tercatat "setelah QC"
+    // Setelah disetujui, pengiriman tetap bisa dicatat terpisah (konfirmasi kirim ke pemohon) "setelah QC"
     assert.equal((await workflow(id, { action: "record_delivery", confirmSent: true, link: "https://drive.example/v1" }, STAFFC)).status, 200);
     const [dl] = await events(id, "delivery_recorded");
     assert.equal(dl.detail.afterQc, true);
@@ -3308,7 +3382,9 @@ try {
     assert.equal((await workflow(id, { action: "record_feedback", needsRevision: true }, STAFFC)).status, 422);
     r = await workflow(id, { action: "record_feedback", needsRevision: true, note: "Ganti warna latar jadi biru" }, STAFFC);
     assert.equal(r.status, 200);
-    assert.equal((await qcRow(id)).status, "in_progress", "revisi dimulai");
+    // Pemohon minta revisi = setara permintaan revisi Manager: "Perlu Revisi", bukan langsung Sedang
+    // Dikerjakan — PIC harus "Perbaiki Hasil" dulu, konsisten dengan Jalur A.
+    assert.deepEqual(await qcRow(id), { status: "internal_revision", qc_status: "revision" }, "revisi diminta pemohon, konsisten dengan jalur Manager");
     const other = await (async () => {
       await internal("/api/internal/users", "POST", { fullName: "Staff Tanpa Tugas QC", email: "staff-qc-other@dtic.example", role: "staff", memberId: null, password: "StaffQcOther2026" });
       return login("staff-qc-other@dtic.example", "StaffQcOther2026");
@@ -3340,11 +3416,16 @@ try {
     assert.equal(ev.summary, "Penyelesaian sudah disepakati langsung dengan pemohon");
     assert.ok((await db`select completed_at from orders where id = ${id}`)[0].completed_at);
     assert.equal((await workflow(id, { action: "complete", note: "lagi" }, STAFFC)).status, 409, "selesai tidak bisa diulang");
-    // Setelah pengiriman tercatat: keterangan opsional
+    // Pengiriman tercatat TAPI pemohon belum memutuskan → keterangan TETAP wajib (lihat deriveRequesterDecision
+    // di qc.ts: diajukan ≠ disetujui pemohon — menutup tanpa keputusan pemohon yang tercatat tetap perlu
+    // keterangan kesepakatan di luar aplikasi, sama seperti sebelum ada pengiriman sama sekali).
     const o2 = await qcOrder("Judul Uji Selesai Setelah Kirim");
     await setStatusAs(o2.id, "in_progress", STAFFC);
     await workflow(o2.id, { action: "record_delivery", confirmSent: true, stage: "final" }, STAFFC);
-    assert.equal((await workflow(o2.id, { action: "complete" }, STAFFC)).status, 200);
+    assert.equal((await workflow(o2.id, { action: "complete" }, STAFFC)).status, 422, "pengiriman SAJA (belum ada keputusan pemohon) belum membebaskan keterangan");
+    // Pemohon benar-benar menyetujui → keterangan baru opsional.
+    assert.equal((await workflow(o2.id, { action: "record_feedback", needsRevision: false, note: "Pemohon setuju" }, STAFFC)).status, 200);
+    assert.equal((await workflow(o2.id, { action: "complete" }, STAFFC)).status, 200, "pemohon sudah menyetujui → keterangan opsional");
     assert.equal((await events(o2.id, "completed"))[0].detail.deliveryRecorded, true);
   });
 
@@ -3433,14 +3514,470 @@ try {
     assert.equal(r.status, 200);
     const html = await (await pageRaw(`/dtic/orders/${id}`, STAFFC)).text();
     assert.match(html, /Sudah diserahkan ke pemohon/, "status file mengikuti peristiwa aktual");
-    // penyelesaian dengan file sebagai referensi tidak membuat pengiriman/persetujuan baru
+    // penyelesaian dengan file sebagai referensi tidak membuat pengiriman/persetujuan baru. Catatan
+    // disertakan — pemohon belum menyetujui secara formal (belum ada record_feedback) di titik ini.
     const before = (await events(id)).length;
-    r = await workflow(id, { action: "complete", resultFileIds: [f1.id] }, STAFFC);
-    assert.equal(r.status, 200);
+    r = await workflow(id, { action: "complete", resultFileIds: [f1.id], note: "Disepakati tuntas dengan pemohon" }, STAFFC);
+    assert.equal(r.status, 200, await r.clone().text());
     const after = await events(id);
     assert.equal(after.length, before + 1);
     assert.equal(after.at(-1).kind, "completed");
     assert.equal((await uploadResult(id, { name: "telat.png", data: PNG_BYTES }, STAFFC)).status, 409, "pekerjaan selesai tidak menerima unggahan");
+  });
+
+  await test("Jalur A lengkap: ACC Manager → Menunggu QC Pemohon (bukan Sedang Dikerjakan) → ajukan ke pemohon tanpa unggah ulang → pemohon setuju TAPI pekerjaan BELUM otomatis Selesai → PIC tutup sendiri → Selesai; riwayat tetap ada", async () => {
+    const { id } = await qcOrder("Judul Uji Jalur A Lengkap");
+    const STAFFC = await qcStaff();
+    const MGRC = await qcManager();
+    await setStatusAs(id, "in_progress", STAFFC);
+    const up = await uploadResult(id, { name: "hasil-acc.png", data: PNG_BYTES }, STAFFC);
+    assert.equal(up.status, 201, await up.clone().text());
+    const fileId = (await up.json()).file.id;
+    let r = await workflow(id, { action: "submit_qc", method: "in_app", resultFileIds: [fileId], note: "Mohon diperiksa" }, STAFFC);
+    assert.equal(r.status, 200, await r.clone().text());
+    r = await workflow(id, { action: "approve_qc", note: "ACC, hasil sudah bagus" }, MGRC);
+    assert.equal(r.status, 200, await r.clone().text());
+    assert.deepEqual(await qcRow(id), { status: "awaiting_requester", qc_status: "approved" }, "ACC Manager → LANGSUNG Menunggu QC Pemohon, bukan Sedang Dikerjakan");
+    assert.equal((await events(id, "qc_submitted")).length, 1, "tidak perlu mengajukan ulang hasil yang sama");
+    // "Ke Manager" tidak lagi ditawarkan setelah ACC — mengajukan ulang ke Manager harus ditolak.
+    assert.equal((await workflow(id, { action: "submit_qc", method: "in_app", resultFileIds: [fileId] }, STAFFC)).status, 409, "tidak bisa ajukan ulang ke Manager setelah ACC");
+    // "Ajukan ke Pemohon" = record_delivery; file yang sudah di-ACC diteruskan tanpa perlu dipilih ulang —
+    // dikirim di sini TANPA menyertakan resultFileIds secara eksplisit, membuktikan tidak wajib unggah ulang.
+    r = await workflow(id, { action: "record_delivery", confirmSent: true }, STAFFC);
+    assert.equal(r.status, 200, await r.clone().text());
+    assert.deepEqual(await qcRow(id), { status: "awaiting_requester", qc_status: "approved" }, "tetap Menunggu QC Pemohon setelah diajukan");
+    assert.equal((await events(id, "qc_approved")).length, 1, "persetujuan Manager tetap tersimpan di riwayat QC");
+
+    // BUKTI PERBAIKAN (bug dilaporkan nyata di DTIC-2026-00008): sudah diajukan & pemohon belum memutuskan
+    // → mengajukan LAGI harus ditolak backend (bukan hanya tombol disembunyikan), dan tombol tidak lagi
+    // ditawarkan di UI. "Catat Masukan Pemohon" JUGA belum relevan sebelum ini (tidak diuji berulang di sini,
+    // sudah dicakup unit test qc.test.ts) — fokus di sini murni mencegah PENGAJUAN GANDA lewat backend nyata.
+    r = await workflow(id, { action: "record_delivery", confirmSent: true }, STAFFC);
+    assert.equal(r.status, 409, "pengajuan ganda ke pemohon ditolak backend, bukan hanya UI");
+    assert.equal((await events(id, "delivery_recorded")).length, 1, "tidak ada pengajuan kedua yang tersimpan dari percobaan yang ditolak");
+    const htmlNoDup = await (await pageRaw(`/dtic/orders/${id}`, STAFFC)).text();
+    assert.doesNotMatch(htmlNoDup, /Ajukan ke Pemohon/, "tombol 'Ajukan ke Pemohon' tidak lagi ditawarkan setelah benar-benar diajukan");
+
+    // Permintaan BERSAMAAN (klik ganda/jaringan lambat) untuk mengajukan lagi — hanya boleh ada SATU
+    // delivery_recorded, permintaan lain ditolak (409), tidak ada yang "berhasil ganda".
+    const concurrent = await Promise.all([
+      workflow(id, { action: "record_delivery", confirmSent: true }, STAFFC),
+      workflow(id, { action: "record_delivery", confirmSent: true }, STAFFC),
+    ]);
+    assert.ok(concurrent.every((x) => x.status === 409), "permintaan bersamaan untuk mengajukan lagi semuanya ditolak, tidak ada yang lolos");
+    assert.equal((await events(id, "delivery_recorded")).length, 1, "tetap hanya satu pengajuan tersimpan walau dicoba bersamaan");
+
+    // Pemohon menyetujui (tidak ada revisi) — HANYA dicatat, TIDAK otomatis menutup pekerjaan: PIC masih
+    // bertanggung jawab memastikan seluruh pekerjaan nyata benar-benar tuntas.
+    r = await workflow(id, { action: "record_feedback", needsRevision: false, note: "Pemohon setuju, tidak ada revisi" }, STAFFC);
+    assert.equal(r.status, 200, await r.clone().text());
+    assert.deepEqual(await qcRow(id), { status: "awaiting_requester", qc_status: "approved" }, "QC Pemohon disetujui TIDAK otomatis menutup pekerjaan");
+    // Keputusan pemohon sudah tercatat — tidak bisa dicatat lagi (mencegah masukan ganda), dan mengajukan
+    // lagi juga tidak relevan lagi (keduanya sudah dibuktikan lewat checkWorkflowAction di qc.test.ts;
+    // di sini cukup satu bukti nyata lewat HTTP untuk record_feedback).
+    assert.equal((await workflow(id, { action: "record_feedback", needsRevision: false, note: "lagi" }, STAFFC)).status, 409, "masukan pemohon tidak bisa dicatat dua kali untuk pengajuan yang sama");
+    const html = await (await pageRaw(`/dtic/orders/${id}`, STAFFC)).text();
+    assert.match(html, /Menunggu Penyelesaian PIC/, "pengingat tampil selama PIC belum menutup sendiri");
+    assert.doesNotMatch(html, /Ajukan ke Pemohon|Catat Masukan Pemohon/, "tombol pengajuan/masukan tidak lagi ditawarkan setelah pemohon menyetujui — hanya Selesaikan Pekerjaan yang relevan");
+    // PIC menutup sendiri lewat aksi "complete" terpisah.
+    r = await workflow(id, { action: "complete", note: "Sudah dikonfirmasi tuntas ke pemohon" }, STAFFC);
+    assert.equal(r.status, 200, await r.clone().text());
+    const final = await qcRow(id);
+    assert.equal(final.status, "completed", "PIC menutup sendiri → Selesai");
+    assert.ok((await db`select completed_at from orders where id = ${id}`)[0].completed_at, "waktu penyelesaian tercatat");
+    assert.equal((await events(id, "qc_approved")).length, 1, "persetujuan Manager masih ada setelah Selesai");
+    assert.equal((await events(id, "delivery_recorded")).length, 1, "riwayat pengajuan ke pemohon masih ada setelah Selesai");
+    const htmlAfter = await (await pageRaw(`/dtic/orders/${id}`, STAFFC)).text();
+    assert.doesNotMatch(htmlAfter, /Menunggu Penyelesaian PIC/, "pengingat hilang setelah benar-benar ditutup");
+  });
+
+  await test("Jalur A: pemohon minta revisi (setelah ACC Manager) → Perlu Revisi, konsisten dengan permintaan revisi Manager; penomoran revisi Drive ikut terhitung", async () => {
+    const { id } = await qcOrder("Judul Uji Jalur A Revisi Pemohon");
+    const STAFFC = await qcStaff();
+    const MGRC = await qcManager();
+    await setStatusAs(id, "in_progress", STAFFC);
+    const up = await uploadResult(id, { name: "draf1.png", data: PNG_BYTES }, STAFFC);
+    const fileId = (await up.json()).file.id;
+    await workflow(id, { action: "submit_qc", method: "in_app", resultFileIds: [fileId], note: "Mohon diperiksa" }, STAFFC);
+    await workflow(id, { action: "approve_qc", note: "ACC" }, MGRC);
+    await workflow(id, { action: "record_delivery", confirmSent: true }, STAFFC);
+    let r = await workflow(id, { action: "record_feedback", needsRevision: true, note: "Pemohon minta font diganti" }, STAFFC);
+    assert.equal(r.status, 200, await r.clone().text());
+    assert.deepEqual(await qcRow(id), { status: "internal_revision", qc_status: "revision" }, "revisi pemohon setara revisi Manager");
+    const [fb] = await events(id, "feedback_recorded");
+    assert.equal(fb.needs_revision, true);
+    assert.ok(fb.actor_name, "pihak yang meminta revisi tercatat");
+    // BUKTI PERBAIKAN: catatan revisi PEMOHON (bukan Manager) harus tampil ke PIC di halaman detail — sebelumnya
+    // kartu "Manager meminta revisi" hanya mencari kind 'qc_revision_requested', tidak pernah menampilkan
+    // revisi yang sebenarnya berasal dari pemohon (feedback_recorded), sehingga PIC tidak tahu apa yang harus diperbaiki.
+    const htmlRevision = await (await pageRaw(`/dtic/orders/${id}`, STAFFC)).text();
+    assert.match(htmlRevision, /Pemohon meminta revisi/, "label membedakan sumber revisi (pemohon, bukan Manager)");
+    assert.match(htmlRevision, /Pemohon minta font diganti/, "catatan revisi pemohon yang sebenarnya tampil ke PIC");
+    // PIC perbaiki & ajukan ulang → dihitung sebagai REVISI (bukan pengajuan pertama), walau yang minta
+    // revisi adalah pemohon (Jalur B/A campuran), bukan Manager.
+    assert.equal((await setStatusAs(id, "in_progress", STAFFC)).status, 200, "Perbaiki Hasil");
+    const up2 = await uploadResult(id, { name: "draf2-revisi.png", data: PNG_BYTES }, STAFFC);
+    const fileId2 = (await up2.json()).file.id;
+    r = await workflow(id, { action: "submit_qc", method: "in_app", resultFileIds: [fileId2], note: "Revisi selesai" }, STAFFC);
+    assert.equal(r.status, 200, await r.clone().text());
+    // Drive belum tentu aktif pada titik ini di suite (diaktifkan khusus di bagian "Google Drive A" nanti) —
+    // cukup pastikan jumlah permintaan revisi (lintas jalur) terhitung benar lewat jalur non-Drive:
+    // pengajuan berikutnya SETELAH revisi diminta pemohon harus tercatat sebagai pengajuan kedua.
+    assert.equal((await events(id, "qc_submitted")).length, 2, "pengajuan kedua (pasca-revisi pemohon) tercatat sebagai revisi, bukan pengajuan pertama lagi");
+  });
+
+  await test("Riwayat publik: ACC Manager TANPA pengajuan ke pemohon → status antara jujur, belum ada file hasil tampil, file belum terunduh", async () => {
+    const { id, orderNumber } = await qcOrder("Judul Uji Riwayat Publik ACC Belum Diajukan");
+    const STAFFC = await qcStaff();
+    const MGRC = await qcManager();
+    await setStatusAs(id, "in_progress", STAFFC);
+    const up = await uploadResult(id, { name: "hasil.png", data: PNG_BYTES }, STAFFC);
+    const fileId = (await up.json()).file.id;
+    await workflow(id, { action: "submit_qc", method: "in_app", resultFileIds: [fileId], note: "Mohon diperiksa" }, STAFFC);
+    let r = await workflow(id, { action: "approve_qc", note: "ACC" }, MGRC);
+    assert.equal(r.status, 200, await r.clone().text());
+    let v = await (await search(orderNumber)).json();
+    assert.equal(v.status, "awaiting_requester");
+    assert.equal(v.awaitingSubmissionToRequester, true, "belum ada delivery_recorded → belum benar-benar diajukan ke pemohon");
+    assert.deepEqual(v.deliveries, [], "belum ada hasil yang diajukan, draf tidak boleh tampil di riwayat publik");
+
+    // File yang baru di-ACC (belum diajukan ke pemohon) TIDAK BOLEH terunduh lewat rute publik.
+    assert.equal((await fetch(`${BASE}/api/public/tracking/files/${fileId}?order=${orderNumber}`)).status, 404, "file belum diajukan ke pemohon tidak boleh terunduh publik");
+
+    // Draf lain yang tidak pernah dirujuk sama sekali juga tidak pernah bisa terunduh publik.
+    const draftUp = await uploadResult(id, { name: "draf-tidak-diajukan.png", data: PNG_BYTES }, STAFFC);
+    const draftId = (await draftUp.json()).file.id;
+    assert.equal((await fetch(`${BASE}/api/public/tracking/files/${draftId}?order=${orderNumber}`)).status, 404, "draf yang belum pernah diajukan tidak pernah bisa terunduh publik");
+
+    // PIC benar-benar mengajukan ke pemohon. Dialog "Ajukan ke Pemohon" di UI otomatis memilih file
+    // yang sudah di-ACC (lihat qc-flow-actions.tsx: setPicked(new Set(defaults))), jadi resultFileIds
+    // dikirim eksplisit di sini juga — mencerminkan perilaku nyata, bukan memintas backend.
+    r = await workflow(id, { action: "record_delivery", confirmSent: true, resultFileIds: [fileId] }, STAFFC);
+    assert.equal(r.status, 200, await r.clone().text());
+    v = await (await search(orderNumber)).json();
+    assert.equal(v.awaitingSubmissionToRequester, false, "setelah benar-benar diajukan, status antara hilang");
+    assert.equal(v.deliveries.length, 1);
+    assert.deepEqual(v.deliveries[0].files.map((f) => f.id), [fileId]);
+
+    // Sekarang file ACC tersebut BOLEH diunduh publik (nomor order benar).
+    const dl2 = await fetch(`${BASE}/api/public/tracking/files/${fileId}?order=${orderNumber}`);
+    assert.equal(dl2.status, 200, await dl2.clone().text());
+    assert.equal(dl2.headers.get("content-type"), "image/png");
+
+    // Nomor order SALAH tidak boleh mengunduh walau fileId benar.
+    assert.equal((await fetch(`${BASE}/api/public/tracking/files/${fileId}?order=DTIC-2099-00001`)).status, 404, "nomor order salah ditolak");
+    // Draf yang tidak pernah diajukan tetap tidak terunduh walau order sudah punya pengajuan lain.
+    assert.equal((await fetch(`${BASE}/api/public/tracking/files/${draftId}?order=${orderNumber}`)).status, 404, "draf tetap tidak terunduh setelah ada pengajuan lain pada order yang sama");
+  });
+
+  await test("Riwayat publik: revisi pemohon → versi hasil lama tetap tercatat & terunduh, versi baru muncul setelah diajukan ulang", async () => {
+    const { id, orderNumber } = await qcOrder("Judul Uji Riwayat Publik Revisi");
+    const STAFFC = await qcStaff();
+    const MGRC = await qcManager();
+    await setStatusAs(id, "in_progress", STAFFC);
+    const up1 = await uploadResult(id, { name: "v1.png", data: PNG_BYTES }, STAFFC);
+    const f1 = (await up1.json()).file.id;
+    await workflow(id, { action: "submit_qc", method: "in_app", resultFileIds: [f1] }, STAFFC);
+    await workflow(id, { action: "approve_qc" }, MGRC);
+    await workflow(id, { action: "record_delivery", confirmSent: true, resultFileIds: [f1] }, STAFFC);
+    let r = await workflow(id, { action: "record_feedback", needsRevision: true, note: "Tolong perbesar logo" }, STAFFC);
+    assert.equal(r.status, 200, await r.clone().text());
+    await setStatusAs(id, "in_progress", STAFFC);
+    const up2 = await uploadResult(id, { name: "v2.png", data: PNG_BYTES }, STAFFC);
+    const f2 = (await up2.json()).file.id;
+    await workflow(id, { action: "submit_qc", method: "in_app", resultFileIds: [f2] }, STAFFC);
+    await workflow(id, { action: "approve_qc" }, MGRC);
+    r = await workflow(id, { action: "record_delivery", confirmSent: true, resultFileIds: [f2] }, STAFFC);
+    assert.equal(r.status, 200, await r.clone().text());
+
+    const v = await (await search(orderNumber)).json();
+    assert.equal(v.deliveries.length, 2, "kedua versi pengajuan tetap tercatat, versi lama tidak digantikan diam-diam");
+    assert.deepEqual(v.deliveries.map((d) => d.files[0].id), [f1, f2], "urut kronologis; versi lama tetap bisa ditelusuri");
+    assert.equal((await fetch(`${BASE}/api/public/tracking/files/${f1}?order=${orderNumber}`)).status, 200, "versi lama tetap terunduh");
+    assert.equal((await fetch(`${BASE}/api/public/tracking/files/${f2}?order=${orderNumber}`)).status, 200, "versi terbaru terunduh");
+  });
+
+  await test("Riwayat publik: Jalur A (tanpa Manager) → pengajuan langsung ke pemohon tampil benar sejak awal", async () => {
+    const { id, orderNumber } = await qcOrder("Judul Uji Riwayat Publik Jalur A");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    const up = await uploadResult(id, { name: "langsung.png", data: PNG_BYTES }, STAFFC);
+    const fileId = (await up.json()).file.id;
+    const r = await workflow(id, { action: "record_delivery", confirmSent: true, resultFileIds: [fileId] }, STAFFC);
+    assert.equal(r.status, 200, await r.clone().text());
+    const v = await (await search(orderNumber)).json();
+    assert.equal(v.awaitingSubmissionToRequester, false, "Jalur A tanpa Manager: begitu diajukan, langsung dianggap sudah diajukan ke pemohon");
+    assert.equal(v.deliveries.length, 1);
+    assert.deepEqual(v.deliveries[0].files.map((f) => f.id), [fileId]);
+    assert.equal((await fetch(`${BASE}/api/public/tracking/files/${fileId}?order=${orderNumber}`)).status, 200);
+  });
+
+  await test("Riwayat publik: Pemohon menyetujui hasil lewat CTA 'Setujui Hasil' → tercatat, badge berubah, PIC bisa Selesaikan tanpa catatan tambahan", async () => {
+    const { id, orderNumber } = await qcOrder("Judul Uji Keputusan Publik Setuju");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    const up = await uploadResult(id, { name: "untuk-disetujui.png", data: PNG_BYTES }, STAFFC);
+    const fileId = (await up.json()).file.id;
+    await workflow(id, { action: "record_delivery", confirmSent: true, resultFileIds: [fileId] }, STAFFC);
+    let v = await (await search(orderNumber)).json();
+    assert.equal(v.deliveries.length, 1);
+    assert.equal(v.deliveries[0].decision, "awaiting", "belum ada keputusan, CTA seharusnya tampil");
+    const deliveryId = v.deliveries[0].id;
+
+    const r = await publicDecide(orderNumber, deliveryId, "approved");
+    assert.equal(r.status, 200, await r.clone().text());
+    const after = await r.clone().json();
+    assert.equal(after.deliveries[0].decision, "approved", "respons langsung memuat status terbaru (sumber kebenaran yang sama)");
+
+    v = await (await search(orderNumber)).json();
+    assert.equal(v.deliveries[0].decision, "approved");
+    assert.ok(v.deliveries[0].decisionAt);
+
+    // PIC: requesterDecision "approved" → Selesaikan Pekerjaan tidak lagi butuh catatan tambahan.
+    assert.equal((await workflow(id, { action: "complete" }, STAFFC)).status, 200, "pemohon sudah menyetujui lewat publik → catatan tidak wajib");
+    assert.equal((await qcRow(id)).status, "completed");
+
+    // Keputusan ganda pada pengajuan yang sama ditolak backend.
+    const dup = await publicDecide(orderNumber, deliveryId, "approved");
+    assert.equal(dup.status, 409, "keputusan ganda pada pengajuan yang sama ditolak");
+  });
+
+  await test("Riwayat publik: Pemohon minta revisi lewat CTA → catatan wajib, status Perlu Revisi, PIC melihat catatannya, PIC dapat ajukan ulang (Pengajuan #2)", async () => {
+    const { id, orderNumber } = await qcOrder("Judul Uji Keputusan Publik Revisi");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    const up1 = await uploadResult(id, { name: "v1-publik.png", data: PNG_BYTES }, STAFFC);
+    const f1 = (await up1.json()).file.id;
+    await workflow(id, { action: "record_delivery", confirmSent: true, resultFileIds: [f1] }, STAFFC);
+    let v = await (await search(orderNumber)).json();
+    const deliveryId1 = v.deliveries[0].id;
+
+    // Catatan revisi wajib.
+    assert.equal((await publicDecide(orderNumber, deliveryId1, "revision", "")).status, 422, "catatan revisi wajib diisi");
+
+    const r = await publicDecide(orderNumber, deliveryId1, "revision", "Tolong perbesar logo di pojok kanan atas");
+    assert.equal(r.status, 200, await r.clone().text());
+    assert.equal((await qcRow(id)).status, "internal_revision", "status pekerjaan berubah menjadi Perlu Revisi");
+
+    v = await (await search(orderNumber)).json();
+    assert.equal(v.deliveries[0].decision, "revision_requested");
+    assert.equal(v.deliveries[0].decisionNote, "Tolong perbesar logo di pojok kanan atas");
+
+    // PIC melihat catatan revisi dari pemohon di halaman detail (bukan hanya dari Manager).
+    const html = await (await pageRaw(`/dtic/orders/${id}`, STAFFC)).text();
+    assert.match(html, /Pemohon meminta revisi/);
+    assert.match(html, /Tolong perbesar logo di pojok kanan atas/);
+
+    // Pengajuan LAMA ini tidak bisa diputuskan lagi (siklusnya sudah selesai).
+    assert.equal((await publicDecide(orderNumber, deliveryId1, "approved")).status, 409, "pengajuan lama yang sudah diputuskan tidak bisa diputuskan ulang");
+
+    // PIC perbaiki & ajukan ulang → Pengajuan #2 baru, menunggu keputusan lagi.
+    assert.equal((await setStatusAs(id, "in_progress", STAFFC)).status, 200);
+    const up2 = await uploadResult(id, { name: "v2-publik.png", data: PNG_BYTES }, STAFFC);
+    const f2 = (await up2.json()).file.id;
+    const r2 = await workflow(id, { action: "record_delivery", confirmSent: true, resultFileIds: [f2] }, STAFFC);
+    assert.equal(r2.status, 200, await r2.clone().text(), "pengajuan ulang setelah revisi TIDAK diblokir sebagai 'pengajuan ganda'");
+
+    v = await (await search(orderNumber)).json();
+    assert.equal(v.deliveries.length, 2, "kedua pengajuan tetap tercatat sebagai riwayat");
+    assert.equal(v.deliveries[0].decision, "revision_requested", "pengajuan lama tetap menampilkan keputusannya");
+    assert.equal(v.deliveries[1].decision, "awaiting", "pengajuan #2 menunggu keputusan baru");
+    const deliveryId2 = v.deliveries[1].id;
+    assert.notEqual(deliveryId1, deliveryId2);
+
+    // Permintaan bersamaan pada pengajuan #2 yang baru — hanya satu yang boleh berhasil.
+    const concurrent = await Promise.all([
+      publicDecide(orderNumber, deliveryId2, "approved", undefined, "concurrent-key-1"),
+      publicDecide(orderNumber, deliveryId2, "approved", undefined, "concurrent-key-2"),
+    ]);
+    const statuses = concurrent.map((x) => x.status).sort();
+    assert.deepEqual(statuses, [200, 409], "tepat satu keputusan bersamaan yang berhasil, lainnya ditolak");
+  });
+
+  await test("Riwayat publik: nomor order salah atau pengajuan tidak dikenal ditolak dengan jelas", async () => {
+    const { orderNumber } = await qcOrder("Judul Uji Keputusan Publik Validasi");
+    assert.equal((await publicDecide("DTIC-2099-00001", randomUUID(), "approved")).status, 404, "nomor order tidak ditemukan");
+    assert.equal((await publicDecide(orderNumber, randomUUID(), "approved")).status, 404, "ID pengajuan acak/tidak dikenal ditolak");
+    assert.equal((await publicDecide(orderNumber, randomUUID(), "unknown-decision")).status, 422, "nilai keputusan tidak valid ditolak");
+  });
+
+  await test("Riwayat publik (browser): Pemohon menekan 'Setujui Hasil' → dialog konfirmasi → tersimpan, CTA hilang, status berubah di halaman yang sama", async () => {
+    const { id, orderNumber } = await qcOrder("Judul Uji Tombol Setujui Browser");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    const up = await uploadResult(id, { name: "tombol-setuju.png", data: PNG_BYTES }, STAFFC);
+    const fileId = (await up.json()).file.id;
+    await workflow(id, { action: "record_delivery", confirmSent: true, resultFileIds: [fileId] }, STAFFC);
+
+    const chromePath = process.env.CHROME_PATH ?? "/usr/bin/google-chrome";
+    const { chromium } = await import("playwright-core");
+    const browser = await chromium.launch({ executablePath: chromePath, headless: true });
+    try {
+      const page = await browser.newPage();
+      await page.goto(`${BASE}/riwayat`);
+      await page.getByLabel("Nomor Order").fill(orderNumber);
+      await page.getByRole("button", { name: /Lacak Request/ }).click();
+      await page.getByRole("heading", { name: "File Hasil yang Diajukan" }).waitFor();
+
+      await page.getByRole("button", { name: "Setujui Hasil" }).click();
+      const confirmDlg = page.getByRole("dialog", { name: "Setujui hasil ini?" });
+      await confirmDlg.waitFor();
+      await confirmDlg.getByRole("button", { name: "Ya, Setujui Hasil" }).click();
+      await confirmDlg.waitFor({ state: "hidden" });
+
+      await page.getByText("Disetujui Pemohon").waitFor();
+      assert.equal(await page.getByRole("button", { name: "Setujui Hasil" }).count(), 0, "CTA hilang setelah diputuskan");
+      assert.equal(await page.getByRole("button", { name: "Minta Revisi" }).count(), 0);
+    } finally {
+      await browser.close();
+    }
+    assert.deepEqual(await qcRow(id), { status: "awaiting_requester", qc_status: "none" }, "Jalur A: ACC publik tidak mengubah status pekerjaan secara langsung, hanya keputusan pemohon yang tercatat");
+    assert.equal((await workflow(id, { action: "complete" }, STAFFC)).status, 200, "backend benar-benar menyimpan keputusan dari klik browser, bukan hanya tampilan");
+  });
+
+  await test("Riwayat publik (browser): Pemohon menekan 'Minta Revisi' → catatan wajib sebelum tombol kirim aktif → tersimpan, status Revisi Diminta tampil", async () => {
+    const { id, orderNumber } = await qcOrder("Judul Uji Tombol Revisi Browser");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    const up = await uploadResult(id, { name: "tombol-revisi.png", data: PNG_BYTES }, STAFFC);
+    const fileId = (await up.json()).file.id;
+    await workflow(id, { action: "record_delivery", confirmSent: true, resultFileIds: [fileId] }, STAFFC);
+
+    const chromePath = process.env.CHROME_PATH ?? "/usr/bin/google-chrome";
+    const { chromium } = await import("playwright-core");
+    const browser = await chromium.launch({ executablePath: chromePath, headless: true });
+    try {
+      const page = await browser.newPage();
+      await page.goto(`${BASE}/riwayat`);
+      await page.getByLabel("Nomor Order").fill(orderNumber);
+      await page.getByRole("button", { name: /Lacak Request/ }).click();
+      await page.getByRole("heading", { name: "File Hasil yang Diajukan" }).waitFor();
+
+      await page.getByRole("button", { name: "Minta Revisi" }).click();
+      const revDlg = page.getByRole("dialog", { name: "Minta revisi" });
+      await revDlg.waitFor();
+      assert.equal(await revDlg.getByRole("button", { name: "Kirim Permintaan Revisi" }).isDisabled(), true, "belum bisa dikirim tanpa catatan");
+      await revDlg.getByLabel("Catatan revisi").fill("Warna latar mohon diganti jadi biru tua");
+      await revDlg.getByRole("button", { name: "Kirim Permintaan Revisi" }).click();
+      await revDlg.waitFor({ state: "hidden" });
+
+      await page.getByText("Revisi Diminta").waitFor();
+      await page.getByText("Warna latar mohon diganti jadi biru tua").waitFor();
+    } finally {
+      await browser.close();
+    }
+    assert.equal((await qcRow(id)).status, "internal_revision", "backend benar-benar menerapkan revisi dari klik browser");
+  });
+
+  await test("Riwayat publik (browser): 'File Hasil yang Diajukan' punya Lihat (gambar) & Unduh; tipe tidak bisa dipratinjau tetap bisa diunduh dengan info jelas", async () => {
+    const { id, orderNumber } = await qcOrder("Judul Uji Lihat Unduh Publik");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    const upImg = await uploadResult(id, { name: "poster-final.png", data: PNG_BYTES }, STAFFC);
+    const imgFileId = (await upImg.json()).file.id;
+    const zipBytes = Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.alloc(50)]);
+    const upZip = await uploadResult(id, { name: "sumber-desain.zip", data: zipBytes }, STAFFC);
+    const zipFileId = (await upZip.json()).file.id;
+    const r = await workflow(id, { action: "record_delivery", confirmSent: true, resultFileIds: [imgFileId, zipFileId] }, STAFFC);
+    assert.equal(r.status, 200, await r.clone().text());
+
+    const chromePath = process.env.CHROME_PATH ?? "/usr/bin/google-chrome";
+    const { chromium } = await import("playwright-core");
+    const browser = await chromium.launch({ executablePath: chromePath, headless: true });
+    try {
+      const page = await browser.newPage();
+      await page.goto(`${BASE}/riwayat`);
+      await page.getByLabel("Nomor Order").fill(orderNumber);
+      await page.getByRole("button", { name: /Lacak Request/ }).click();
+      await page.getByRole("heading", { name: "File Hasil yang Diajukan" }).waitFor();
+
+      const imgRow = page.locator("li", { hasText: "poster-final.png" });
+      await imgRow.waitFor();
+      const lihatBtn = imgRow.getByRole("button", { name: /Lihat poster-final\.png/ });
+      await lihatBtn.waitFor();
+      await lihatBtn.click();
+      const modalImg = page.locator("dialog[open] img");
+      await modalImg.waitFor();
+      const imgSrc = await modalImg.getAttribute("src");
+      assert.ok(imgSrc && imgSrc.includes(imgFileId), "modal pratinjau memuat file yang benar");
+      const imgDl = await fetch(`${BASE}${imgSrc}`);
+      assert.equal(imgDl.status, 200, "sumber pratinjau benar-benar dapat dimuat (bukan tautan rusak)");
+      await page.keyboard.press("Escape");
+
+      const zipRow = page.locator("li", { hasText: "sumber-desain.zip" });
+      await zipRow.waitFor();
+      assert.equal(await zipRow.getByRole("button", { name: /Lihat/ }).count(), 0, "tipe tidak bisa dipratinjau TIDAK punya tombol Lihat");
+      await zipRow.getByText("(pratinjau tidak didukung)").waitFor();
+      const zipDlLink = zipRow.getByRole("link", { name: /Unduh sumber-desain\.zip/ });
+      const zipHref = await zipDlLink.getAttribute("href");
+      const zipDl = await fetch(`${BASE}${zipHref}`);
+      assert.equal(zipDl.status, 200, "tipe tidak bisa dipratinjau tetap bisa diunduh");
+    } finally {
+      await browser.close();
+    }
+  });
+
+  await test("TEMP visual: WorkStepper tiap tahap, desktop & mobile", async () => {
+    const chromePath = process.env.CHROME_PATH ?? "/usr/bin/google-chrome";
+    const { chromium } = await import("playwright-core");
+    const browser = await chromium.launch({ executablePath: chromePath, headless: true });
+    const dir = process.env.E2E_SHOT_DIR ?? path.join(os.tmpdir(), "dtic-stepper-shots");
+    await mkdir(dir, { recursive: true });
+    const STAFFC = await qcStaff();
+    const MGRC = await qcManager();
+    const shoot = async (cookie, orderId, label) => {
+      const c = await browser.newContext({ viewport: { width: 1280, height: 700 } });
+      const [name, value] = cookie.split("=");
+      await c.addCookies([{ name, value, url: BASE }]);
+      const p = await c.newPage();
+      await p.goto(`${BASE}/dtic/orders/${orderId}`);
+      await p.locator('[aria-label="Tahap pekerjaan"]').waitFor();
+      await p.waitForTimeout(300);
+      await p.locator('[aria-label="Tahap pekerjaan"]').screenshot({ path: path.join(dir, `${label}-desktop.png`) });
+      await p.setViewportSize({ width: 390, height: 900 });
+      await p.waitForTimeout(300);
+      await p.locator('[aria-label="Tahap pekerjaan"]').screenshot({ path: path.join(dir, `${label}-mobile.png`) });
+      await c.close();
+    };
+    // 1) waiting_start
+    const o1 = await qcOrder("Judul Uji Stepper Menunggu");
+    await shoot(STAFFC, o1.id, "1-waiting-start");
+    // 2) in_progress
+    await setStatusAs(o1.id, "in_progress", STAFFC);
+    await shoot(STAFFC, o1.id, "2-in-progress");
+    // 3) draft_result
+    await uploadResult(o1.id, { name: "draf.png", data: PNG_BYTES }, STAFFC);
+    await shoot(STAFFC, o1.id, "3-draft-result");
+    // 4) pending_review
+    await workflow(o1.id, { action: "submit_qc", method: "external", channel: "whatsapp", note: "Uji visual" }, STAFFC);
+    await shoot(STAFFC, o1.id, "4-pending-review");
+    // 5) needs_revision
+    await workflow(o1.id, { action: "request_revision", note: "Perbaiki warna" }, MGRC);
+    await shoot(STAFFC, o1.id, "5-needs-revision");
+    // 6) pending_rereview
+    await setStatusAs(o1.id, "in_progress", STAFFC);
+    await workflow(o1.id, { action: "submit_qc", method: "external", channel: "whatsapp", note: "Revisi selesai" }, STAFFC);
+    await shoot(STAFFC, o1.id, "6-pending-rereview");
+    // 7) approved (Manager ACC, belum completed — cincin aktif, BUKAN centang; qc_status approved tapi
+    // order.status sekarang langsung awaiting_requester, lihat perbaikan applyWorkflowAction)
+    await workflow(o1.id, { action: "approve_qc", note: "OK" }, MGRC);
+    await shoot(STAFFC, o1.id, "7-approved");
+    // 8) done setelah PIC menutup sendiri (persetujuan pemohon TIDAK otomatis menutup — lihat
+    // awaitingPicClosure) — node "Disetujui" yang SAMA sekarang harus tampil sebagai centang penuh
+    // (selesai), membedakan dari cincin aktif di screenshot 7.
+    await workflow(o1.id, { action: "record_delivery", confirmSent: true }, STAFFC);
+    await workflow(o1.id, { action: "record_feedback", needsRevision: false, note: "Pemohon setuju" }, STAFFC);
+    await workflow(o1.id, { action: "complete", note: "PIC menutup setelah pemohon setuju" }, STAFFC);
+    await shoot(STAFFC, o1.id, "8-done-pemohon-acc");
+
+    // Jalur A: langsung ke pemohon TANPA Manager sama sekali — sebelumnya keliru tampil "Menunggu
+    // Dikerjakan" (lihat perbaikan deriveWorkStage); sekarang harus tampil "Menunggu Pemeriksaan" aktif,
+    // DAN tanpa node revisi sama sekali (belum pernah direvisi).
+    const o2 = await qcOrder("Judul Uji Stepper Jalur A");
+    await setStatusAs(o2.id, "in_progress", STAFFC);
+    await workflow(o2.id, { action: "record_delivery", confirmSent: true, stage: "final" }, STAFFC);
+    await shoot(STAFFC, o2.id, "9-jalur-a-pending-review");
+    await browser.close();
   });
 
   const addLink = (id, body, cookie) => internal(`/api/internal/orders/${id}/result-links`, "POST", body, {}, cookie);
@@ -3822,7 +4359,7 @@ try {
 
     const before = tg.calls.length;
     drive.mode = "500";
-    let r = await forceDriveSync(id, STAFFC); // percobaan ke-N = tepat di ambang
+    let r = await forceDriveSync(id, ADMIN); // percobaan ke-N = tepat di ambang
     assert.equal(r.status, 200, await r.clone().text());
     const rowAtThreshold = (await db`select consecutive_fail_count, escalated_at from order_drive_sync where order_id = ${id}`)[0];
     assert.equal(rowAtThreshold.consecutive_fail_count, ESCALATION_THRESHOLD, "hitungan mencapai ambang");
@@ -3830,18 +4367,245 @@ try {
     assert.equal(escalated.length, 1, "tepat satu peringatan terkirim ke grup global saat mencapai ambang");
     assert.ok(rowAtThreshold.escalated_at, "waktu eskalasi tercatat");
 
-    r = await forceDriveSync(id, STAFFC); // masih gagal (ke-N+1), sudah pernah eskalasi untuk rangkaian ini
+    r = await forceDriveSync(id, ADMIN); // masih gagal (ke-N+1), sudah pernah eskalasi untuk rangkaian ini
     assert.equal(r.status, 200, await r.clone().text());
     assert.equal(tg.calls.slice(before).filter((c) => c.body.text.includes(orderNumber)).length, 1, "tidak mengirim peringatan berulang untuk rangkaian kegagalan yang sama");
 
     resetDrive(); // Drive kembali normal → sinkronisasi berikutnya sukses
-    r = await forceDriveSync(id, STAFFC);
+    r = await forceDriveSync(id, ADMIN);
     const syncResult = await r.clone().json();
     assert.equal(r.status, 200, await r.clone().text());
     assert.equal(syncResult.status, "success", `sinkronisasi seharusnya sukses setelah resetDrive(): ${JSON.stringify(syncResult)}`);
     const rowAfterSuccess = (await db`select consecutive_fail_count, escalated_at from order_drive_sync where order_id = ${id}`)[0];
     assert.equal(rowAfterSuccess.consecutive_fail_count, 0, "hitungan diatur ulang setelah sukses");
     assert.equal(rowAfterSuccess.escalated_at, null, "status eskalasi diatur ulang setelah sukses — siap eskalasi lagi pada rangkaian kegagalan berikutnya");
+  });
+
+  const reconcileLog = (orderId) => db`select status, message, error_detail, triggered_by from order_drive_reconcile_log where order_id = ${orderId} order by attempted_at desc`;
+
+  await test("Rekonsiliasi arsip Drive: folder & file tersedia/sesuai → sukses, tidak ada anomali, riwayat percobaan tercatat", async () => {
+    resetDrive();
+    const { id } = await qcOrder("Judul Uji Rekonsiliasi Sukses");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    const up = await uploadResult(id, { name: "oke.png", data: PNG_BYTES }, STAFFC);
+    const fileId = (await up.json()).file.id;
+
+    const r = await forceDriveSync(id, ADMIN);
+    assert.equal(r.status, 200, await r.clone().text());
+    const result = await r.clone().json();
+    assert.equal(result.status, "success", JSON.stringify(result));
+    assert.deepEqual(result.errors, [], "tidak ada error saat semuanya cocok");
+    const row = await driveRow(fileId);
+    assert.equal(row.sync_status, "synced");
+    const [log] = await reconcileLog(id);
+    assert.equal(log.status, "success");
+    assert.equal(log.error_detail, null, "tidak ada pesan error saat percobaan berhasil bersih");
+    assert.equal(log.triggered_by, "manual", "dipicu tombol (force), bukan page_view/worker");
+  });
+
+  await test("Rekonsiliasi arsip Drive: file tercatat di database tapi sudah tidak ada di Drive → ditandai 'missing', tidak dianggap gagal, terlihat di halaman detail", async () => {
+    resetDrive();
+    const { id } = await qcOrder("Judul Uji Rekonsiliasi File Hilang");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    const up = await uploadResult(id, { name: "akan-dihapus.png", data: PNG_BYTES }, STAFFC);
+    const fileId = (await up.json()).file.id;
+    const driveFileId = (await driveRow(fileId)).drive_file_id;
+    drive.files.delete(driveFileId); // file dihapus langsung di Drive (bukan lewat DTIC Nexus)
+
+    const r = await forceDriveSync(id, ADMIN);
+    const result = await r.clone().json();
+    assert.equal(r.status, 200, await r.clone().text());
+    assert.match(result.message, /1 tidak ditemukan/, "file yang hilang diidentifikasi, bukan diam-diam diabaikan");
+    assert.equal((await driveRow(fileId)).sync_status, "synced", "status unggahan asli tidak diubah oleh rekonsiliasi");
+    const [{ reconcile_status }] = await db`select reconcile_status from order_attachments where id = ${fileId}`;
+    assert.equal(reconcile_status, "missing");
+
+    // Label diagnostik "Tidak ditemukan di Drive" HANYA untuk Super Admin (lihat uji pembatasan peran
+    // terpisah) — di sini cukup pastikan Super Admin melihatnya dengan jelas.
+    const htmlAdmin = await (await pageRaw(`/dtic/orders/${id}`, ADMIN)).text();
+    assert.match(htmlAdmin, /Tidak ditemukan di Drive/, "Super Admin melihat file yang hilang secara jelas di halaman detail");
+  });
+
+  await test("Rekonsiliasi arsip Drive: folder kategori tidak lagi ditemukan lewat jalur (nama berubah) → file ditandai 'moved_out', TIDAK menggandakan/menimpa arsip", async () => {
+    resetDrive();
+    const { id } = await qcOrder("Judul Uji Rekonsiliasi Folder Hilang");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    const up = await uploadResult(id, { name: "folder-berubah.png", data: PNG_BYTES }, STAFFC);
+    const fileId = (await up.json()).file.id;
+    const folderId = (await driveRow(fileId)).drive_folder_id;
+    // Folder sungguhan tidak dihapus/diganti isinya — hanya namanya berubah di sisi Drive (mis. diganti manual
+    // oleh seseorang), jadi pencarian deterministik (findResultCategoryFolder, berdasar nama) tidak menemukannya lagi.
+    drive.folders.get(folderId).name = "Folder Diganti Nama Manual";
+
+    const r = await forceDriveSync(id, ADMIN);
+    const result = await r.clone().json();
+    assert.equal(r.status, 200, await r.clone().text());
+    assert.equal(result.status, "success", "folder tidak ditemukan BUKAN error — hanya dilaporkan sebagai anomali, bukan kegagalan");
+    assert.match(result.message, /1 pindah folder/);
+    const before = (await db`select count(*)::int as c from order_attachments where order_id = ${id}`)[0].c;
+    assert.equal(before, 1, "tidak ada file/baris duplikat dibuat akibat folder tidak ketemu");
+    const [{ reconcile_status, drive_file_id }] = await db`select reconcile_status, drive_file_id from order_attachments where id = ${fileId}`;
+    assert.equal(reconcile_status, "moved_out");
+    assert.equal(drive_file_id, (await driveRow(fileId)).drive_file_id, "file ID Drive yang stabil tetap dipakai, tidak diganti/diunggah ulang");
+  });
+
+  await test("Rekonsiliasi arsip Drive: akses Google ditolak (403) → ditandai gagal dengan pesan error ASLI (bukan generik), tidak mengklaim berhasil", async () => {
+    const { id } = await qcOrder("Judul Uji Rekonsiliasi Akses Ditolak");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    resetDrive();
+    const up = await uploadResult(id, { name: "sebelum-ditolak.png", data: PNG_BYTES }, STAFFC);
+    assert.equal(up.status, 201, await up.clone().text());
+
+    // "403" (bukan "401"/token) sengaja dipakai: token akses sudah di-cache sejak pengujian lain sebelumnya
+    // (cachedServiceAccountToken berlaku ~1 jam, lihat client.ts), jadi memblokir /token saja TIDAK memengaruhi
+    // panggilan API yang sudah memakai token ter-cache — 403 pada panggilan API itu sendiri mencerminkan
+    // kondisi nyata "izin folder dicabut" secara langsung, kebal dari cache token.
+    drive.mode = "403";
+    const r = await forceDriveSync(id, ADMIN);
+    const result = await r.clone().json();
+    assert.equal(r.status, 200, await r.clone().text());
+    assert.equal(result.status, "failed");
+    assert.ok(result.errors.length > 0, "pesan error ASLI ditangkap, bukan ditelan diam-diam");
+    const [log] = await reconcileLog(id);
+    assert.equal(log.status, "failed");
+    assert.ok(log.error_detail && log.error_detail.length > 0, "riwayat percobaan menyimpan pesan error yang bisa ditindaklanjuti");
+    const state = (await db`select last_sync_status from order_drive_sync where order_id = ${id}`)[0];
+    assert.equal(state.last_sync_status, "failed", "tidak pernah ditandai berhasil saat akses benar-benar ditolak");
+    resetDrive();
+  });
+
+  await test("Rekonsiliasi arsip Drive: sebagian berhasil sebagian gagal (pencarian folder gagal, metadata file tetap bisa dibaca) → status 'partial', pesan error spesifik tersimpan", async () => {
+    resetDrive();
+    const { id } = await qcOrder("Judul Uji Rekonsiliasi Sebagian Gagal");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    const up = await uploadResult(id, { name: "sebagian.png", data: PNG_BYTES }, STAFFC);
+    const fileId = (await up.json()).file.id;
+
+    drive.mode = "partial";
+    const r = await forceDriveSync(id, ADMIN);
+    const result = await r.clone().json();
+    assert.equal(r.status, 200, await r.clone().text());
+    assert.equal(result.status, "partial", JSON.stringify(result));
+    assert.ok(result.errors.length > 0 && result.errors.every((e) => e.includes("Folder kategori")), "pesan error menyebut bagian yang gagal secara spesifik (folder), bukan generik");
+    assert.equal(result.updated, 1, "file yang metadatanya tetap bisa dibaca TETAP direkonsiliasi (bagian yang berhasil tidak ikut digagalkan)");
+    const [log] = await reconcileLog(id);
+    assert.equal(log.status, "partial");
+    assert.match(log.error_detail, /Folder kategori/);
+    void fileId;
+    resetDrive();
+  });
+
+  await test("Rekonsiliasi arsip Drive: diulang setelah penyebab diperbaiki → kembali sukses; dijalankan berkali-kali tanpa menggandakan file/baris", async () => {
+    resetDrive();
+    const { id } = await qcOrder("Judul Uji Rekonsiliasi Pulih & Berulang");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    const up = await uploadResult(id, { name: "pulih.png", data: PNG_BYTES }, STAFFC);
+    const fileId = (await up.json()).file.id;
+
+    drive.mode = "403";
+    let r = await forceDriveSync(id, ADMIN);
+    assert.equal((await r.clone().json()).status, "failed");
+
+    resetDrive(); // penyebab (akses ditolak) sudah "diperbaiki"
+    r = await forceDriveSync(id, ADMIN);
+    let result = await r.clone().json();
+    assert.equal(result.status, "success", "berhasil kembali setelah penyebab kegagalan hilang");
+    const rowAfterRecover = (await db`select consecutive_fail_count from order_drive_sync where order_id = ${id}`)[0];
+    assert.equal(rowAfterRecover.consecutive_fail_count, 0);
+
+    const countsBefore = (await db`select count(*)::int as c from order_attachments where order_id = ${id} and kind = 'result'`)[0].c;
+    // Dijalankan lagi beberapa kali berturut-turut (force melewati jendela dedupe) — tidak boleh menggandakan apa pun.
+    for (let i = 0; i < 3; i++) {
+      r = await forceDriveSync(id, ADMIN);
+      result = await r.clone().json();
+      assert.equal(result.status, "success", await r.clone().text());
+    }
+    const countsAfter = (await db`select count(*)::int as c from order_attachments where order_id = ${id} and kind = 'result'`)[0].c;
+    assert.equal(countsAfter, countsBefore, "tidak ada baris/file baru tercipta dari pengulangan rekonsiliasi");
+    assert.equal((await driveRow(fileId)).drive_file_id, (await driveRow(fileId)).drive_file_id, "file ID Drive tetap sama di seluruh pengulangan");
+
+    const log = await reconcileLog(id);
+    assert.ok(log.length >= 5, `riwayat SETIAP percobaan tersimpan (gagal lalu berhasil berulang kali): ${log.length} baris`);
+    assert.equal(log[0].status, "success", "entri TERBARU di riwayat adalah percobaan paling akhir");
+  });
+
+  await test("Halaman Detail Pekerjaan → Hasil pekerjaan: Super Admin melihat status arsip, riwayat percobaan & alasan kegagalan spesifik; PIC/Manager/Pemohon TIDAK melihat apa pun yang teknis", async () => {
+    resetDrive();
+    const { id, orderNumber } = await qcOrder("Judul Uji Tampilan Status Arsip");
+    const STAFFC = await qcStaff();
+    const MGRC = await qcManager();
+    await setStatusAs(id, "in_progress", STAFFC);
+    await uploadResult(id, { name: "tampil.png", data: PNG_BYTES }, STAFFC);
+
+    drive.mode = "403";
+    await forceDriveSync(id, ADMIN);
+    resetDrive();
+
+    const htmlAdmin = await (await pageRaw(`/dtic/orders/${id}`, ADMIN)).text();
+    assert.match(htmlAdmin, /Arsip Google Drive/, "Super Admin melihat kartu status arsip di Hasil Pekerjaan");
+    assert.match(htmlAdmin, /Coba Rekonsiliasi Lagi/, "Super Admin melihat tombol tindakan nyata");
+    assert.match(htmlAdmin, /Riwayat percobaan rekonsiliasi/, "Super Admin melihat riwayat percobaan, bukan hanya status terakhir");
+    assert.match(htmlAdmin, /HTTP 403|izin pada (folder|file) ini/, "Super Admin melihat penyebab kegagalan yang sebenarnya, bukan pesan umum semata");
+
+    const htmlStaff = await (await pageRaw(`/dtic/orders/${id}`, STAFFC)).text();
+    assert.doesNotMatch(htmlStaff, /Arsip Google Drive/, "PIC tidak melihat kartu/diagnostik arsip sama sekali");
+    assert.doesNotMatch(htmlStaff, /Coba Rekonsiliasi Lagi/, "PIC tidak melihat tombol teknis rekonsiliasi");
+    assert.doesNotMatch(htmlStaff, /HTTP 403|izin pada (folder|file) ini/, "PIC tidak melihat pesan error teknis Drive");
+
+    const htmlManager = await (await pageRaw(`/dtic/orders/${id}`, MGRC)).text();
+    assert.doesNotMatch(htmlManager, /Arsip Google Drive/, "Manager tidak melihat kartu/diagnostik arsip sama sekali");
+    assert.doesNotMatch(htmlManager, /Coba Rekonsiliasi Lagi/, "Manager tidak melihat tombol teknis rekonsiliasi");
+
+    const htmlPublic = await (await search(orderNumber)).json();
+    assert.ok(!JSON.stringify(htmlPublic).match(/Arsip Google Drive|Coba Rekonsiliasi Lagi|drive_file_id/i), "Riwayat Request publik (Pemohon) tidak pernah memuat apa pun soal Drive");
+
+    // Dibatasi di BACKEND, bukan hanya disembunyikan di UI — PIC/Manager yang mencoba memanggil endpoint
+    // langsung tetap ditolak walau tahu URL-nya.
+    assert.equal((await internal(`/api/internal/orders/${id}/drive-sync`, "POST", { force: true }, {}, STAFFC)).status, 403, "PIC ditolak backend, bukan hanya UI");
+    assert.equal((await internal(`/api/internal/orders/${id}/drive-sync`, "POST", { force: true }, {}, MGRC)).status, 403, "Manager ditolak backend, bukan hanya UI");
+
+    const r = await internal(`/api/internal/orders/${id}/drive-sync`, "POST", { force: true }, {}, ADMIN);
+    assert.equal(r.status, 200, "Super Admin tetap bisa memicu tindakan pemulihan lewat endpoint sungguhan");
+    const other = await login(ADMIN_EMAIL, ADMIN_PW); // sesi Super Admin berbeda mencoba bersamaan untuk order yang sama
+    const [a, b] = await Promise.all([
+      internal(`/api/internal/orders/${id}/drive-sync`, "POST", { force: true }, {}, ADMIN),
+      internal(`/api/internal/orders/${id}/drive-sync`, "POST", { force: true }, {}, other),
+    ]);
+    assert.ok([a.status, b.status].every((s) => s === 200), "permintaan ganda tidak menyebabkan error, dicegah di lapisan sewa (lease) yang sudah ada");
+  });
+
+  await test("Gangguan arsip Drive TIDAK menghalangi PIC/Manager/Pemohon mengerjakan alur operasional mereka (hanya file yang benar-benar hilang yang tidak bisa dipilih)", async () => {
+    resetDrive();
+    const { id } = await qcOrder("Judul Uji Operasional Tetap Jalan Saat Arsip Bermasalah");
+    const STAFFC = await qcStaff();
+    const MGRC = await qcManager();
+    await setStatusAs(id, "in_progress", STAFFC);
+    const up1 = await uploadResult(id, { name: "akan-hilang.png", data: PNG_BYTES }, STAFFC);
+    const missingFileId = (await up1.json()).file.id;
+    const up2 = await uploadResult(id, { name: "tetap-ada.png", data: PNG_BYTES }, STAFFC);
+    const okFileId = (await up2.json()).file.id;
+    const driveFileId = (await driveRow(missingFileId)).drive_file_id;
+    drive.files.delete(driveFileId); // file pertama hilang dari Drive, di luar kendali PIC
+    await forceDriveSync(id, ADMIN);
+    assert.equal((await db`select reconcile_status from order_attachments where id = ${missingFileId}`)[0].reconcile_status, "missing");
+
+    // PIC TIDAK diblokir mengajukan QC sama sekali — hanya file yang hilang yang tidak bisa dipilih; file
+    // lain yang masih ada tetap bisa dipakai, jadi pekerjaan tetap jalan.
+    assert.equal((await workflow(id, { action: "submit_qc", method: "in_app", resultFileIds: [missingFileId] }, STAFFC)).status, 422, "file yang terbukti hilang tidak bisa dipakai untuk mengajukan QC");
+    const r = await workflow(id, { action: "submit_qc", method: "in_app", resultFileIds: [okFileId], note: "Pakai file yang masih ada" }, STAFFC);
+    assert.equal(r.status, 200, await r.clone().text());
+    assert.equal((await workflow(id, { action: "approve_qc" }, MGRC)).status, 200, "Manager tetap bisa memeriksa & menyetujui seperti biasa");
+    assert.equal((await workflow(id, { action: "record_delivery", confirmSent: true }, STAFFC)).status, 200, "PIC tetap bisa mengajukan ke pemohon seperti biasa");
+
+    const html = await (await pageRaw(`/dtic/orders/${id}`, STAFFC)).text();
+    assert.match(html, /Satu atau lebih file hasil sedang tidak tersedia/, "pesan operasional yang mudah dipahami, bukan istilah teknis");
+    assert.doesNotMatch(html, /reconcile_status|Drive API|HTTP 4\d\d/, "tidak ada istilah/pesan teknis yang terbawa ke pesan untuk pengguna biasa");
   });
 
   await test("Drive nonaktif (konfigurasi kosong) → upload tetap jalan lewat storage lama tanpa perubahan apa pun", async () => {
@@ -4045,10 +4809,19 @@ try {
       const qcText = await pic2.p.getByTestId("qc-status").innerText();
       assert.match(qcText, /Perlu Revisi/, "status QC tetap keputusan Manager terakhir");
       assert.doesNotMatch(qcText, /Disetujui/, "pengiriman langsung tidak menjadi persetujuan");
-      // Selesaikan
+      // Selesaikan — pemohon belum tercatat menyetujui (belum ada Catat Masukan Pemohon), jadi keterangan
+      // kesepakatan di luar aplikasi tetap wajib diisi (lihat completionNeedsNote di qc.ts).
       await pic2.p.getByTestId("next-step").getByRole("button", { name: "Selesaikan Pekerjaan" }).click();
       const done = pic2.p.getByRole("dialog", { name: "Selesaikan Pekerjaan?" });
       await done.waitFor();
+      await done.getByText(/Pemohon belum tercatat menyetujui/).waitFor();
+      // Checklist konfirmasi penutupan — SEMUA harus dicentang sebelum tombol konfirmasi aktif.
+      const closureBoxes = done.getByRole("checkbox");
+      const closureCount = await closureBoxes.count();
+      assert.ok(closureCount >= 5, "checklist penutupan tampil (minimal 5 butir)");
+      for (let i = 0; i < closureCount; i++) await closureBoxes.nth(i).check();
+      assert.equal(await done.getByRole("button", { name: "Ya, Selesaikan" }).isDisabled(), true, "belum bisa dikonfirmasi tanpa keterangan kesepakatan");
+      await done.getByLabel("Catatan penyelesaian").fill("Pemohon sudah dikonfirmasi lewat telepon, hasil disetujui secara lisan");
       await pic2.p.screenshot({ path: path.join(dir, "11-dialog-selesaikan.png") });
       await done.getByRole("button", { name: "Ya, Selesaikan" }).click();
       await pic2.p.getByTestId("next-step-text").filter({ hasText: "Pekerjaan telah diselesaikan." }).waitFor();
@@ -4179,6 +4952,106 @@ try {
     const mgr = await (await pageRaw("/dtic/orders", MGR2)).text();
     assert.doesNotMatch(mgr, /Tes Telegram|Kirim ulang [^"]+ ke Telegram|Hapus order /);
   });
+  await test("Daftar & detail order: indikator 'Notifikasi belum terkirim' muncul saat notifikasi Telegram order itu gagal; tidak muncul untuk order lain", async () => {
+    const { id, orderNumber } = await newOrderSent();
+    const other = await newOrderSent();
+    const outboxRow = (await db`select id from notification_outbox where order_id = ${id} and channel = 'telegram' order by created_at desc limit 1`)[0];
+    assert.ok(outboxRow, "order ini punya baris antrean Telegram");
+    await db`update notification_outbox set status = 'failed', error_kind = 'transient', last_error = 'Uji indikator.' where id = ${outboxRow.id}`;
+    const detail = await page(`/dtic/orders/${id}`);
+    assert.match(detail.html, /Notifikasi Telegram untuk pekerjaan ini gagal terkirim/, "peringatan muncul di halaman detail");
+    const detailOther = await page(`/dtic/orders/${other.id}`);
+    assert.doesNotMatch(detailOther.html, /Notifikasi Telegram untuk pekerjaan ini gagal terkirim/, "order lain tidak menampilkan peringatan");
+
+    // Daftar order: diperiksa lewat DOM nyata (Playwright), bukan potongan string HTML mentah — respons
+    // App Router menyertakan payload RSC flight data di <script> yang juga memuat nomor order sebagai
+    // teks, sehingga pencarian posisi berbasis string bisa salah menilai jarak antarbaris.
+    const chromePath = process.env.CHROME_PATH ?? "/usr/bin/google-chrome";
+    const { chromium } = await import("playwright-core");
+    const browser = await chromium.launch({ executablePath: chromePath, headless: true });
+    try {
+      const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+      const [name, value] = ADMIN.split("=");
+      await ctx.addCookies([{ name, value, url: BASE }]);
+      const p = await ctx.newPage();
+      await p.goto(`${BASE}/dtic/orders`);
+      const rowFor = (num) => p.locator("tr", { hasText: num });
+      await rowFor(orderNumber).first().waitFor({ timeout: 15000 });
+      assert.equal(await rowFor(orderNumber).getByText("Notifikasi belum terkirim").count(), 1, "indikator muncul di baris order yang gagal");
+      assert.equal(await rowFor(other.orderNumber).getByText("Notifikasi belum terkirim").count(), 0, "order LAIN yang notifikasinya sukses tidak menampilkan indikator");
+    } finally {
+      await browser.close();
+    }
+  });
+
+  await test("Daftar order: indikator 'Menunggu Penyelesaian PIC' muncul saat pemohon sudah setuju tapi PIC belum menutup; hilang setelah ditutup", async () => {
+    const { id, orderNumber } = await qcOrder("Judul Uji Indikator Penyelesaian");
+    const STAFFC = await qcStaff();
+    await setStatusAs(id, "in_progress", STAFFC);
+    await workflow(id, { action: "record_delivery", confirmSent: true }, STAFFC);
+    await workflow(id, { action: "record_feedback", needsRevision: false, note: "Pemohon setuju" }, STAFFC);
+    const chromePath = process.env.CHROME_PATH ?? "/usr/bin/google-chrome";
+    const { chromium } = await import("playwright-core");
+    const browser = await chromium.launch({ executablePath: chromePath, headless: true });
+    try {
+      const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+      const [name, value] = ADMIN.split("=");
+      await ctx.addCookies([{ name, value, url: BASE }]);
+      const p = await ctx.newPage();
+      await p.goto(`${BASE}/dtic/orders`);
+      const rowFor = (num) => p.locator("tr", { hasText: num });
+      await rowFor(orderNumber).first().waitFor({ timeout: 15000 });
+      assert.equal(await rowFor(orderNumber).getByText("Menunggu Penyelesaian PIC").count(), 1, "indikator muncul sebelum PIC menutup pekerjaan");
+    } finally {
+      await browser.close();
+    }
+    // Setelah ditutup, order pindah ke tab Selesai & Dibatalkan (bukan Semua Aktif) — indikator diperiksa
+    // lewat halaman detail (lebih langsung daripada menavigasi ulang ke tab yang benar di daftar).
+    await workflow(id, { action: "complete", note: "Sudah benar-benar tuntas" }, STAFFC);
+    const detailAfter = await page(`/dtic/orders/${id}`);
+    assert.doesNotMatch(detailAfter.html, /Menunggu Penyelesaian PIC/, "indikator hilang setelah PIC menutup pekerjaan");
+  });
+
+  await test("Riwayat Request publik: Jalur A (langsung ke pemohon) TIDAK PERNAH menampilkan 'Pemeriksaan Internal'; Jalur B (Manager) menampilkannya; pemohon disetujui-belum-tutup tampil jelas", async () => {
+    const chromePath = process.env.CHROME_PATH ?? "/usr/bin/google-chrome";
+    const { chromium } = await import("playwright-core");
+    const browser = await chromium.launch({ executablePath: chromePath, headless: true });
+    try {
+      const STAFFC = await qcStaff();
+      const MGRC = await qcManager();
+
+      // Jalur A: langsung ke pemohon, Manager TIDAK PERNAH dilibatkan sama sekali.
+      const a = await qcOrder("Judul Uji Riwayat Publik Jalur A");
+      await setStatusAs(a.id, "in_progress", STAFFC);
+      await workflow(a.id, { action: "record_delivery", confirmSent: true }, STAFFC);
+      await workflow(a.id, { action: "record_feedback", needsRevision: false, note: "Pemohon setuju" }, STAFFC);
+
+      // Jalur B: lewat Manager (ACC), baru diajukan ke pemohon.
+      const b = await qcOrder("Judul Uji Riwayat Publik Jalur B");
+      await setStatusAs(b.id, "in_progress", STAFFC);
+      await workflow(b.id, { action: "submit_qc", method: "external", channel: "whatsapp", note: "Uji" }, STAFFC);
+      await workflow(b.id, { action: "approve_qc", note: "ACC" }, MGRC);
+
+      const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+      const p = await ctx.newPage();
+
+      await p.goto(`${BASE}/riwayat?order=${a.orderNumber}`);
+      await p.getByText("Progres request").waitFor({ timeout: 15000 });
+      const textA = await p.locator("body").innerText();
+      assert.ok(!textA.includes("Pemeriksaan Internal"), "Jalur A: Manager tidak pernah ditampilkan sebagai tahapan");
+      assert.ok(textA.includes("Anda sudah menyetujui hasil ini"), "pemohon sudah setuju tapi PIC belum tutup → tampil jelas ke pemohon");
+
+      await p.goto(`${BASE}/riwayat?order=${b.orderNumber}`);
+      await p.getByText("Progres request").waitFor({ timeout: 15000 });
+      const textB = await p.locator("body").innerText();
+      assert.ok(textB.includes("Pemeriksaan Internal"), "Jalur B: Manager benar-benar dilibatkan → tahapan tampil");
+      assert.ok(!textB.includes("Anda sudah menyetujui hasil ini"), "pemohon BELUM memberi masukan apa pun di Jalur B ini");
+      await ctx.close();
+    } finally {
+      await browser.close();
+    }
+  });
+
   await test("pratinjau: teks dari data order (tanpa token), tanpa mengirim apa pun", async () => {
     const { orderNumber, id } = await newOrderSent();
     const before = tg.calls.length;
@@ -4760,30 +5633,32 @@ try {
     assert.doesNotMatch(html, /@andi_design/, "andi sudah dilepas (tidak tampil)");
   });
 
-  console.log("\nLayar display (/dtic/display)");
+  console.log("\nLayar display (/dtic/display) — PUBLIK, tanpa login (layar TV kantor/ruang tunggu)");
   const displayJson = async (cookie) => {
-    const r = await fetch(`${BASE}/api/internal/display/orders`, { headers: cookie ? { Cookie: cookie } : {} });
+    const r = await fetch(`${BASE}/api/public/display/orders`, { headers: cookie ? { Cookie: cookie } : {} });
     const text = await r.text();
     return { status: r.status, text, body: r.status === 200 ? JSON.parse(text) : null };
   };
-  await test("display: tanpa login → halaman dialihkan ke login; API tanpa sesi → 401", async () => {
-    assert.ok(await redirectsToLogin(await pageRaw("/dtic/display")), "halaman display butuh login");
-    assert.equal((await displayJson(null)).status, 401);
+  await test("display: TANPA login → halaman & API tetap terbuka (layar publik, bukan panel internal)", async () => {
+    const pg2 = await pageRaw("/dtic/display");
+    assert.equal(pg2.status, 200, "halaman tidak dialihkan ke login");
+    const d = await displayJson(null);
+    assert.equal(d.status, 200, "API terbuka tanpa cookie sesi sama sekali");
   });
   await test("display: halaman tanpa sidebar admin; data hanya field yang dibutuhkan (tanpa WhatsApp/brief/catatan)", async () => {
     const page3 = await page("/dtic/display");
     assert.equal(page3.status, 200);
     assert.match(page3.html, /LIVE ORDER DISPLAY/);
     assert.doesNotMatch(page3.html, /Navigasi utama/, "tanpa sidebar admin");
-    const d = await displayJson(MGR2);
-    assert.equal(d.status, 200, "manager (dashboard.view) boleh melihat layar");
+    const d = await displayJson(null);
+    assert.equal(d.status, 200, "terbuka tanpa sesi apa pun");
     const sensitive = d.text.match(/requesterWhatsapp|requester_whatsapp|internalNotes|internal_notes|briefDoc|brief_rich|driveUrl|081234567890/i);
     assert.equal(sensitive, null, `tanpa data sensitif (cocok: ${sensitive && sensitive[0]})`);
     const sample = [...d.body.queue.items, ...d.body.inProgress.items, ...d.body.done.items][0];
     if (sample) assert.deepEqual(Object.keys(sample).sort(), ["brandName", "createdAt", "deadlineAt", "designType", "id", "orderNumber", "overdue", "picNames", "priorityName", "priorityTone", "requesterName", "status", "title", "updatedAt"].sort(), "field minimal");
   });
   await test("display: angka sesuai database (antrean = submitted+assigned; sedang = in_progress; selesai = siap konfirmasi + selesai terbaru), dibatalkan tidak tampil", async () => {
-    const d = (await displayJson(ADMIN)).body;
+    const d = (await displayJson(null)).body;
     const count = async (list) => (await pg.query(`select count(*)::int as c from orders where status in (${list.map((x) => `'${x}'`).join(",")})`)).rows[0].c;
     assert.equal(d.queue.total, await count(["submitted", "assigned"]), "antrean");
     assert.equal(d.inProgress.total, await count(["in_progress", "internal_revision", "awaiting_requester"]), "sedang dikerjakan");
@@ -4795,25 +5670,30 @@ try {
     assert.ok(named && named.requesterName.length > 0, "nama pemohon dari data pengajuan");
     assert.ok(![...d.queue.items, ...d.inProgress.items, ...d.done.items].some((i) => i.status === "cancelled"), "dibatalkan tidak tampil");
   });
-  await test("display: Staff tanpa penugasan tidak melihat order orang lain (cakupan role)", async () => {
+  await test("display: cakupan TIDAK dibatasi per staf — layar publik menampilkan seluruh order aktif lintas tim/PIC", async () => {
     await internal("/api/internal/users", "POST", { fullName: "Staff Display", email: "staff-display@dtic.example", role: "staff", memberId: null, password: "StaffDisplay2026" });
     const STAFF_DISPLAY = await login("staff-display@dtic.example", "StaffDisplay2026");
-    const d = (await displayJson(STAFF_DISPLAY)).body;
-    assert.equal(d.queue.total + d.inProgress.total + d.done.total, 0, "tanpa penugasan → kosong");
+    // Sengaja dibandingkan TANPA cookie sama sekali vs dengan cookie staf: hasilnya harus identik —
+    // cakupan publik tidak bergantung pada siapa (atau apakah ada) yang login.
+    const anon = (await displayJson(null)).body;
+    const staff = (await displayJson(STAFF_DISPLAY)).body;
+    assert.equal(anon.queue.total, staff.queue.total, "cakupan sama terlepas dari sesi");
+    assert.equal(anon.inProgress.total, staff.inProgress.total);
+    assert.equal(anon.done.total, staff.done.total);
   });
   await test("display: order berjalan sesuai workflow; order selesai/dibatalkan keluar dari antrean aktif", async () => {
     const { id, orderNumber } = await newOrderSent();
-    const inQueue = async () => (await displayJson(ADMIN)).body.queue.items.some((i) => i.orderNumber === orderNumber);
-    const inProg = async () => (await displayJson(ADMIN)).body.inProgress.items.some((i) => i.orderNumber === orderNumber);
+    const inQueue = async () => (await displayJson(null)).body.queue.items.some((i) => i.orderNumber === orderNumber);
+    const inProg = async () => (await displayJson(null)).body.inProgress.items.some((i) => i.orderNumber === orderNumber);
     assert.ok(await inQueue(), "order baru masuk antrean");
     assert.equal((await internal(`/api/internal/orders/${id}/status`, "POST", { status: "in_progress" })).status, 200);
     assert.ok(!(await inQueue()) && (await inProg()), "pindah ke Sedang Dikerjakan");
     await finishViaQc(id);
     assert.ok(!(await inProg()), "selesai keluar dari sedang dikerjakan");
-    assert.ok((await displayJson(ADMIN)).body.done.items.some((i) => i.orderNumber === orderNumber), "selesai tampil di kolom selesai");
+    assert.ok((await displayJson(null)).body.done.items.some((i) => i.orderNumber === orderNumber), "selesai tampil di kolom selesai");
     const { id: id2, orderNumber: num2 } = await newOrderSent();
     assert.equal((await internal(`/api/internal/orders/${id2}/status`, "POST", { status: "cancelled", note: "Uji display" })).status, 200);
-    assert.ok(!(await displayJson(ADMIN)).body.queue.items.some((i) => i.orderNumber === num2), "dibatalkan tidak di antrean");
+    assert.ok(!(await displayJson(null)).body.queue.items.some((i) => i.orderNumber === num2), "dibatalkan tidak di antrean");
   });
 
   console.log("\nHapus order");

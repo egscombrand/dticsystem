@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { checkResultFileBasics, resultContentMatches } from "@/lib/files";
-import { latestResultIds, latestResultLinkIds, resultFileHistory, resultLinksUsed } from "@/lib/result-status";
+import { awaitingPicClosure, hasSubmittedToRequester, latestResultIds, latestResultLinkIds, resultFileHistory, resultLinksUsed } from "@/lib/result-status";
 
 const ev = (kind: string, at: string, ids: string[]) => ({ kind, at, detail: { resultFileIds: ids } });
 const evLink = (kind: string, at: string, ids: string[]) => ({ kind, at, detail: { resultLinkIds: ids } });
@@ -61,5 +61,52 @@ describe("validasi file hasil", () => {
     expect(resultContentMatches("svg", enc("<html></html>"))).toBe(false);
     expect(resultContentMatches("zip", new Uint8Array([0x50, 0x4b, 0x03, 0x04]))).toBe(true);
     expect(resultContentMatches("png", enc("teks biasa"))).toBe(false);
+  });
+});
+
+describe("awaitingPicClosure (QC Pemohon disetujui ≠ pekerjaan ditutup otomatis)", () => {
+  const fb = (at: string, needsRevision: boolean) => ({ kind: "feedback_recorded", at, needsRevision });
+
+  it("pemohon menyetujui (tidak ada revisi) & order belum selesai → menunggu penyelesaian PIC", () => {
+    expect(awaitingPicClosure([fb("2026-10-20T10:00:00Z", false)], false)).toBe(true);
+  });
+  it("pemohon minta revisi → BUKAN menunggu penyelesaian (masih perlu dikerjakan ulang)", () => {
+    expect(awaitingPicClosure([fb("2026-10-20T10:00:00Z", true)], false)).toBe(false);
+  });
+  it("belum ada masukan pemohon sama sekali → bukan menunggu penyelesaian", () => {
+    expect(awaitingPicClosure([], false)).toBe(false);
+  });
+  it("order SUDAH selesai (PIC sudah menutup) → tidak lagi menunggu, terlepas dari peristiwa", () => {
+    expect(awaitingPicClosure([fb("2026-10-20T10:00:00Z", false)], true)).toBe(false);
+  });
+  it("memakai masukan TERBARU secara kronologis, bukan urutan array", () => {
+    expect(awaitingPicClosure([fb("2026-10-20T12:00:00Z", false), fb("2026-10-20T10:00:00Z", true)], false)).toBe(true);
+    expect(awaitingPicClosure([fb("2026-10-20T10:00:00Z", false), fb("2026-10-20T12:00:00Z", true)], false)).toBe(false);
+  });
+});
+
+describe("hasSubmittedToRequester (ACC Manager ≠ sudah diajukan ke pemohon)", () => {
+  const approved = (at: string) => ({ kind: "qc_approved", at });
+  const delivered = (at: string) => ({ kind: "delivery_recorded", at });
+
+  it("ACC Manager SENDIRIAN, belum ada pengajuan ke pemohon → belum diajukan", () => {
+    expect(hasSubmittedToRequester([approved("2026-10-21T10:00:00Z")])).toBe(false);
+  });
+  it("ACC Manager lalu PIC mengajukan ke pemohon → sudah diajukan", () => {
+    expect(hasSubmittedToRequester([approved("2026-10-21T10:00:00Z"), delivered("2026-10-21T11:00:00Z")])).toBe(true);
+  });
+  it("Jalur A (langsung ke pemohon, tanpa ACC Manager sama sekali) → pengajuan langsung dihitung", () => {
+    expect(hasSubmittedToRequester([delivered("2026-10-21T10:00:00Z")])).toBe(true);
+  });
+  it("tidak ada peristiwa apa pun → belum diajukan", () => {
+    expect(hasSubmittedToRequester([])).toBe(false);
+  });
+  it("pengajuan LAMA dari siklus sebelum ACC terbaru tidak dihitung (revisi lalu ACC ulang, belum diajukan lagi)", () => {
+    expect(
+      hasSubmittedToRequester([
+        delivered("2026-10-20T09:00:00Z"), // pengajuan siklus lama
+        approved("2026-10-21T10:00:00Z"), // ACC siklus BARU (setelah revisi)
+      ]),
+    ).toBe(false);
   });
 });

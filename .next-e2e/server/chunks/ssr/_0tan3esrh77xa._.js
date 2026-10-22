@@ -1,9 +1,0 @@
-(()=>{"use strict";module.exports=[72607,a=>{var b=a.i(92277);let c={name:"circle-check",size:24,node:[["circle",{cx:"12",cy:"12",r:"10",key:"1mglay"}],["path",{d:"m16 9-5.5 5.5L8 12",key:"xofnsj"}]],aliases:["check-circle-2"]};c.node;let d=(0,b.f)(c);a.s(["f",0,d],72607)},27792,a=>{var b=a.i(92277);let c={name:"clipboard-check",size:24,node:[["rect",{width:"8",height:"4",x:"8",y:"2",rx:"1",ry:"1",key:"tgr4d6"}],["path",{d:"M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2",key:"116196"}],["path",{d:"m9 14 2 2 4-4",key:"df797q"}]]};c.node;let d=(0,b.f)(c);a.s(["f",0,d],27792)},83178,a=>{var b=a.i(92277);let c={name:"list-checks",size:24,node:[["path",{d:"M13 5h8",key:"a7qcls"}],["path",{d:"M13 12h8",key:"h98zly"}],["path",{d:"M13 19h8",key:"c3s6r1"}],["path",{d:"m3 17 2 2 4-4",key:"1jhpwq"}],["path",{d:"m3 7 2 2 4-4",key:"1obspn"}]]};c.node;let d=(0,b.f)(c);a.s(["f",0,d],83178)},49618,a=>{var b=a.i(92277);let c={name:"undo-2",size:24,node:[["path",{d:"M9 14 4 9l5-5",key:"102s5s"}],["path",{d:"M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11",key:"f3b9sd"}]]};c.node;let d=(0,b.f)(c);a.s(["f",0,d],49618)},56386,a=>{a.i(14766),a.s(["f",0,/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i])},75027,a=>{var b=a.i(14766);async function c(a){return(await (0,b.f)()`
-    select l.id::text as id, l.action, a.full_name as actor_name, t.email as target_email, l.detail, l.created_at
-    from auth_audit_log l
-    left join app_users a on a.id = l.actor_user_id
-    left join app_users t on t.id = l.target_user_id
-    order by l.created_at desc, l.id desc
-    limit ${a}`).map(a=>{var b;let c;return{id:a.id,action:a.action,actorName:a.actor_name,targetEmail:a.target_email,detail:(b=a.detail,c=/password|token|hash|secret/i,Object.fromEntries(Object.entries(b??{}).filter(([a])=>!c.test(a)))),createdAt:a.created_at.toISOString()}})}a.s(["f",0,c])}]})();
-
-//# sourceMappingURL=_0tan3esrh77xa._.js.map

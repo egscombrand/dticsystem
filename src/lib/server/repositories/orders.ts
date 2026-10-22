@@ -192,6 +192,16 @@ export type OrderDocSummary = {
   collectionStatus: ResultCollectionStatus;
   lastSyncAt: string | null;
   lastSyncStatus: "success" | "partial" | "failed" | null;
+  /** Ada notifikasi Telegram terkait order ini yang berstatus gagal (lihat notification_outbox) —
+   *  ditampilkan agar Manager/Super Admin tahu tanpa perlu membuka halaman Integrasi Telegram khusus. */
+  telegramNotifyFailed: boolean;
+  /** Waktu order ini TERAKHIR masuk status 'assigned' (lihat order_status_history) — dasar SLA penugasan
+   *  (isAssignmentStale di src/lib/status.ts). null bila order tidak pernah berstatus assigned. */
+  assignedAt: string | null;
+  /** Pemohon sudah menyetujui hasil (QC Pemohon selesai) tapi PIC belum menutup pekerjaan — lihat
+   *  awaitingPicClosure di src/lib/result-status.ts. Persetujuan Pemohon TIDAK PERNAH menutup pekerjaan
+   *  otomatis, supaya PIC tidak lupa menuntaskan tanggung jawab nyata (komunikasi, serah terima, dst). */
+  needsPicClosure: boolean;
 };
 export type OrderListItemWithDocs = OrderListItem & OrderDocSummary;
 
@@ -202,13 +212,18 @@ function docSummaryColumns(db: postgres.Sql) {
     (select count(*)::int from order_attachments a where a.order_id = o.id and a.kind = 'result' and a.drive_file_id is not null and a.reconcile_status is null) as result_count,
     (select count(*)::int from order_attachments a where a.order_id = o.id and a.kind = 'result' and a.sync_status in ('pending','failed')) as result_pending_count,
     (select count(*)::int from order_attachments a where a.order_id = o.id and a.kind = 'result' and a.reconcile_status is not null) as result_reconcile_count,
-    ods.last_sync_at, ods.last_sync_status`;
+    ods.last_sync_at, ods.last_sync_status,
+    exists(select 1 from notification_outbox n where n.order_id = o.id and n.channel = 'telegram' and n.status = 'failed') as telegram_notify_failed,
+    (select h.changed_at from order_status_history h where h.order_id = o.id and h.new_status = 'assigned' order by h.changed_at desc limit 1) as assigned_at,
+    (o.status not in ('completed', 'cancelled')
+      and (select e.needs_revision from order_workflow_events e where e.order_id = o.id and e.kind = 'feedback_recorded' order by e.created_at desc limit 1) = false
+    ) as needs_pic_closure`;
 }
 function docSummaryFrom(db: postgres.Sql) {
   return db`left join order_drive_sync ods on ods.order_id = o.id`;
 }
 
-function mapDocSummary(r: { reference_count: number; result_count: number; result_pending_count: number; result_reconcile_count: number; last_sync_at: Date | null; last_sync_status: "success" | "partial" | "failed" | null }, orderStatus: OrderStatus, qcStatus: QcStatus): OrderDocSummary {
+function mapDocSummary(r: { reference_count: number; result_count: number; result_pending_count: number; result_reconcile_count: number; last_sync_at: Date | null; last_sync_status: "success" | "partial" | "failed" | null; telegram_notify_failed: boolean; assigned_at: Date | null; needs_pic_closure: boolean }, orderStatus: OrderStatus, qcStatus: QcStatus): OrderDocSummary {
   return {
     referenceCount: r.reference_count,
     resultCount: r.result_count,
@@ -217,6 +232,9 @@ function mapDocSummary(r: { reference_count: number; result_count: number; resul
     collectionStatus: resultCollectionStatus({ orderStatus, qcStatus, resultCount: r.result_count }),
     lastSyncAt: r.last_sync_at?.toISOString() ?? null,
     lastSyncStatus: r.last_sync_status,
+    telegramNotifyFailed: r.telegram_notify_failed,
+    assignedAt: r.assigned_at?.toISOString() ?? null,
+    needsPicClosure: r.needs_pic_closure,
   };
 }
 
@@ -248,7 +266,7 @@ export async function listOrders(filters: OrderListFilters & { scope?: OrderScop
     ${range?.to ? db`and o.deadline_at < ${range.to}` : db``}`;
 
   const [rows, [{ total }]] = await Promise.all([
-    db<(OrderRow & { reference_count: number; result_count: number; result_pending_count: number; result_reconcile_count: number; last_sync_at: Date | null; last_sync_status: "success" | "partial" | "failed" | null })[]>`
+    db<(OrderRow & { reference_count: number; result_count: number; result_pending_count: number; result_reconcile_count: number; last_sync_at: Date | null; last_sync_status: "success" | "partial" | "failed" | null; telegram_notify_failed: boolean; assigned_at: Date | null; needs_pic_closure: boolean })[]>`
       select ${listColumns(db)}, ${docSummaryColumns(db)}
       from ${fromOrders(db)} ${docSummaryFrom(db)}
       ${where}
@@ -402,12 +420,14 @@ export async function getOrderDetail(id: string): Promise<OrderDetail | null> {
       result_url: string | null;
       requester_whatsapp: string | null;
       has_tracking?: boolean;
+      telegram_notify_failed: boolean;
     })[]
   >`
     select ${listColumns(db)}, o.design_size, o.brief, o.brief_year, o.brief_reference, o.design_requirements,
            o.internal_notes, o.updated_at, o.completed_at, b.is_active as brand_is_active,
            o.design_order_type_id, o.brief_rich, o.drive_url, o.requester_message, o.result_url, o.requester_whatsapp,
-           false as has_tracking
+           false as has_tracking,
+           exists(select 1 from notification_outbox n where n.order_id = o.id and n.channel = 'telegram' and n.status = 'failed') as telegram_notify_failed
     from ${fromOrders(db)}
     where o.id = ${id}`;
   const r = rows[0];
@@ -443,6 +463,7 @@ export async function getOrderDetail(id: string): Promise<OrderDetail | null> {
     resultUrl: r.result_url,
     requesterWhatsapp: r.requester_whatsapp,
     hasTrackingCode: false,
+    telegramNotifyFailed: r.telegram_notify_failed,
     attachments: attachments.map(
       (a): OrderAttachment => ({
         id: a.id,
@@ -907,10 +928,10 @@ export async function findOrderForTracking(orderNumber: string) {
   const db = sql();
   const rows = await db<{
     id: string; order_number: string; created_at: Date; brand_name: string; design_type: string; title: string;
-    deadline_at: Date; status: OrderStatus; requester_message: string | null; result_url: string | null;
+    deadline_at: Date; status: OrderStatus; qc_status: QcStatus; requester_message: string | null; result_url: string | null;
   }[]>`
     select o.id, o.order_number, o.created_at, b.name as brand_name, o.design_type, o.title, o.deadline_at, o.status,
-           o.requester_message, o.result_url
+           o.qc_status, o.requester_message, o.result_url
     from orders o join brands b on b.id = o.brand_id
     where o.order_number = ${orderNumber}`;
   return rows[0] ?? null;
@@ -928,6 +949,115 @@ export async function getPublicHistory(orderId: string) {
     select new_status, changed_at, case when is_public_note then notes end as note
     from order_status_history where order_id = ${orderId} order by changed_at asc, id asc`;
   return rows.map((r) => ({ status: r.new_status, changedAt: r.changed_at.toISOString(), note: r.note }));
+}
+
+/**
+ * Peristiwa QC yang aman dipublikasikan (feedback_recorded / qc_approved / delivery_recorded) — HANYA
+ * kind, waktu, needs_revision, dan daftar ID file/link hasil; TIDAK PERNAH actor_name atau catatan internal
+ * (lihat riwayat_status untuk apa yang memang aman dipublikasikan). Dipakai halaman Riwayat Request publik
+ * untuk: (1) awaitingPicClosure — bedakan "QC Pemohon berjalan" dari "pemohon sudah setuju, PIC belum
+ * menutup", dan (2) hasSubmittedToRequester — bedakan "ACC Manager" dari "benar-benar diajukan ke pemohon"
+ * (lihat src/lib/result-status.ts untuk keduanya).
+ */
+export async function getPublicQcEvents(orderId: string): Promise<{ kind: string; at: string; needsRevision: boolean | null; resultFileIds: string[]; resultLinkIds: string[] }[]> {
+  const rows = await sql()<{ kind: string; created_at: Date; needs_revision: boolean | null; detail: Record<string, unknown> }[]>`
+    select kind, created_at, needs_revision, detail from order_workflow_events
+    where order_id = ${orderId} and kind in ('feedback_recorded', 'qc_approved', 'delivery_recorded')
+    order by created_at asc, id asc`;
+  return rows.map((r) => ({
+    kind: r.kind,
+    at: r.created_at.toISOString(),
+    needsRevision: r.needs_revision,
+    resultFileIds: Array.isArray(r.detail?.resultFileIds) ? (r.detail.resultFileIds as string[]) : [],
+    resultLinkIds: Array.isArray(r.detail?.resultLinkIds) ? (r.detail.resultLinkIds as string[]) : [],
+  }));
+}
+
+export type PublicDeliveryDecision = "awaiting" | "approved" | "revision_requested";
+
+export type PublicDelivery = {
+  /** ID peristiwa 'delivery_recorded' ASLI — dipakai memastikan keputusan pemohon (Setujui/Minta Revisi)
+   *  mengacu pada pengajuan yang benar, bukan sekadar nomor urut tampilan. */
+  id: string;
+  at: string;
+  files: { id: string; fileName: string; mimeType: string }[];
+  links: { id: string; title: string; url: string }[];
+  /** Keputusan pemohon KHUSUS untuk pengajuan ini — "awaiting" hanya untuk pengajuan TERBARU yang belum
+   *  diputuskan; pengajuan lama yang pernah diminta revisi selalu berakhir "revision_requested" (siklusnya
+   *  sudah selesai begitu pengajuan berikutnya dibuat), tidak pernah "awaiting" lagi. */
+  decision: PublicDeliveryDecision;
+  decisionAt: string | null;
+  decisionNote: string | null;
+};
+
+/**
+ * Pengajuan hasil kepada PEMOHON yang sebenarnya ('delivery_recorded' — bukan draf internal, bukan file
+ * yang hanya diajukan ke Manager) — satu entri per pengajuan/versi, urut waktu, supaya riwayat revisi tetap
+ * bisa ditelusuri di halaman Riwayat Request publik. File lampiran APAPUN yang tidak pernah dirujuk oleh
+ * 'delivery_recorded' TIDAK PERNAH muncul di sini (draf PIC yang belum diajukan tetap tersembunyi).
+ */
+export async function getPublicDeliveries(orderId: string): Promise<PublicDelivery[]> {
+  const [events, feedback] = await Promise.all([
+    sql()<{ id: string; created_at: Date; detail: Record<string, unknown> }[]>`
+      select id, created_at, detail from order_workflow_events
+      where order_id = ${orderId} and kind = 'delivery_recorded' order by created_at asc, id asc`,
+    sql()<{ created_at: Date; needs_revision: boolean | null; summary: string | null }[]>`
+      select created_at, needs_revision, summary from order_workflow_events
+      where order_id = ${orderId} and kind = 'feedback_recorded' order by created_at asc, id asc`,
+  ]);
+  const out: PublicDelivery[] = [];
+  for (let i = 0; i < events.length; i++) {
+    const e = events[i];
+    const fileIds = Array.isArray(e.detail?.resultFileIds) ? (e.detail.resultFileIds as string[]) : [];
+    const linkIds = Array.isArray(e.detail?.resultLinkIds) ? (e.detail.resultLinkIds as string[]) : [];
+    const [files, links] = await Promise.all([
+      fileIds.length
+        ? sql()<{ id: string; file_name: string; mime_type: string }[]>`select id, file_name, mime_type from order_attachments where id in ${sql()(fileIds)} and order_id = ${orderId} and kind = 'result'`
+        : Promise.resolve([]),
+      linkIds.length
+        ? sql()<{ id: string; title: string; url: string }[]>`select id, title, url from order_result_links where id in ${sql()(linkIds)} and order_id = ${orderId}`
+        : Promise.resolve([]),
+    ]);
+    if (files.length || links.length) {
+      // Jendela keputusan untuk PENGAJUAN INI: masukan pemohon antara pengajuan ini dan pengajuan berikutnya
+      // (atau sampai sekarang bila ini pengajuan terbaru) — bukan sekadar masukan TERAKHIR secara global,
+      // supaya pengajuan lama tidak keliru menampilkan keputusan dari siklus pengajuan berikutnya.
+      const nextAt = events[i + 1]?.created_at.toISOString() ?? null;
+      const windowFeedback = feedback.filter((f) => f.created_at.toISOString() >= e.created_at.toISOString() && (!nextAt || f.created_at.toISOString() < nextAt));
+      const latest = windowFeedback.at(-1);
+      out.push({
+        id: e.id,
+        at: e.created_at.toISOString(),
+        files: files.map((f) => ({ id: f.id, fileName: f.file_name, mimeType: f.mime_type })),
+        links: links.map((l) => ({ id: l.id, title: l.title, url: l.url })),
+        decision: !latest ? "awaiting" : latest.needs_revision === false ? "approved" : "revision_requested",
+        decisionAt: latest ? latest.created_at.toISOString() : null,
+        decisionNote: latest ? latest.summary : null,
+      });
+    }
+  }
+  return out;
+}
+
+/** Verifikasi `deliveryId` benar-benar peristiwa 'delivery_recorded' milik order ini — dipakai sebelum
+ *  menerapkan keputusan pemohon publik, supaya ID acak/lintas-order tidak bisa dipakai. */
+export async function isPublicDeliveryEvent(orderId: string, deliveryId: string): Promise<boolean> {
+  const rows = await sql()`select 1 from order_workflow_events where id = ${deliveryId} and order_id = ${orderId} and kind = 'delivery_recorded' limit 1`;
+  return rows.length > 0;
+}
+
+/**
+ * Pastikan `fileId` genuinely pernah DIAJUKAN kepada pemohon order ini (muncul di salah satu
+ * 'delivery_recorded' — bukan sekadar lampiran yang ada di order_attachments). Dipakai endpoint unduh
+ * publik supaya hanya file yang benar-benar diserahkan ke pemohon yang bisa diunduh lewat tautan publik,
+ * draf internal PIC TIDAK PERNAH bisa diakses lewat jalur ini walau ID-nya diketahui.
+ */
+export async function isResultFileDeliveredToRequester(orderId: string, fileId: string): Promise<boolean> {
+  const rows = await sql()`
+    select 1 from order_workflow_events
+    where order_id = ${orderId} and kind = 'delivery_recorded' and detail->'resultFileIds' ? ${fileId}
+    limit 1`;
+  return rows.length > 0;
 }
 
 /** Informasi yang ditujukan ke pemohon (diatur tim DTIC). */

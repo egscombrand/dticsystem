@@ -56,8 +56,38 @@ export const ACTION_LABEL: Record<WorkflowAction, string> = {
   complete: "Selesaikan Pekerjaan",
 };
 
-export type QcContext = { status: OrderStatus; qcStatus: QcStatus };
-export type QcActor = { role: Role; isAssignee: boolean };
+/**
+ * Keputusan pemohon atas pengajuan TERAKHIR yang benar-benar dikirim (delivery_recorded) — MURNI dari
+ * riwayat peristiwa, bukan dari order.status (yang TIDAK berubah saat delivery dicatat atau saat pemohon
+ * menyetujui, lihat applyWorkflowAction).
+ * - "none"              : belum pernah ada pengiriman pada siklus ini (sebelum delivery pertama).
+ * - "awaiting"           : sudah diajukan, BENAR-BENAR belum ada keputusan apa pun — PIC tidak boleh
+ *                          mengajukan lagi, pemohon belum bisa diberi masukan ganda.
+ * - "revision_requested" : pemohon SUDAH memutuskan (minta revisi) — siklus pengiriman ini SELESAI; PIC
+ *                          boleh memperbaiki & mengajukan ULANG (pengajuan baru, bukan "ganda").
+ * - "approved"           : pemohon SUDAH menyetujui — tidak relevan mengajukan lagi, lanjut penyelesaian.
+ */
+export type RequesterDecision = "none" | "awaiting" | "revision_requested" | "approved";
+type RequesterEvent = { kind: WorkflowEventKind; at: string; needsRevision?: boolean | null };
+
+/**
+ * Dipakai checkWorkflowAction (mencegah pengajuan ganda & masukan ganda) DAN tampilan (status/timeline/
+ * langkah berikutnya) — satu sumber kebenaran untuk kedua sisi, supaya tidak bisa saling bertentangan
+ * seperti sebelumnya (tombol "Ajukan ke Pemohon" tetap tampil walau sudah ada delivery_recorded).
+ */
+export function deriveRequesterDecision(events: RequesterEvent[]): RequesterDecision {
+  const sorted = [...events].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+  const lastDelivery = [...sorted].reverse().find((e) => e.kind === "delivery_recorded");
+  if (!lastDelivery) return "none";
+  const feedbackAfter = [...sorted].reverse().find((e) => e.kind === "feedback_recorded" && e.at >= lastDelivery.at);
+  if (!feedbackAfter) return "awaiting";
+  return feedbackAfter.needsRevision === false ? "approved" : "revision_requested";
+}
+
+export type QcContext = { status: OrderStatus; qcStatus: QcStatus; requesterDecision: RequesterDecision };
+/** isPublicRequester = pemohon sendiri lewat Riwayat Request publik (tanpa akun) — HANYA pernah relevan
+ *  untuk action "record_feedback" (lihat checkWorkflowAction); role di sini tidak dipakai untuk jalur itu. */
+export type QcActor = { role: Role; isAssignee: boolean; isPublicRequester?: boolean };
 
 export type ActionCheck = { ok: true } | { ok: false; status: 403 | 409 | 422; message: string; field?: "note" | "confirmSent" };
 
@@ -115,9 +145,11 @@ const isPicActor = (a: QcActor) => a.role === "super_admin" || (a.role === "staf
 /** Status ketika hasil dapat diserahkan (ke Manager atau pemohon). */
 const HANDOVER: readonly OrderStatus[] = ["in_progress", "awaiting_requester"];
 
-/** Catatan penyelesaian wajib bila hasil belum tercatat dikirim (penyelesaian disepakati di luar aplikasi). */
+/** Catatan penyelesaian wajib KECUALI pemohon sudah benar-benar menyetujui hasil (requesterDecision
+ *  "approved") — menutup tanpa persetujuan pemohon yang tercatat tetap memerlukan keterangan kesepakatan
+ *  di luar aplikasi, sama seperti sebelumnya, tapi sekarang berdasarkan keputusan NYATA bukan sekadar status. */
 export function completionNeedsNote(ctx: QcContext): boolean {
-  return ctx.status !== "awaiting_requester";
+  return ctx.requesterDecision !== "approved";
 }
 
 export function checkWorkflowAction(input: { action: WorkflowAction; ctx: QcContext; actor: QcActor; note?: string | null; confirmSent?: boolean }): ActionCheck {
@@ -129,8 +161,18 @@ export function checkWorkflowAction(input: { action: WorkflowAction; ctx: QcCont
     case "submit_qc":
       if (!isPicActor(actor)) return { ok: false, status: 403, message: "Hanya PIC pekerjaan ini yang dapat mengajukan QC." };
       if (ctx.status === "pending_confirmation" || ctx.qcStatus === "pending") return { ok: false, status: 409, message: "Hasil sudah diajukan dan sedang menunggu pemeriksaan Manager." };
+      // Manager sudah ACC — pemeriksaan Manager untuk pekerjaan ini SUDAH SELESAI, bukan tahapan yang bisa
+      // diulang. Langkah berikutnya adalah mengajukan hasil yang sudah disetujui ke Pemohon (record_delivery),
+      // bukan menampilkan "Ke Manager" lagi sebagai pilihan tujuan di dialog Ajukan QC.
+      if (ctx.qcStatus === "approved") return { ok: false, status: 409, message: "Manager sudah menyetujui hasil ini. Ajukan ke Pemohon, bukan ke Manager lagi." };
       if (ctx.status === "internal_revision") return { ok: false, status: 409, message: "Manager meminta revisi. Tekan Perbaiki Hasil, lalu ajukan kembali setelah diperbaiki." };
       if (!HANDOVER.includes(ctx.status)) return { ok: false, status: 409, message: "Hasil dapat diajukan setelah pekerjaan mulai dikerjakan." };
+      // Hasil SUDAH diajukan ke pemohon (record_delivery) dan belum/sudah diputuskan — PIC sudah menempuh
+      // jalurnya untuk pengajuan ini, tidak boleh SEKALIGUS mengajukan ke Manager juga (dua jalur berjalan
+      // bersamaan untuk pengajuan yang sama). Bug nyata yang diperbaiki: tombol "Ajukan QC" sebelumnya tetap
+      // tampil walau "Ajukan ke Pemohon" sudah ditekan, karena pemeriksaan ini hanya ada di record_delivery.
+      if (ctx.requesterDecision === "awaiting") return { ok: false, status: 409, message: "Hasil sudah diajukan kepada pemohon dan sedang menunggu keputusan. Tidak dapat mengajukan ke Manager untuk pengajuan yang sama." };
+      if (ctx.requesterDecision === "approved") return { ok: false, status: 409, message: "Pemohon sudah menyetujui hasil ini. Lanjutkan ke Selesaikan Pekerjaan, bukan mengajukan lagi." };
       return { ok: true };
     case "withdraw_qc":
       if (!isPicActor(actor)) return { ok: false, status: 403, message: "Hanya PIC pekerjaan ini yang dapat menarik pengajuan QC." };
@@ -150,11 +192,22 @@ export function checkWorkflowAction(input: { action: WorkflowAction; ctx: QcCont
       if (ctx.status === "pending_confirmation") return { ok: false, status: 409, message: "Hasil sedang menunggu pemeriksaan Manager. Tarik pengajuan QC bila ingin mengirim langsung ke pemohon." };
       if (ctx.status === "internal_revision") return { ok: false, status: 409, message: "Manager meminta revisi. Tekan Perbaiki Hasil lebih dulu." };
       if (!HANDOVER.includes(ctx.status)) return { ok: false, status: 409, message: "Pengiriman dicatat setelah pekerjaan mulai dikerjakan." };
+      // Sudah diajukan & belum ada keputusan pemohon — TIDAK boleh mengajukan lagi (pengajuan ganda) sampai
+      // pemohon menyetujui atau meminta revisi. Pemohon SUDAH menyetujui — tidak relevan lagi, lanjut ke
+      // penyelesaian. Ini pengecekan NYATA dari riwayat peristiwa, bukan sekadar status order yang tidak
+      // berubah saat pengiriman dicatat (lihat deriveRequesterDecision).
+      if (ctx.requesterDecision === "awaiting") return { ok: false, status: 409, message: "Hasil sudah diajukan kepada pemohon dan sedang menunggu keputusan. Tidak dapat mengajukan lagi sebelum ada keputusan." };
+      if (ctx.requesterDecision === "approved") return { ok: false, status: 409, message: "Pemohon sudah menyetujui hasil ini. Lanjutkan ke Selesaikan Pekerjaan, bukan mengajukan lagi." };
       if (input.confirmSent !== true) return { ok: false, status: 422, message: "Konfirmasi bahwa hasil benar-benar sudah dikirim kepada pemohon.", field: "confirmSent" };
       return { ok: true };
     case "record_feedback":
-      if (!isPicActor(actor)) return { ok: false, status: 403, message: "Hanya PIC pekerjaan ini yang dapat mencatat masukan pemohon." };
+      // Dicatat oleh PIC (mis. dari WhatsApp) ATAU langsung oleh pemohon lewat Riwayat Request publik.
+      if (!isPicActor(actor) && !actor.isPublicRequester) return { ok: false, status: 403, message: "Hanya PIC pekerjaan ini atau pemohon yang dapat mencatat masukan pemohon." };
       if (ctx.status !== "awaiting_requester") return { ok: false, status: 409, message: "Masukan dicatat setelah hasil tercatat dikirim kepada pemohon." };
+      // ACC Manager SENDIRIAN (belum ada delivery_recorded) atau masukan yang SUDAH dicatat untuk pengajuan
+      // ini (requesterDecision "approved") BUKAN keadaan yang bisa diberi masukan lagi — harus ada pengajuan
+      // NYATA yang benar-benar menunggu keputusan (lihat deriveRequesterDecision).
+      if (ctx.requesterDecision !== "awaiting") return { ok: false, status: 409, message: "Masukan dicatat setelah hasil benar-benar diajukan kepada pemohon dan belum ada keputusan sebelumnya." };
       if (!note) return { ok: false, status: 422, message: "Ringkasan masukan pemohon wajib diisi.", field: "note" };
       return { ok: true };
     case "complete": {

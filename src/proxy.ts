@@ -3,12 +3,13 @@ import { SESSION_COOKIE } from "@/lib/auth/permissions";
 
 /**
  * Gerbang cepat di tepi (tanpa database):
- *  - Halaman publik: beranda pengajuan `/`, pencarian `/riwayat`, login `/dtic/login`.
+ *  - Halaman publik: beranda pengajuan `/`, pencarian `/riwayat`, login `/dtic/login`, layar display
+ *    `/dtic/display` (layar TV kantor/ruang tunggu — lihat src/app/dtic/display/page.tsx).
  *  - API publik: `/api/public/*` dan endpoint login/logout.
  *  - Lainnya: wajib cookie sesi. Validasi sesi SEBENARNYA dilakukan di server
  *    (PanelShell & authorize()), jadi cookie palsu tetap ditolak di sana.
  */
-const PUBLIC_PAGES = new Set(["/", "/ajukan", "/riwayat", "/dtic/login", "/dtic/unauthorized"]);
+const PUBLIC_PAGES = new Set(["/", "/ajukan", "/riwayat", "/dtic/login", "/dtic/unauthorized", "/dtic/display"]);
 const PUBLIC_API_PREFIXES = ["/api/public/", "/api/dtic/auth/"];
 
 export function proxy(request: NextRequest) {

@@ -1,4 +1,4 @@
-import { AlertTriangle, ChevronRight } from "lucide-react";
+import { AlertTriangle, BellOff, ChevronRight, ListChecks } from "lucide-react";
 import { OrderRowActions } from "@/components/orders/order-row-actions";
 import Link from "next/link";
 import { AssigneeList } from "@/components/assignments/assignee-list";
@@ -6,7 +6,7 @@ import { DeadlineText } from "@/components/orders/deadline-text";
 import { Badge, OverdueBadge, PriorityBadge, QcBadge, StatusBadge } from "@/components/ui/badge";
 import { TableScroll } from "@/components/ui/table-scroll";
 import { formatDate, formatDateTime } from "@/lib/dates";
-import { isOverdue } from "@/lib/status";
+import { ASSIGNMENT_SLA_HOURS, isAssignmentStale, isOverdue } from "@/lib/status";
 import { RESULT_COLLECTION_LABEL, RESULT_COLLECTION_TONE } from "@/lib/result-collection";
 import type { OrderListItemWithDocs } from "@/lib/server/repositories/orders";
 
@@ -41,6 +41,11 @@ export function OrderTable({ orders, now, superAdmin = false }: { orders: OrderL
                     <Link href={`/dtic/orders/${o.id}`} className="block rounded focus-visible:outline-offset-4">
                       <span className="block truncate font-medium text-ink group-hover:text-accent">{o.title}</span>
                       <span className="mt-0.5 block font-mono text-xs text-ink-3">{o.orderNumber}</span>
+                      {o.telegramNotifyFailed && (
+                        <span className="mt-1 inline-flex items-center gap-1 text-[11px] text-bad" title="Notifikasi Telegram untuk order ini gagal terkirim. Lihat Integrasi Telegram untuk detail & kirim ulang.">
+                          <BellOff className="size-3" aria-hidden="true" /> Notifikasi belum terkirim
+                        </span>
+                      )}
                     </Link>
                   </td>
                   <td className="px-4 py-3.5 whitespace-nowrap text-ink-2">{o.teamName ?? <span className="text-ink-3">—</span>}</td>
@@ -63,6 +68,16 @@ export function OrderTable({ orders, now, superAdmin = false }: { orders: OrderL
                     <div className="flex flex-col items-start gap-1">
                       <StatusBadge status={o.status} />
                       {o.qcStatus !== "none" && <QcBadge status={o.qcStatus} />}
+                      {isAssignmentStale(o.assignedAt, o.status, now) && (
+                        <span className="inline-flex items-center gap-1 text-[11px] text-bad" title={`Sudah ditugaskan lebih dari ${ASSIGNMENT_SLA_HOURS} jam, belum mulai dikerjakan.`}>
+                          <AlertTriangle className="size-3" aria-hidden="true" /> Lewat SLA penugasan
+                        </span>
+                      )}
+                      {o.needsPicClosure && (
+                        <span className="inline-flex items-center gap-1 text-[11px] text-warn" title="Pemohon sudah menyetujui hasil, tapi PIC belum menutup pekerjaan ini.">
+                          <ListChecks className="size-3" aria-hidden="true" /> Menunggu Penyelesaian PIC
+                        </span>
+                      )}
                     </div>
                   </td>
                   <td className="px-4 py-3.5">
@@ -108,6 +123,21 @@ export function OrderTable({ orders, now, superAdmin = false }: { orders: OrderL
                   <p className="font-mono text-xs text-ink-3">{o.orderNumber}</p>
                   <p className="mt-0.5 text-sm font-medium text-ink">{o.title}</p>
                   <p className="mt-0.5 text-xs text-ink-3">{o.teamName ? `${o.teamName} · ` : ""}{o.brandName} · {o.requesterName}</p>
+                  {o.telegramNotifyFailed && (
+                    <span className="mt-1 inline-flex items-center gap-1 text-[11px] text-bad" title="Notifikasi Telegram untuk order ini gagal terkirim.">
+                      <BellOff className="size-3" aria-hidden="true" /> Notifikasi belum terkirim
+                    </span>
+                  )}
+                  {isAssignmentStale(o.assignedAt, o.status, now) && (
+                    <span className="mt-1 inline-flex items-center gap-1 text-[11px] text-bad" title={`Sudah ditugaskan lebih dari ${ASSIGNMENT_SLA_HOURS} jam, belum mulai dikerjakan.`}>
+                      <AlertTriangle className="size-3" aria-hidden="true" /> Lewat SLA penugasan
+                    </span>
+                  )}
+                  {o.needsPicClosure && (
+                    <span className="mt-1 inline-flex items-center gap-1 text-[11px] text-warn" title="Pemohon sudah menyetujui hasil, tapi PIC belum menutup pekerjaan ini.">
+                      <ListChecks className="size-3" aria-hidden="true" /> Menunggu Penyelesaian PIC
+                    </span>
+                  )}
                 </div>
                 <div className="flex shrink-0 flex-col items-end gap-1">
                   <StatusBadge status={o.status} />

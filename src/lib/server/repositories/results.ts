@@ -21,20 +21,25 @@ export type ResultFile = {
   /** null = tersimpan di storage lokal/Supabase (perilaku lama, tidak berubah). */
   driveSyncStatus: DriveSyncStatus | null;
   driveSyncError: string | null;
+  /** Hasil rekonsiliasi PERIODIK (lihat doSync di drive-sync.ts) — beda dari driveSyncStatus (hasil UNGGAHAN). null = belum pernah direkonsiliasi, atau cocok (tidak ada masalah). */
+  reconcileStatus: "missing" | "moved_out" | null;
+  /** Folder Drive TERKINI file ini (drive_folder_id) — dipakai tautan "Buka folder Drive". null bila bukan file berbasis Drive. */
+  driveFolderId: string | null;
 };
 
 export async function listResultFiles(orderId: string): Promise<ResultFile[]> {
   const rows = await sql()<{
     id: string; file_name: string; mime_type: string; file_size: number; created_at: Date; full_name: string | null; uploaded_by: string | null;
-    sync_status: DriveSyncStatus | null; sync_error: string | null;
+    sync_status: DriveSyncStatus | null; sync_error: string | null; reconcile_status: "missing" | "moved_out" | null; drive_folder_id: string | null;
   }[]>`
-    select a.id, a.file_name, a.mime_type, a.file_size, a.created_at, u.full_name, a.uploaded_by, a.sync_status, a.sync_error
+    select a.id, a.file_name, a.mime_type, a.file_size, a.created_at, u.full_name, a.uploaded_by, a.sync_status, a.sync_error, a.reconcile_status, a.drive_folder_id
     from order_attachments a left join app_users u on u.id = a.uploaded_by
     where a.order_id = ${orderId} and a.kind = 'result'
     order by a.created_at desc, a.file_name`;
   return rows.map((r) => ({
     id: r.id, fileName: r.file_name, mimeType: r.mime_type, fileSize: Number(r.file_size), uploadedAt: r.created_at.toISOString(),
     uploaderName: r.full_name, uploadedBy: r.uploaded_by, driveSyncStatus: r.sync_status, driveSyncError: r.sync_error,
+    reconcileStatus: r.reconcile_status, driveFolderId: r.drive_folder_id,
   }));
 }
 
@@ -368,6 +373,11 @@ export async function assertResultLinks(tx: postgres.TransactionSql, orderId: st
 export async function assertResultFiles(tx: postgres.TransactionSql, orderId: string, ids: string[]): Promise<void> {
   if (ids.length === 0) return;
   const unique = [...new Set(ids)];
-  const rows = await tx<{ id: string }[]>`select id from order_attachments where order_id = ${orderId} and kind = 'result' and id in ${tx(unique)}`;
+  // reconcile_status = 'missing' = terbukti hilang dari Drive saat rekonsiliasi (lihat doSync di
+  // drive-sync.ts) — tidak boleh dipakai untuk mengajukan/menyerahkan apa pun, sama seperti file yang
+  // memang tidak ada. Pesan TETAP yang sudah ada (operasional, bukan istilah Drive/rekonsiliasi).
+  const rows = await tx<{ id: string }[]>`
+    select id from order_attachments
+    where order_id = ${orderId} and kind = 'result' and id in ${tx(unique)} and reconcile_status is distinct from 'missing'`;
   if (rows.length !== unique.length) throw new AppError("Sebagian file hasil tidak ditemukan pada pekerjaan ini. Muat ulang halaman lalu coba lagi.", 422, { resultFileIds: "File hasil tidak valid." });
 }

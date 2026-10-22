@@ -291,6 +291,14 @@
       "namedRegex": "^/api/internal/users/(?<nxtPid>[^/]+?)/password(?:/)?$"
     },
     {
+      "page": "/api/public/tracking/files/[fileId]",
+      "regex": "^/api/public/tracking/files/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPfileId": "nxtPfileId"
+      },
+      "namedRegex": "^/api/public/tracking/files/(?<nxtPfileId>[^/]+?)(?:/)?$"
+    },
+    {
       "page": "/dtic/orders/[id]",
       "regex": "^/dtic/orders/([^/]+?)(?:/)?$",
       "routeKeys": {
@@ -500,6 +508,12 @@
       "namedRegex": "^/api/internal/users(?:/)?$"
     },
     {
+      "page": "/api/public/display/orders",
+      "regex": "^/api/public/display/orders(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/public/display/orders(?:/)?$"
+    },
+    {
       "page": "/api/public/orders",
       "regex": "^/api/public/orders(?:/)?$",
       "routeKeys": {},
@@ -516,6 +530,12 @@
       "regex": "^/api/public/tracking(?:/)?$",
       "routeKeys": {},
       "namedRegex": "^/api/public/tracking(?:/)?$"
+    },
+    {
+      "page": "/api/public/tracking/decision",
+      "regex": "^/api/public/tracking/decision(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/public/tracking/decision(?:/)?$"
     },
     {
       "page": "/dtic",

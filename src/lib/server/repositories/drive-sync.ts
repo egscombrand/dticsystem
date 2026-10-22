@@ -20,24 +20,66 @@ export type OrderDriveSyncState = {
   lastSyncAt: string | null;
   lastSyncStatus: "success" | "partial" | "failed" | null;
   lastSyncMessage: string | null;
+  /** Kegagalan/sebagian BERTURUT-TURUT saat ini (lihat recordOutcomeAndMaybeEscalate) — 0 setelah sukses. */
+  consecutiveFailCount: number;
+  /** Waktu eskalasi (peringatan Telegram) terkirim untuk rangkaian kegagalan SAAT INI, atau null bila belum/sudah diatur ulang. */
+  escalatedAt: string | null;
 };
 
 const isMissingTable = (error: unknown) => pgErrorCode(error) === "42P01";
+const EMPTY_SYNC_STATE: OrderDriveSyncState = { lastSyncAt: null, lastSyncStatus: null, lastSyncMessage: null, consecutiveFailCount: 0, escalatedAt: null };
 
 export async function getOrderDriveSyncState(orderId: string): Promise<OrderDriveSyncState> {
   try {
-    const rows = await sql()<{ last_sync_at: Date | null; last_sync_status: "success" | "partial" | "failed" | null; last_sync_message: string | null }[]>`
-      select last_sync_at, last_sync_status, last_sync_message from order_drive_sync where order_id = ${orderId}`;
+    const rows = await sql()<{ last_sync_at: Date | null; last_sync_status: "success" | "partial" | "failed" | null; last_sync_message: string | null; consecutive_fail_count: number; escalated_at: Date | null }[]>`
+      select last_sync_at, last_sync_status, last_sync_message, consecutive_fail_count, escalated_at from order_drive_sync where order_id = ${orderId}`;
     const r = rows[0];
-    if (!r) return { lastSyncAt: null, lastSyncStatus: null, lastSyncMessage: null };
-    return { lastSyncAt: r.last_sync_at?.toISOString() ?? null, lastSyncStatus: r.last_sync_status, lastSyncMessage: r.last_sync_message };
+    if (!r) return EMPTY_SYNC_STATE;
+    return {
+      lastSyncAt: r.last_sync_at?.toISOString() ?? null,
+      lastSyncStatus: r.last_sync_status,
+      lastSyncMessage: r.last_sync_message,
+      consecutiveFailCount: r.consecutive_fail_count,
+      escalatedAt: r.escalated_at?.toISOString() ?? null,
+    };
   } catch (error) {
-    if (isMissingTable(error)) return { lastSyncAt: null, lastSyncStatus: null, lastSyncMessage: null };
+    if (isMissingTable(error)) return EMPTY_SYNC_STATE;
     throw error;
   }
 }
 
-export type SyncOrderResult = { skipped: true; reason: string } | { skipped: false; status: "success" | "partial" | "failed"; message: string; discovered: number; updated: number; missing: number; movedOut: number };
+/** Satu percobaan rekonsiliasi yang sudah terjadi (order_drive_reconcile_log) — dipakai menampilkan riwayat & penyebab kegagalan spesifik di halaman Detail Pekerjaan. */
+export type DriveReconcileLogEntry = {
+  attemptedAt: string;
+  status: "success" | "partial" | "failed";
+  message: string;
+  errorDetail: string | null;
+  triggeredBy: "page_view" | "manual" | "worker";
+};
+
+export async function listDriveReconcileLog(orderId: string, limit = 5): Promise<DriveReconcileLogEntry[]> {
+  try {
+    const rows = await sql()<{ attempted_at: Date; status: "success" | "partial" | "failed"; message: string; error_detail: string | null; triggered_by: "page_view" | "manual" | "worker" }[]>`
+      select attempted_at, status, message, error_detail, triggered_by from order_drive_reconcile_log
+      where order_id = ${orderId} order by attempted_at desc limit ${limit}`;
+    return rows.map((r) => ({ attemptedAt: r.attempted_at.toISOString(), status: r.status, message: r.message, errorDetail: r.error_detail, triggeredBy: r.triggered_by }));
+  } catch (error) {
+    if (isMissingTable(error)) return [];
+    throw error;
+  }
+}
+
+async function logReconcileAttempt(orderId: string, entry: { status: "success" | "partial" | "failed"; message: string; errors: string[]; triggeredBy: "page_view" | "manual" | "worker" }): Promise<void> {
+  try {
+    await sql()`
+      insert into order_drive_reconcile_log (order_id, status, message, error_detail, triggered_by)
+      values (${orderId}, ${entry.status}, ${entry.message}, ${entry.errors.length ? entry.errors.join("\n") : null}, ${entry.triggeredBy})`;
+  } catch (error) {
+    if (!isMissingTable(error)) console.error("[drive-sync] gagal menulis log rekonsiliasi:", error instanceof Error ? error.message : error);
+  }
+}
+
+export type SyncOrderResult = { skipped: true; reason: string } | { skipped: false; status: "success" | "partial" | "failed"; message: string; discovered: number; updated: number; missing: number; movedOut: number; errors: string[] };
 
 /**
  * Sinkronkan metadata Google Drive -> DB untuk SATU order (Fase 3). TIDAK PERNAH mengunggah ulang file,
@@ -49,7 +91,8 @@ export type SyncOrderResult = { skipped: true; reason: string } | { skipped: fal
  * oleh proses lain (sewa 30 detik) — mencegah tombol ditekan berulang/auto-sync saat render ulang memicu
  * banyak panggilan Drive bersamaan untuk order yang sama.
  */
-export async function syncOrderDriveMetadata(orderId: string, opts: { force?: boolean } = {}): Promise<SyncOrderResult> {
+export async function syncOrderDriveMetadata(orderId: string, opts: { force?: boolean; triggeredBy?: "page_view" | "manual" | "worker" } = {}): Promise<SyncOrderResult> {
+  const triggeredBy = opts.triggeredBy ?? "manual";
   if (!isDriveEnabled() || !(await isDriveActiveForUploads())) {
     return { skipped: true, reason: "Integrasi Google Drive tidak aktif." };
   }
@@ -85,6 +128,7 @@ export async function syncOrderDriveMetadata(orderId: string, opts: { force?: bo
       update order_drive_sync set last_sync_at = now(), last_sync_status = ${result.status}, last_sync_message = ${result.message}, last_sync_locked_at = null
       where order_id = ${orderId}`;
     await recordOutcomeAndMaybeEscalate(orderId, result.status);
+    await logReconcileAttempt(orderId, { status: result.status, message: result.message, errors: result.errors, triggeredBy });
     return { skipped: false, ...result };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Sinkronisasi gagal.";
@@ -92,7 +136,8 @@ export async function syncOrderDriveMetadata(orderId: string, opts: { force?: bo
     // waktu sukses hanya karena proses dimulai) — hanya status/pesan + lepas kunci.
     await db`update order_drive_sync set last_sync_status = 'failed', last_sync_message = ${message.slice(0, 500)}, last_sync_locked_at = null where order_id = ${orderId}`;
     await recordOutcomeAndMaybeEscalate(orderId, "failed");
-    return { skipped: false, status: "failed", message, discovered: 0, updated: 0, missing: 0, movedOut: 0 };
+    await logReconcileAttempt(orderId, { status: "failed", message, errors: [message], triggeredBy });
+    return { skipped: false, status: "failed", message, discovered: 0, updated: 0, missing: 0, movedOut: 0, errors: [message] };
   }
 }
 
@@ -123,11 +168,15 @@ async function recordOutcomeAndMaybeEscalate(orderId: string, status: "success" 
   }
 }
 
-async function doSync(orderId: string): Promise<{ status: "success" | "partial" | "failed"; message: string; discovered: number; updated: number; missing: number; movedOut: number }> {
+type DoSyncResult = { status: "success" | "partial" | "failed"; message: string; discovered: number; updated: number; missing: number; movedOut: number; errors: string[] };
+
+const errorText = (error: unknown): string => (error instanceof Error ? error.message : "Tidak dapat menghubungi Google Drive.");
+
+async function doSync(orderId: string): Promise<DoSyncResult> {
   const db = sql();
   const [order] = await db<{ order_number: string; requester_name: string; design_type: string; title: string; created_at: Date }[]>`
     select order_number, requester_name, design_type, title, created_at from orders where id = ${orderId}`;
-  if (!order) return { status: "failed", message: "Order tidak ditemukan.", discovered: 0, updated: 0, missing: 0, movedOut: 0 };
+  if (!order) return { status: "failed", message: "Order tidak ditemukan.", discovered: 0, updated: 0, missing: 0, movedOut: 0, errors: ["Order tidak ditemukan."] };
 
   const picName = await primaryAssigneeName(orderId);
   const client = await driveClient();
@@ -141,12 +190,14 @@ async function doSync(orderId: string): Promise<{ status: "success" | "partial" 
   // Folder kategori hasil order ini (hanya yang SUDAH ADA — findResultCategoryFolder tidak membuat apa pun).
   const categoryFolders: { category: ResultCategory; folderId: string }[] = [];
   let folderLookupFailed = 0;
+  const errors: string[] = [];
   for (const category of RESULT_CATEGORIES) {
     try {
       const folderId = await findResultCategoryFolder({ picName, submittedAt, requesterName: order.requester_name, orderNumber: order.order_number, orderTitle: order.title, category });
       if (folderId) categoryFolders.push({ category, folderId });
-    } catch {
+    } catch (error) {
       folderLookupFailed += 1;
+      errors.push(`Folder kategori "${RESULT_CATEGORY_FOLDER[category]}": ${errorText(error)}`);
     }
   }
   const knownFolderIds = new Set(categoryFolders.map((c) => c.folderId));
@@ -186,20 +237,22 @@ async function doSync(orderId: string): Promise<{ status: "success" | "partial" 
           reconciled_at = now()
         where id = ${row.id}`;
       updated += 1;
-    } catch {
+    } catch (error) {
       perFileFailed += 1;
+      errors.push(`File "${row.file_name}": ${errorText(error)}`);
     }
   }
 
   // 2) Temukan file BARU di folder kategori order ini yang belum tercatat (dibuktikan lewat folder ID).
   const knownFileIds = new Set(existingRows.map((r) => r.drive_file_id));
   let discovered = 0;
-  for (const { folderId } of categoryFolders) {
+  for (const { category, folderId } of categoryFolders) {
     let files: DriveFileMeta[];
     try {
       files = await client.listFiles(folderId);
-    } catch {
+    } catch (error) {
       perFileFailed += 1;
+      errors.push(`Daftar isi folder "${RESULT_CATEGORY_FOLDER[category]}": ${errorText(error)}`);
       continue;
     }
     for (const f of files) {
@@ -221,7 +274,7 @@ async function doSync(orderId: string): Promise<{ status: "success" | "partial" 
   const status = totalFailed === 0 ? "success" : updated + discovered > 0 || existingRows.length === 0 ? "partial" : "failed";
   const parts = [`${updated} diperbarui`, `${discovered} ditemukan baru`, `${missing} tidak ditemukan`, `${movedOut} pindah folder`];
   if (totalFailed > 0) parts.push(`${totalFailed} gagal dibaca`);
-  return { status, message: parts.join(", "), discovered, updated, missing, movedOut };
+  return { status, message: parts.join(", "), discovered, updated, missing, movedOut, errors };
 }
 
 export type ReconcileAllResult = {
@@ -253,7 +306,7 @@ export async function reconcileAllOrdersDriveMetadata(): Promise<ReconcileAllRes
   let failed = 0;
   const problemOrderIds: string[] = [];
   for (const orderId of orderIds) {
-    const result = await syncOrderDriveMetadata(orderId, { force: true });
+    const result = await syncOrderDriveMetadata(orderId, { force: true, triggeredBy: "worker" });
     if (result.skipped) continue; // integrasi nonaktif — seluruh siklus tidak relevan, dibiarkan apa adanya
     if (result.status === "success") succeeded += 1;
     else {

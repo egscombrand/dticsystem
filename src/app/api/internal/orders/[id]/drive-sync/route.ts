@@ -9,9 +9,12 @@ import { syncOrderDriveMetadata } from "@/lib/server/repositories/drive-sync";
  * terbukti relasinya (fileId sudah tercatat, atau file ditemukan di folder kategori hasil order ini).
  * Dideduplikasi di repository (lihat syncOrderDriveMetadata) — body `{ "force": true }` memaksa lewati
  * jendela dedupe (dipakai tombol manual "Sinkronkan" eksplisit, bukan auto-sync saat halaman dibuka).
+ *
+ * Hanya Super Admin (lihat "drive.diagnose" di permissions.ts) — ini masalah teknis infrastruktur arsip,
+ * bukan kewenangan operasional PIC/Manager. Dibatasi di SINI (backend), bukan hanya disembunyikan di UI.
  */
 export async function POST(request: Request, ctx: RouteContext<"/api/internal/orders/[id]/drive-sync">) {
-  const auth = await authorize(request, "orders.workflow");
+  const auth = await authorize(request, "drive.diagnose");
   if (!auth.ok) return auth.response;
   try {
     assertSameOrigin(request, { requireCustomHeader: true });
@@ -19,7 +22,7 @@ export async function POST(request: Request, ctx: RouteContext<"/api/internal/or
     assertUuid(id, "Order");
     if (!(await canAccessOrder(auth.session, id))) throw new NotFoundError("Order tidak ditemukan.");
     const body = (await request.json().catch(() => ({}))) as { force?: boolean };
-    const result = await syncOrderDriveMetadata(id, { force: body.force === true });
+    const result = await syncOrderDriveMetadata(id, { force: body.force === true, triggeredBy: "manual" });
     return json(result);
   } catch (error) {
     return errorResponse(error, "POST orders/[id]/drive-sync");

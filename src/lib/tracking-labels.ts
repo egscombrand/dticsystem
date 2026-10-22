@@ -14,16 +14,42 @@ export const CLIENT_STATUS_LABEL: Record<OrderStatus, { label: string; hint: str
   cancelled: { label: "Dibatalkan", hint: "Request dibatalkan. Hubungi tim DTIC bila ada pertanyaan." },
 };
 
+/**
+ * Label/hint status untuk pemohon, dengan pengecualian: begitu Manager ACC, order.status langsung
+ * berpindah ke 'awaiting_requester' (lihat applyWorkflowAction) walau PIC BELUM menekan "Ajukan ke
+ * Pemohon" — pemohon belum menerima apa pun untuk diperiksa. "Menunggu Masukan Anda" baru boleh tampil
+ * setelah benar-benar ada delivery_recorded (lihat hasSubmittedToRequester di src/lib/result-status.ts,
+ * dipakai sebagai TrackingView.awaitingSubmissionToRequester). Sebelum itu, tampilkan status antara yang
+ * jujur: disetujui secara internal, tapi belum diajukan.
+ */
+export function clientStatusLabel(status: OrderStatus, awaitingSubmissionToRequester: boolean): { label: string; hint: string } {
+  if (status === "awaiting_requester" && awaitingSubmissionToRequester) {
+    return {
+      label: "Disetujui Manager",
+      hint: "Manager telah menyetujui hasil. Menunggu PIC mengajukan hasil QC kepada Pemohon.",
+    };
+  }
+  return CLIENT_STATUS_LABEL[status];
+}
+
 /** Tahap utama timeline (tahap tambahan hanya muncul bila pernah terjadi). */
 export const MAIN_STAGES: OrderStatus[] = ["assigned", "in_progress", "pending_confirmation", "completed"];
 
-/** Urutan tahap untuk satu order berdasarkan riwayatnya (status sudah dalam bentuk baru). */
+/**
+ * Urutan tahap untuk SATU order berdasarkan riwayatnya (status sudah dalam bentuk baru) — dibangun dari
+ * kejadian yang BENAR-BENAR terjadi, bukan daftar tetap. Manager (pending_confirmation, "Pemeriksaan
+ * Internal") bersifat OPSIONAL: PIC boleh mengajukan hasil langsung ke pemohon tanpa Manager sama sekali
+ * (lihat applyWorkflowAction, jalur "record_delivery" tanpa "submit_qc" ke Manager lebih dulu) — tahap ini
+ * HANYA disertakan bila riwayat order ini benar-benar pernah melewatinya, sama seperti on_hold/
+ * internal_revision/awaiting_requester di bawah. Sebelumnya tahap ini SELALU disertakan tanpa syarat,
+ * membuat timeline pemohon terlihat seolah Manager wajib dilalui semua pekerjaan.
+ */
 export function trackingStages(current: OrderStatus, seen: Set<OrderStatus>): OrderStatus[] {
   const stages: OrderStatus[] = [];
   if (seen.has("submitted") || current === "submitted") stages.push("submitted");
   stages.push("assigned", "in_progress");
   if (seen.has("on_hold") || current === "on_hold") stages.push("on_hold");
-  stages.push("pending_confirmation");
+  if (seen.has("pending_confirmation") || current === "pending_confirmation") stages.push("pending_confirmation");
   if (seen.has("internal_revision") || current === "internal_revision") stages.push("internal_revision");
   if (seen.has("awaiting_requester") || current === "awaiting_requester") stages.push("awaiting_requester");
   stages.push(current === "cancelled" ? "cancelled" : "completed");

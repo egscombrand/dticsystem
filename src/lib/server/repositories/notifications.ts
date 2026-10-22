@@ -201,6 +201,32 @@ export async function countAwaitingDestination(): Promise<number> {
   return r?.n ?? 0;
 }
 
+/** max_attempts bawaan baris baru (lihat kolom di migrasi 20261013070000_telegram_retry.sql). */
+const DEFAULT_MAX_ATTEMPTS = 5;
+
+/**
+ * Pulihkan baris yang GAGAL PERMANEN karena galat SEMENTARA (timeout/jaringan/5xx/429) setelah seluruh
+ * jadwal retry (~2,4 menit) habis — bukan galat permanen (token/chat salah), yang tetap tidak diulang.
+ * Dipanggil worker secara berkala (lihat telegram-worker.ts) sebagai jaring pengaman untuk outage Telegram
+ * yang berlangsung LEBIH LAMA dari jendela retry normal, supaya tidak bergantung pada Super Admin sadar dan
+ * menekan "Kirim ulang" secara manual.
+ *
+ * Dibatasi TEPAT SATU KALI per baris (bukan retry tanpa batas): hanya baris yang max_attempts-nya masih nilai
+ * bawaan (belum pernah dipulihkan sebelumnya) yang memenuhi syarat — begitu dipulihkan, max_attempts naik
+ * permanen, sehingga baris yang sama tidak pernah dipulihkan untuk kedua kalinya. Tidak membuat baris baru
+ * (tanpa duplikasi) — hanya baris yang sudah ada yang mendapat satu kesempatan tambahan lewat jalur
+ * klaim/kirim yang sudah ada (claimDueOutbox), bukan jalur baru.
+ */
+export async function reviveStaleFailedOutbox(cooldownMinutes: number): Promise<number> {
+  const rows = await sql()<{ id: string }[]>`
+    update notification_outbox
+    set max_attempts = max_attempts + 1, status = 'pending', next_attempt_at = now(), locked_at = null
+    where channel = 'telegram' and status = 'failed' and error_kind = 'transient'
+      and max_attempts = ${DEFAULT_MAX_ATTEMPTS} and updated_at < now() - make_interval(mins => ${cooldownMinutes})
+    returning id`;
+  return rows.length;
+}
+
 /** Dilewati dengan alasan tercatat (tidak ada percobaan kirim). Alasan harus aman: tanpa token/chat ID. */
 export async function markOutboxSkipped(id: string, reason: string) {
   await sql()`update notification_outbox set status = 'skipped', last_error = ${reason.slice(0, 300)}, error_kind = null, locked_at = null where id = ${id}`;

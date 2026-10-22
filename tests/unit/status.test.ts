@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isOverdue, statusLabel, toCurrentStatus } from "@/lib/status";
+import { ASSIGNMENT_SLA_HOURS, isAssignmentStale, isOverdue, statusLabel, toCurrentStatus } from "@/lib/status";
 
 describe("isOverdue", () => {
   const now = new Date("2026-10-09T10:00:00Z");
@@ -17,6 +17,25 @@ describe("isOverdue", () => {
   });
   it("deadline di masa depan tidak terlambat", () => {
     expect(isOverdue(future, "pending_confirmation", now)).toBe(false);
+  });
+});
+
+describe("isAssignmentStale (SLA penugasan, terpisah dari deadline pekerjaan)", () => {
+  const now = new Date("2026-10-09T10:00:00Z");
+  const longAgo = new Date(now.getTime() - (ASSIGNMENT_SLA_HOURS + 1) * 60 * 60 * 1000).toISOString();
+  const recently = new Date(now.getTime() - (ASSIGNMENT_SLA_HOURS - 1) * 60 * 60 * 1000).toISOString();
+
+  it("assigned lebih lama dari SLA, belum mulai dikerjakan → terlambat", () => {
+    expect(isAssignmentStale(longAgo, "assigned", now)).toBe(true);
+  });
+  it("assigned belum melewati SLA → belum terlambat", () => {
+    expect(isAssignmentStale(recently, "assigned", now)).toBe(false);
+  });
+  it("status selain 'assigned' tidak pernah dianggap terlambat SLA ini, walau assignedAt lama", () => {
+    for (const s of ["in_progress", "pending_confirmation", "completed", "submitted"] as const) expect(isAssignmentStale(longAgo, s, now)).toBe(false);
+  });
+  it("tanpa assignedAt (order belum pernah assigned) → tidak terlambat", () => {
+    expect(isAssignmentStale(null, "assigned", now)).toBe(false);
   });
 });
 

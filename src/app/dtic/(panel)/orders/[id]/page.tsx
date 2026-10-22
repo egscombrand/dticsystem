@@ -1,6 +1,6 @@
 import { canAccessOrder, requireSession } from "@/lib/server/auth";
 import { can } from "@/lib/auth/permissions";
-import { CalendarClock, ExternalLink, FileCheck2, KeyRound, FileText, ListChecks, Paperclip, Pencil, Send, ShieldCheck, Undo2, Users } from "lucide-react";
+import { BellOff, CalendarClock, ExternalLink, FileCheck2, KeyRound, FileText, ListChecks, Paperclip, Pencil, Send, ShieldCheck, Undo2, Users } from "lucide-react";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { connection } from "next/server";
@@ -16,10 +16,12 @@ import { QcFlowActions } from "@/components/orders/qc-flow-actions";
 import { WhatsappMessageButton } from "@/components/orders/whatsapp-message";
 import type { WaContext } from "@/lib/smart-whatsapp";
 import { ResultFiles, type ResultFileView } from "@/components/orders/result-files";
-import { latestResultIds, latestResultLinkIds, resultFileHistory, resultLinksUsed, RESULT_STAGE_LABEL, type ResultStage } from "@/lib/result-status";
+import { awaitingPicClosure, latestResultIds, latestResultLinkIds, resultFileHistory, resultLinksUsed, RESULT_STAGE_LABEL, type ResultStage } from "@/lib/result-status";
 import { listResultFiles, listResultLinks } from "@/lib/server/repositories/results";
 import { ResultLinks, type ResultLinkView } from "@/components/orders/result-links";
-import { syncOrderDriveMetadata } from "@/lib/server/repositories/drive-sync";
+import { getOrderDriveSyncState, listDriveReconcileLog, syncOrderDriveMetadata } from "@/lib/server/repositories/drive-sync";
+import { ESCALATION_THRESHOLD } from "@/lib/server/services/drive-escalation";
+import { DriveArchiveStatus, type DriveArchiveLogView } from "@/components/orders/drive-archive-status";
 import { WorkStepper } from "@/components/orders/work-stepper";
 import { deriveWorkStage } from "@/lib/work-stage";
 import { resultMaxFileBytes } from "@/lib/server/config";
@@ -30,7 +32,7 @@ import { LinkButton } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { OrderDetailSkeleton } from "@/components/ui/skeletons";
 import { describeDeadline, formatDateTime, formatDeadline } from "@/lib/dates";
-import { availableWorkflowActions, completionNeedsNote, DELIVERY_STATUS_LABEL, HANDOVER_CHANNEL_LABEL, QC_STATUS_LABEL, type HandoverChannel, type DeliveryStatus, type QcStatus } from "@/lib/qc";
+import { availableWorkflowActions, completionNeedsNote, deriveRequesterDecision, DELIVERY_STATUS_LABEL, HANDOVER_CHANNEL_LABEL, QC_STATUS_LABEL, type HandoverChannel, type DeliveryStatus, type QcStatus, type RequesterDecision } from "@/lib/qc";
 import { UUID_RE } from "@/lib/server/http";
 import { listTeamMemberOptions } from "@/lib/server/repositories/master-data";
 import { getOrderDetail, listOrderActivity } from "@/lib/server/repositories/orders";
@@ -49,11 +51,26 @@ const NEXT_STEP: Record<OrderStatus, string> = {
   in_progress: "Pelajari brief dan siapkan hasil sesuai spesifikasi. Setelah hasil siap, ajukan QC atau selesaikan pekerjaan.",
   pending_confirmation: "Pekerjaan sedang menunggu pemeriksaan Manager.",
   internal_revision: "Tinjau catatan Manager dan perbaiki hasil.",
-  awaiting_requester: "Hasil sudah tercatat dikirim kepada pemohon. Catat masukan pemohon bila ada, atau selesaikan pekerjaan bila sudah disepakati.",
+  // Placeholder — awaiting_requester SELALU ditentukan oleh nextStepText() di bawah (bukan dibaca langsung
+  // dari map ini), karena satu status ini mencakup 3 keadaan nyata berbeda (lihat RequesterDecision di qc.ts).
+  awaiting_requester: "",
   on_hold: "Pekerjaan dihentikan sementara. Alasannya tercatat di riwayat aktivitas.",
   completed: "Pekerjaan telah diselesaikan.",
   cancelled: "Pekerjaan dibatalkan. Alasannya tercatat di riwayat aktivitas.",
 };
+
+/** awaiting_requester mencakup 3 keadaan nyata berbeda (lihat RequesterDecision di qc.ts) — teks langkah
+ *  berikutnya HARUS mengikuti riwayat peristiwa yang sama dipakai untuk tombol, bukan ditebak dari status saja. */
+function nextStepText(status: OrderStatus, requesterDecision: RequesterDecision): string {
+  if (status !== "awaiting_requester") return NEXT_STEP[status];
+  if (requesterDecision === "none") return "Manager sudah menyetujui hasil ini. Ajukan hasil kepada pemohon (tombol Ajukan ke Pemohon).";
+  if (requesterDecision === "awaiting") return "Hasil sudah diajukan kepada pemohon. Menunggu pemohon menyetujui atau meminta revisi — belum perlu mengajukan ulang.";
+  // "revision_requested" seharusnya tidak pernah tercapai bersama status awaiting_requester (permintaan
+  // revisi langsung memindahkan status ke internal_revision — lihat applyWorkflowAction), disertakan hanya
+  // demi kelengkapan tipe, bukan alur yang benar-benar terjadi.
+  if (requesterDecision === "revision_requested") return "Perbaiki hasil sesuai revisi yang diminta, lalu ajukan ulang.";
+  return "Pemohon sudah menyetujui hasil ini. Lanjutkan ke Selesaikan Pekerjaan.";
+}
 
 const QC_TONE: Record<QcStatus, StatusTone> = { none: "muted", pending: "violet", approved: "success", revision: "danger" };
 const DELIVERY_TONE: Record<DeliveryStatus, StatusTone> = { none: "muted", direct: "info", after_qc: "success" };
@@ -95,13 +112,17 @@ async function OrderDetailContent({ params }: { params: PageProps<"/dtic/orders/
   const canDelete = can(session.role, "orders.delete");
   const canAssign = can(session.role, "orders.manage_pic");
   const viewAll = can(session.role, "orders.view_all");
+  // Diagnostik & tindakan pemulihan arsip Drive: masalah teknis infrastruktur, bukan kewenangan operasional
+  // PIC/Manager — disembunyikan total untuk role lain (bukan hanya tombolnya), bukan hanya di sini, lihat
+  // juga authorize("drive.diagnose") di endpoint drive-sync.
+  const canDiagnoseDrive = can(session.role, "drive.diagnose");
   const order = await getOrderDetail(id);
   if (!order) notFound();
   // Sinkronisasi otomatis saat halaman dibuka (Fase 4) — DIBATASI oleh jendela dedupe di repository
   // (dilewati diam-diam bila < 2 menit lalu), jadi membuka halaman berulang tidak memicu panggilan Drive
   // berulang. Dijalankan SEBELUM listResultFiles di bawah agar file yang baru ditemukan langsung tampil.
-  await syncOrderDriveMetadata(id);
-  const [members, workloads, qcStatus, events, audit, managerNames, results, contacted, resultLinks] = await Promise.all([
+  await syncOrderDriveMetadata(id, { triggeredBy: "page_view" });
+  const [members, workloads, qcStatus, events, audit, managerNames, results, contacted, resultLinks, driveSyncState, driveLog] = await Promise.all([
     listTeamMemberOptions(order.teamId),
     canAssign && order.teamId ? getMemberWorkloads(order.teamId) : Promise.resolve([]),
     getQcStatus(order.id),
@@ -112,6 +133,8 @@ async function OrderDetailContent({ params }: { params: PageProps<"/dtic/orders/
     listResultFiles(id),
     hasContactedRequester(id, session.userId),
     listResultLinks(id),
+    canDiagnoseDrive ? getOrderDriveSyncState(id) : Promise.resolve(null),
+    canDiagnoseDrive ? listDriveReconcileLog(id) : Promise.resolve([]),
   ]);
   if (!qcStatus) notFound();
 
@@ -120,13 +143,16 @@ async function OrderDetailContent({ params }: { params: PageProps<"/dtic/orders/
   const finished = isFinishedStatus(order.status);
   const isAssignee = !!session.memberId && order.assignees.some((a) => a.id === session.memberId);
   const statusActions = allowedTransitions(order.status, { role: session.role, isAssignee });
-  const ctx = { status: order.status, qcStatus };
+  const requesterDecision = deriveRequesterDecision(events.map((e) => ({ kind: e.kind, at: e.at, needsRevision: e.needsRevision })));
+  const ctx = { status: order.status, qcStatus, requesterDecision };
   const actions = availableWorkflowActions(ctx, { role: session.role, isAssignee });
   const delivery = deliveryStatusOf(events);
   const fileIdsOf = (e: { detail: Record<string, unknown> }) => (Array.isArray(e.detail.resultFileIds) ? (e.detail.resultFileIds as string[]) : []);
   const lastResult = events.find((e) => (e.kind === "qc_submitted" || e.kind === "delivery_recorded" || e.kind === "completed") && (e.link || fileIdsOf(e).length > 0 || e.detail.method === "external"));
   const accessRequest = order.status === "in_progress" ? events.find((e) => e.kind !== "whatsapp_opened") : undefined;
-  const revisionNote = order.status === "internal_revision" ? events.find((e) => e.kind === "qc_revision_requested") : undefined;
+  // Jalur A (Manager, 'qc_revision_requested') ATAU Jalur B (pemohon, 'feedback_recorded' + needsRevision) —
+  // sebelumnya hanya mencari revisi Manager, jadi catatan revisi PEMOHON tidak pernah tampil ke PIC di sini.
+  const revisionNote = order.status === "internal_revision" ? events.find((e) => e.kind === "qc_revision_requested" || (e.kind === "feedback_recorded" && e.needsRevision === true)) : undefined;
   const completion = order.status === "completed" ? events.find((e) => e.kind === "completed") : undefined;
   const resultHist = resultFileHistory(results.map((r) => r.id), events);
   const STAGE_TONE: Record<ResultStage, StatusTone> = { draft: "muted", submitted: "violet", approved: "success", delivered: "info" };
@@ -142,16 +168,39 @@ async function OrderDetailContent({ params }: { params: PageProps<"/dtic/orders/
       driveSyncError: r.driveSyncError,
     };
   });
+  const TRIGGERED_BY_LABEL: Record<"page_view" | "manual" | "worker", string> = { page_view: "otomatis saat halaman dibuka", manual: "manual (tombol)", worker: "pemeriksaan harian" };
+  // Diagnostik arsip Drive HANYA dihitung untuk Super Admin (lihat canDiagnoseDrive) — role lain tidak pernah
+  // melihat kartu/tombol ini sama sekali, bukan hanya disembunyikan secara kosmetik.
+  const driveArchiveView = driveSyncState && {
+    lastSyncAtLabel: driveSyncState.lastSyncAt ? formatDateTime(driveSyncState.lastSyncAt) : null,
+    lastSyncStatus: driveSyncState.lastSyncStatus,
+    lastSyncMessage: driveSyncState.lastSyncMessage,
+    consecutiveFailCount: driveSyncState.consecutiveFailCount,
+    escalationThreshold: ESCALATION_THRESHOLD,
+    escalatedAtLabel: driveSyncState.escalatedAt ? formatDateTime(driveSyncState.escalatedAt) : null,
+    log: driveLog.map((l): DriveArchiveLogView => ({
+      attemptedAtLabel: formatDateTime(l.attemptedAt),
+      status: l.status,
+      message: l.message,
+      errorDetail: l.errorDetail,
+      triggeredByLabel: TRIGGERED_BY_LABEL[l.triggeredBy],
+    })),
+    files: results.map((r) => ({ id: r.id, fileName: r.fileName, reconcileStatus: r.reconcileStatus, driveFolderId: r.driveFolderId })),
+  };
   const linkUsed = resultLinksUsed(resultLinks.map((l) => l.id), events);
   const resultLinkViews: ResultLinkView[] = resultLinks.map((l) => ({
     id: l.id, url: l.url, title: l.title, description: l.description, createdByName: l.createdByName,
     used: linkUsed[l.id] ?? false,
     canDelete: !finished && (session.role === "super_admin" || l.createdBy === session.userId),
   }));
-  // Hanya file yang sudah benar-benar tersedia (bukan masih menunggu/gagal disinkronkan ke Drive) yang bisa dipilih untuk diserahkan.
+  // Hanya file yang sudah benar-benar tersedia (bukan masih menunggu/gagal disinkronkan, atau terbukti hilang
+  // dari Drive saat rekonsiliasi — reconcileStatus "missing") yang bisa dipilih untuk diserahkan. Pembatasan
+  // ini berlaku untuk SEMUA role tanpa perlu tahu istilah "Drive"/"rekonsiliasi" — file itu hanya tidak
+  // muncul di pilihan, bukan pesan error teknis.
   const existingResults = results
-    .filter((r) => r.driveSyncStatus === null || r.driveSyncStatus === "synced")
+    .filter((r) => (r.driveSyncStatus === null || r.driveSyncStatus === "synced") && r.reconcileStatus !== "missing")
     .map((r) => ({ id: r.id, fileName: r.fileName, fileSize: r.fileSize, statusLabel: RESULT_STAGE_LABEL[resultHist[r.id].stage] }));
+  const hasUnavailableResult = results.some((r) => r.reconcileStatus === "missing");
   // Konteks Smart WhatsApp: hanya dari peristiwa yang benar-benar tercatat.
   const workEvents = events.filter((e) => e.kind !== "whatsapp_opened");
   const lastWork = workEvents[0];
@@ -183,7 +232,13 @@ async function OrderDetailContent({ params }: { params: PageProps<"/dtic/orders/
     ...(hasSize ? [["Ukuran / dimensi output", order.designSize] as [string, string]] : []),
     ...(order.briefYear ? [["Tahun", String(order.briefYear)] as [string, string]] : []),
   ];
-  const hasEverRequestedRevision = events.some((e) => e.kind === "qc_revision_requested");
+  // Jalur A (Manager, 'qc_revision_requested') ATAU Jalur B (pemohon, 'feedback_recorded' + needsRevision) —
+  // keduanya membuat pengajuan berikutnya dianggap "pemeriksaan ulang", bukan pemeriksaan pertama.
+  const revisionEvents = events.filter((e) => e.kind === "qc_revision_requested" || (e.kind === "feedback_recorded" && e.needsRevision === true));
+  const hasEverRequestedRevision = revisionEvents.length > 0;
+  // QC Pemohon disetujui ≠ pekerjaan ditutup — PIC masih harus menekan "Selesaikan Pekerjaan" sendiri
+  // untuk memastikan seluruh tanggung jawab nyata (komunikasi, serah terima, tindak lanjut) sudah tuntas.
+  const needsPicClosure = awaitingPicClosure(events, finished);
   const workStage = deriveWorkStage({ orderStatus: order.status, qcStatus, hasDraftResults: results.length > 0, hasEverRequestedRevision });
 
   return (
@@ -226,8 +281,22 @@ async function OrderDetailContent({ params }: { params: PageProps<"/dtic/orders/
       </header>
 
       <div className="rounded-2xl border border-line bg-surface p-4 shadow-card">
-        <WorkStepper current={workStage} cancelled={order.status === "cancelled"} hasEverRequestedRevision={hasEverRequestedRevision} />
+        <WorkStepper current={workStage} cancelled={order.status === "cancelled"} hasEverRequestedRevision={hasEverRequestedRevision} revisionCount={revisionEvents.length} requesterDecision={requesterDecision} />
       </div>
+
+      {order.telegramNotifyFailed && (
+        <div className="flex items-center gap-2 rounded-xl border border-bad/30 bg-bad-soft px-4 py-3 text-sm text-bad" role="alert">
+          <BellOff className="size-4 shrink-0" aria-hidden="true" />
+          <span>Notifikasi Telegram untuk pekerjaan ini gagal terkirim. {session.role === "super_admin" ? <Link href="/dtic/settings/integrations" className="font-medium underline">Lihat & kirim ulang di Integrasi Telegram</Link> : "Beri tahu Super Admin untuk mengirim ulang."}</span>
+        </div>
+      )}
+
+      {needsPicClosure && (
+        <div className="flex items-center gap-2 rounded-xl border border-warn/30 bg-warn-soft px-4 py-3 text-sm text-warn" data-testid="needs-pic-closure" role="status">
+          <ListChecks className="size-4 shrink-0" aria-hidden="true" />
+          <span><strong>Menunggu Penyelesaian PIC</strong> — Pemohon sudah menyetujui hasil (QC selesai), tapi pekerjaan ini belum ditutup. Pastikan seluruh tanggung jawab benar-benar tuntas, lalu tekan &quot;Selesaikan Pekerjaan&quot;.</span>
+        </div>
+      )}
 
       {/*
         Desktop: kolom utama (brief → bahan → penyerahan → riwayat) + panel samping (langkah berikutnya di atas).
@@ -236,7 +305,7 @@ async function OrderDetailContent({ params }: { params: PageProps<"/dtic/orders/
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_22rem] xl:grid-rows-[auto_1fr]">
         <aside className="flex min-w-0 flex-col gap-6 xl:col-start-2 xl:row-start-1">
           <SideCard title="Langkah berikutnya" testId="next-step" className="border-accent/30">
-            <p className="text-[15px] leading-relaxed text-ink" data-testid="next-step-text">{NEXT_STEP[order.status]}</p>
+            <p className="text-[15px] leading-relaxed text-ink" data-testid="next-step-text">{nextStepText(order.status, requesterDecision)}</p>
             {completion && (
               <div className="mt-3 rounded-xl bg-ok-soft p-3 text-sm text-ink">
                 <p>Diselesaikan {formatDateTime(completion.at)}{completion.actorName ? ` oleh ${completion.actorName}` : ""}.</p>
@@ -329,9 +398,11 @@ async function OrderDetailContent({ params }: { params: PageProps<"/dtic/orders/
 
           {revisionNote && (
             <div role="status" className="rounded-2xl border border-[#fbd5d1] bg-bad-soft p-5" data-testid="qc-revision-note">
-              <p className="flex items-center gap-2 text-base font-semibold text-bad"><Undo2 className="size-5" aria-hidden="true" /> Manager meminta revisi</p>
+              <p className="flex items-center gap-2 text-base font-semibold text-bad">
+                <Undo2 className="size-5" aria-hidden="true" /> {revisionNote.kind === "feedback_recorded" ? "Pemohon meminta revisi" : "Manager meminta revisi"}
+              </p>
               <p className="mt-2 text-[15px] leading-relaxed break-words whitespace-pre-wrap text-ink">{revisionNote.summary}</p>
-              <p className="mt-1 text-[13px] text-ink-2">{revisionNote.actorName ?? "Manager"} · {formatDateTime(revisionNote.at)}</p>
+              <p className="mt-1 text-[13px] text-ink-2">{revisionNote.actorName ?? (revisionNote.kind === "feedback_recorded" ? "PIC (mencatat masukan pemohon)" : "Manager")} · {formatDateTime(revisionNote.at)}</p>
             </div>
           )}
 
@@ -378,6 +449,16 @@ async function OrderDetailContent({ params }: { params: PageProps<"/dtic/orders/
             <p className="-mt-2 mb-4 text-sm text-ink-2">File output yang diunggah PIC; terpisah dari bahan referensi pemohon.</p>
             <ResultFiles orderId={order.id} files={resultViews} />
             <ResultLinks orderId={order.id} links={resultLinkViews} />
+            {hasUnavailableResult && (
+              <p className="mt-3 text-sm text-ink-2">
+                Satu atau lebih file hasil sedang tidak tersedia untuk dipilih. Gunakan file lain atau unggah ulang; hubungi Super Admin bila ini mendesak.
+              </p>
+            )}
+            {canDiagnoseDrive && driveArchiveView && (
+              <div className="mt-4">
+                <DriveArchiveStatus orderId={order.id} state={driveArchiveView} />
+              </div>
+            )}
           </Section>
 
           <Section title="Penyerahan hasil & QC" icon={<Send className="size-5 text-accent" aria-hidden="true" />} id="penyerahan" testId="qc-panel">

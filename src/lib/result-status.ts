@@ -11,6 +11,39 @@ export const RESULT_STAGE_LABEL: Record<ResultStage, string> = {
 };
 
 type Ev = { kind: string; at: string; detail: Record<string, unknown> };
+type FeedbackEv = { kind: string; at: string; needsRevision?: boolean | null };
+type SubmissionEv = { kind: string; at: string };
+
+/**
+ * true bila hasil BENAR-BENAR sudah diajukan ke pemohon (ada 'delivery_recorded' SETELAH persetujuan
+ * Manager TERAKHIR, atau tanpa Manager sama sekali — Jalur A). ACC Manager ('qc_approved') SENDIRIAN tidak
+ * pernah cukup: order.status sudah berpindah ke 'awaiting_requester' begitu Manager ACC (lihat
+ * applyWorkflowAction), tapi itu HANYA berarti giliran pemohon sudah dekat — pemohon belum tentu benar-benar
+ * menerima apa pun untuk diperiksa sampai PIC menekan "Ajukan ke Pemohon" (record_delivery). Dipakai halaman
+ * Riwayat Request publik supaya "Menunggu Masukan Anda" tidak tampil prematur.
+ */
+export function hasSubmittedToRequester(events: SubmissionEv[]): boolean {
+  const latestApproval = [...events].filter((e) => e.kind === "qc_approved").sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0)).at(-1);
+  const latestDelivery = [...events].filter((e) => e.kind === "delivery_recorded").sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0)).at(-1);
+  if (!latestDelivery) return false;
+  return !latestApproval || latestDelivery.at >= latestApproval.at;
+}
+
+/**
+ * true bila Pemohon SUDAH menyetujui hasil (QC Pemohon selesai) tapi pekerjaan BELUM ditutup PIC —
+ * "Menunggu Penyelesaian PIC". QC disetujui ≠ pekerjaan nyata (komunikasi, serah terima, tindak lanjut di
+ * luar aplikasi) sudah benar-benar tuntas, jadi persetujuan Pemohon TIDAK PERNAH menutup pekerjaan secara
+ * otomatis (lihat record_feedback di applyWorkflowAction) — murni diturunkan dari peristiwa
+ * 'feedback_recorded' TERAKHIR, bukan dari status order.
+ */
+export function awaitingPicClosure(events: FeedbackEv[], orderFinished: boolean): boolean {
+  if (orderFinished) return false;
+  const latest = [...events]
+    .filter((e) => e.kind === "feedback_recorded")
+    .sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0))
+    .at(-1);
+  return latest ? latest.needsRevision === false : false;
+}
 const RANK: Record<ResultStage, number> = { draft: 0, submitted: 1, approved: 2, delivered: 3 };
 const STAGE_OF: Record<string, ResultStage | "completed"> = {
   qc_submitted: "submitted",
