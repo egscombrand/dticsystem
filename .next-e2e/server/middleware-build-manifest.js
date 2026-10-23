@@ -7,9 +7,9 @@ globalThis.__BUILD_MANIFEST = {
     "static/chunks/0cz1d0mv5g_q7.js"
   ],
   "lowPriorityFiles": [
-    "static/2XrALzJOOkRGnfnnX_dzr/_buildManifest.js",
-    "static/2XrALzJOOkRGnfnnX_dzr/_ssgManifest.js",
-    "static/2XrALzJOOkRGnfnnX_dzr/_clientMiddlewareManifest.js"
+    "static/z7yt5yCP2zlwPNB97uAs2/_buildManifest.js",
+    "static/z7yt5yCP2zlwPNB97uAs2/_ssgManifest.js",
+    "static/z7yt5yCP2zlwPNB97uAs2/_clientMiddlewareManifest.js"
   ],
   "rootMainFiles": [
     "static/chunks/1x6obpmlu1_c2.js",
@@ -43,6 +43,28 @@ globalThis.__BUILD_MANIFEST = {
       ]
     },
     "/(public)/page": {
+      "otherChunks": [
+        "static/chunks/1x6obpmlu1_c2.js",
+        "static/chunks/0ssqr03lk-c8r.js",
+        "static/chunks/0p_w__bs2_j30.js",
+        "static/chunks/41knbbi1ie2-4.js"
+      ],
+      "runtimeModuleIds": [
+        94553
+      ]
+    },
+    "/(public)/bantuan/page": {
+      "otherChunks": [
+        "static/chunks/1x6obpmlu1_c2.js",
+        "static/chunks/0ssqr03lk-c8r.js",
+        "static/chunks/0p_w__bs2_j30.js",
+        "static/chunks/41knbbi1ie2-4.js"
+      ],
+      "runtimeModuleIds": [
+        94553
+      ]
+    },
+    "/(public)/bantuan/riwayat/page": {
       "otherChunks": [
         "static/chunks/1x6obpmlu1_c2.js",
         "static/chunks/0ssqr03lk-c8r.js",
@@ -175,6 +197,28 @@ globalThis.__BUILD_MANIFEST = {
       ]
     },
     "/dtic/(panel)/settings/audit/page": {
+      "otherChunks": [
+        "static/chunks/1x6obpmlu1_c2.js",
+        "static/chunks/0ssqr03lk-c8r.js",
+        "static/chunks/0p_w__bs2_j30.js",
+        "static/chunks/41knbbi1ie2-4.js"
+      ],
+      "runtimeModuleIds": [
+        94553
+      ]
+    },
+    "/dtic/(panel)/settings/feedback/page": {
+      "otherChunks": [
+        "static/chunks/1x6obpmlu1_c2.js",
+        "static/chunks/0ssqr03lk-c8r.js",
+        "static/chunks/0p_w__bs2_j30.js",
+        "static/chunks/41knbbi1ie2-4.js"
+      ],
+      "runtimeModuleIds": [
+        94553
+      ]
+    },
+    "/dtic/(panel)/settings/feedback/[id]/page": {
       "otherChunks": [
         "static/chunks/1x6obpmlu1_c2.js",
         "static/chunks/0ssqr03lk-c8r.js",

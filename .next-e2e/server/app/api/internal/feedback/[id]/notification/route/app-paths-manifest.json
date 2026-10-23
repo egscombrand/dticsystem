@@ -1,0 +1,3 @@
+{
+  "/api/internal/feedback/[id]/notification/route": "app/api/internal/feedback/[id]/notification/route.js"
+}

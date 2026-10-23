@@ -1,6 +1,7 @@
 import "server-only";
 import { reviveStaleFailedOutbox } from "@/lib/server/repositories/notifications";
 import { processDueOutbox } from "@/lib/server/services/telegram";
+import { processFeedbackNotifications } from "@/lib/server/services/feedback-notify";
 import { updateWorkerState } from "@/lib/server/services/telegram-worker-state";
 
 /**
@@ -39,6 +40,9 @@ export function startTelegramWorker(env: Record<string, string | undefined> = pr
         if (revived > 0) console.info(`[telegram-worker] ${revived} notifikasi gagal-permanen (galat sementara, > ${reviveCooldownMinutes} menit) dipulihkan untuk satu percobaan tambahan`);
       }
       const processed = await processDueOutbox(10);
+      // Antrean notifikasi tiket Bantuan & Masukan diproses DI TICK YANG SAMA — bukan worker terpisah
+      // (lihat processFeedbackNotifications: antrean & tujuan sendirinya murni terpisah dari order).
+      await processFeedbackNotifications(10).catch((error) => console.error("[telegram-worker] tiket feedback gagal", error instanceof Error ? error.name : "unknown"));
       updateWorkerState({ lastTickAt: new Date().toISOString(), lastProcessed: processed, lastError: null });
     } catch (error) {
       const name = error instanceof Error ? error.name : "unknown";

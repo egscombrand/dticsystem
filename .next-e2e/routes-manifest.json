@@ -87,6 +87,54 @@
       "namedRegex": "^/api/internal/brands/(?<nxtPid>[^/]+?)(?:/)?$"
     },
     {
+      "page": "/api/internal/feedback/attachments/[id]",
+      "regex": "^/api/internal/feedback/attachments/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/api/internal/feedback/attachments/(?<nxtPid>[^/]+?)(?:/)?$"
+    },
+    {
+      "page": "/api/internal/feedback/[id]/assignee",
+      "regex": "^/api/internal/feedback/([^/]+?)/assignee(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/api/internal/feedback/(?<nxtPid>[^/]+?)/assignee(?:/)?$"
+    },
+    {
+      "page": "/api/internal/feedback/[id]/note",
+      "regex": "^/api/internal/feedback/([^/]+?)/note(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/api/internal/feedback/(?<nxtPid>[^/]+?)/note(?:/)?$"
+    },
+    {
+      "page": "/api/internal/feedback/[id]/notification",
+      "regex": "^/api/internal/feedback/([^/]+?)/notification(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/api/internal/feedback/(?<nxtPid>[^/]+?)/notification(?:/)?$"
+    },
+    {
+      "page": "/api/internal/feedback/[id]/priority",
+      "regex": "^/api/internal/feedback/([^/]+?)/priority(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/api/internal/feedback/(?<nxtPid>[^/]+?)/priority(?:/)?$"
+    },
+    {
+      "page": "/api/internal/feedback/[id]/status",
+      "regex": "^/api/internal/feedback/([^/]+?)/status(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/api/internal/feedback/(?<nxtPid>[^/]+?)/status(?:/)?$"
+    },
+    {
       "page": "/api/internal/menu/[key]",
       "regex": "^/api/internal/menu/([^/]+?)(?:/)?$",
       "routeKeys": {
@@ -291,6 +339,14 @@
       "namedRegex": "^/api/internal/users/(?<nxtPid>[^/]+?)/password(?:/)?$"
     },
     {
+      "page": "/api/public/feedback/attachments/[id]",
+      "regex": "^/api/public/feedback/attachments/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/api/public/feedback/attachments/(?<nxtPid>[^/]+?)(?:/)?$"
+    },
+    {
       "page": "/api/public/tracking/files/[fileId]",
       "regex": "^/api/public/tracking/files/([^/]+?)(?:/)?$",
       "routeKeys": {
@@ -326,6 +382,23 @@
         {
           "destination": "/dtic/orders/[id]/edit.segments/dtic/!KHBhbmVsKQ/orders/$d$id/edit$segment",
           "source": "^/dtic/orders/(?<nxtPid>[^/]+?)/edit\\.segments/dtic/!KHBhbmVsKQ/orders/\\$d\\$id/edit(?<segment>/__PAGE__\\.segment\\.rsc|\\.segment\\.rsc)(?:/)?$",
+          "routeKeys": {
+            "nxtPid": "nxtPid"
+          }
+        }
+      ]
+    },
+    {
+      "page": "/dtic/settings/feedback/[id]",
+      "regex": "^/dtic/settings/feedback/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/dtic/settings/feedback/(?<nxtPid>[^/]+?)(?:/)?$",
+      "prefetchSegmentDataRoutes": [
+        {
+          "destination": "/dtic/settings/feedback/[id].segments/dtic/!KHBhbmVsKQ/settings/feedback/$d$id$segment",
+          "source": "^/dtic/settings/feedback/(?<nxtPid>[^/]+?)\\.segments/dtic/!KHBhbmVsKQ/settings/feedback/\\$d\\$id(?<segment>/__PAGE__\\.segment\\.rsc|\\.segment\\.rsc)(?:/)?$",
           "routeKeys": {
             "nxtPid": "nxtPid"
           }
@@ -392,6 +465,24 @@
       "regex": "^/api/internal/display/orders(?:/)?$",
       "routeKeys": {},
       "namedRegex": "^/api/internal/display/orders(?:/)?$"
+    },
+    {
+      "page": "/api/internal/feedback-telegram",
+      "regex": "^/api/internal/feedback\\-telegram(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/internal/feedback\\-telegram(?:/)?$"
+    },
+    {
+      "page": "/api/internal/feedback-telegram/test",
+      "regex": "^/api/internal/feedback\\-telegram/test(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/internal/feedback\\-telegram/test(?:/)?$"
+    },
+    {
+      "page": "/api/internal/feedback-telegram/verify",
+      "regex": "^/api/internal/feedback\\-telegram/verify(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/internal/feedback\\-telegram/verify(?:/)?$"
     },
     {
       "page": "/api/internal/integrations/drive/disable",
@@ -514,6 +605,24 @@
       "namedRegex": "^/api/public/display/orders(?:/)?$"
     },
     {
+      "page": "/api/public/feedback",
+      "regex": "^/api/public/feedback(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/public/feedback(?:/)?$"
+    },
+    {
+      "page": "/api/public/feedback/lookup",
+      "regex": "^/api/public/feedback/lookup(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/public/feedback/lookup(?:/)?$"
+    },
+    {
+      "page": "/api/public/feedback/reply",
+      "regex": "^/api/public/feedback/reply(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/public/feedback/reply(?:/)?$"
+    },
+    {
       "page": "/api/public/orders",
       "regex": "^/api/public/orders(?:/)?$",
       "routeKeys": {},
@@ -536,6 +645,18 @@
       "regex": "^/api/public/tracking/decision(?:/)?$",
       "routeKeys": {},
       "namedRegex": "^/api/public/tracking/decision(?:/)?$"
+    },
+    {
+      "page": "/bantuan",
+      "regex": "^/bantuan(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/bantuan(?:/)?$"
+    },
+    {
+      "page": "/bantuan/riwayat",
+      "regex": "^/bantuan/riwayat(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/bantuan/riwayat(?:/)?$"
     },
     {
       "page": "/dtic",
@@ -596,6 +717,12 @@
       "regex": "^/dtic/settings/audit(?:/)?$",
       "routeKeys": {},
       "namedRegex": "^/dtic/settings/audit(?:/)?$"
+    },
+    {
+      "page": "/dtic/settings/feedback",
+      "regex": "^/dtic/settings/feedback(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dtic/settings/feedback(?:/)?$"
     },
     {
       "page": "/dtic/settings/integrations",

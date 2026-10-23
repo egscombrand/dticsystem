@@ -6,7 +6,7 @@
       "routeType": "page",
       "response": "initial",
       "compute": "resuming",
-      "htmlSize": 8239,
+      "htmlSize": 9289,
       "experimentalPPR": true,
       "experimentalBypassFor": [
         {
@@ -100,6 +100,76 @@
       "srcRoute": "/_not-found",
       "dataRoute": "/_not-found.rsc",
       "prefetchDataRoute": "/_not-found.rsc",
+      "allowHeader": [
+        "host",
+        "x-matched-path",
+        "x-prerender-revalidate",
+        "x-prerender-revalidate-if-generated",
+        "x-next-revalidated-tags",
+        "x-next-revalidate-tag-token"
+      ]
+    },
+    "/bantuan": {
+      "renderingMode": "PARTIALLY_STATIC",
+      "routeType": "page",
+      "response": "initial",
+      "compute": "resuming",
+      "htmlSize": 4809,
+      "experimentalPPR": true,
+      "experimentalBypassFor": [
+        {
+          "type": "header",
+          "key": "next-action"
+        },
+        {
+          "type": "header",
+          "key": "content-type",
+          "value": "multipart/form-data;.*"
+        },
+        {
+          "type": "header",
+          "key": "user-agent",
+          "value": ".*(?:[\\w-]+-Google|Google-[\\w-]+|Chrome-Lighthouse|Slurp|DuckDuckBot|baiduspider|yandex|sogou|bitlybot|tumblr|vkShare|quora link preview|redditbot|ia_archiver|Bingbot|BingPreview|applebot|facebookexternalhit|facebookcatalog|Twitterbot|LinkedInBot|Slackbot|Discordbot|WhatsApp|SkypeUriPreview|Yeti|googleweblight).*"
+        }
+      ],
+      "initialRevalidateSeconds": false,
+      "srcRoute": "/bantuan",
+      "dataRoute": "/bantuan.rsc",
+      "allowHeader": [
+        "host",
+        "x-matched-path",
+        "x-prerender-revalidate",
+        "x-prerender-revalidate-if-generated",
+        "x-next-revalidated-tags",
+        "x-next-revalidate-tag-token"
+      ]
+    },
+    "/bantuan/riwayat": {
+      "renderingMode": "PARTIALLY_STATIC",
+      "routeType": "page",
+      "response": "initial",
+      "compute": "resuming",
+      "htmlSize": 4928,
+      "experimentalPPR": true,
+      "experimentalBypassFor": [
+        {
+          "type": "header",
+          "key": "next-action"
+        },
+        {
+          "type": "header",
+          "key": "content-type",
+          "value": "multipart/form-data;.*"
+        },
+        {
+          "type": "header",
+          "key": "user-agent",
+          "value": ".*(?:[\\w-]+-Google|Google-[\\w-]+|Chrome-Lighthouse|Slurp|DuckDuckBot|baiduspider|yandex|sogou|bitlybot|tumblr|vkShare|quora link preview|redditbot|ia_archiver|Bingbot|BingPreview|applebot|facebookexternalhit|facebookcatalog|Twitterbot|LinkedInBot|Slackbot|Discordbot|WhatsApp|SkypeUriPreview|Yeti|googleweblight).*"
+        }
+      ],
+      "initialRevalidateSeconds": false,
+      "srcRoute": "/bantuan/riwayat",
+      "dataRoute": "/bantuan/riwayat.rsc",
       "allowHeader": [
         "host",
         "x-matched-path",
@@ -523,6 +593,41 @@
       "initialRevalidateSeconds": false,
       "srcRoute": "/dtic/settings/[entity]",
       "dataRoute": "/dtic/settings/departments.rsc",
+      "allowHeader": [
+        "host",
+        "x-matched-path",
+        "x-prerender-revalidate",
+        "x-prerender-revalidate-if-generated",
+        "x-next-revalidated-tags",
+        "x-next-revalidate-tag-token"
+      ]
+    },
+    "/dtic/settings/feedback": {
+      "renderingMode": "PARTIALLY_STATIC",
+      "routeType": "page",
+      "response": "initial",
+      "compute": "resuming",
+      "htmlSize": 2075,
+      "experimentalPPR": true,
+      "experimentalBypassFor": [
+        {
+          "type": "header",
+          "key": "next-action"
+        },
+        {
+          "type": "header",
+          "key": "content-type",
+          "value": "multipart/form-data;.*"
+        },
+        {
+          "type": "header",
+          "key": "user-agent",
+          "value": ".*(?:[\\w-]+-Google|Google-[\\w-]+|Chrome-Lighthouse|Slurp|DuckDuckBot|baiduspider|yandex|sogou|bitlybot|tumblr|vkShare|quora link preview|redditbot|ia_archiver|Bingbot|BingPreview|applebot|facebookexternalhit|facebookcatalog|Twitterbot|LinkedInBot|Slackbot|Discordbot|WhatsApp|SkypeUriPreview|Yeti|googleweblight).*"
+        }
+      ],
+      "initialRevalidateSeconds": false,
+      "srcRoute": "/dtic/settings/feedback",
+      "dataRoute": "/dtic/settings/feedback.rsc",
       "allowHeader": [
         "host",
         "x-matched-path",
@@ -991,7 +1096,7 @@
       "routeType": "page",
       "response": "initial",
       "compute": "resuming",
-      "htmlSize": 3850,
+      "htmlSize": 4830,
       "experimentalPPR": true,
       "experimentalBypassFor": [
         {
@@ -1117,6 +1222,53 @@
         "x-next-revalidate-tag-token"
       ]
     },
+    "/dtic/settings/feedback/[id]": {
+      "experimentalPPR": true,
+      "throwOnEmptyStaticShell": true,
+      "renderingMode": "PARTIALLY_STATIC",
+      "routeType": "shell",
+      "response": "initial",
+      "compute": "resuming",
+      "htmlSize": 2208,
+      "experimentalBypassFor": [
+        {
+          "type": "header",
+          "key": "next-action"
+        },
+        {
+          "type": "header",
+          "key": "content-type",
+          "value": "multipart/form-data;.*"
+        },
+        {
+          "type": "header",
+          "key": "user-agent",
+          "value": ".*(?:[\\w-]+-Google|Google-[\\w-]+|Chrome-Lighthouse|Slurp|DuckDuckBot|baiduspider|yandex|sogou|bitlybot|tumblr|vkShare|quora link preview|redditbot|ia_archiver|Bingbot|BingPreview|applebot|facebookexternalhit|facebookcatalog|Twitterbot|LinkedInBot|Slackbot|Discordbot|WhatsApp|SkypeUriPreview|Yeti|googleweblight).*"
+        }
+      ],
+      "routeRegex": "^/dtic/settings/feedback/([^/]+?)(?:/)?$",
+      "dataRoute": "/dtic/settings/feedback/[id].rsc",
+      "fallback": "/dtic/settings/feedback/[id]",
+      "fallbackRevalidate": false,
+      "fallbackRootParams": [],
+      "fallbackSourceRoute": "/dtic/settings/feedback/[id]",
+      "fallbackRouteParams": [
+        {
+          "paramName": "id",
+          "paramType": "dynamic"
+        }
+      ],
+      "dataRouteRegex": "^/dtic/settings/feedback/([^/]+?)\\.rsc$",
+      "prefetchDataRoute": null,
+      "allowHeader": [
+        "host",
+        "x-matched-path",
+        "x-prerender-revalidate",
+        "x-prerender-revalidate-if-generated",
+        "x-next-revalidated-tags",
+        "x-next-revalidate-tag-token"
+      ]
+    },
     "/dtic/settings/[entity]": {
       "experimentalPPR": true,
       "remainingPrerenderableParams": [
@@ -1173,8 +1325,8 @@
   },
   "notFoundRoutes": [],
   "preview": {
-    "previewModeId": "ed981ec9ff80351707476fa9958181f7",
-    "previewModeSigningKey": "de870c16ac0e19b10da152a25e8fe7ba5970f70b019a364650cfd8bd397cad09",
-    "previewModeEncryptionKey": "3e2ef7408299cabad3f61b4128ce5374755a9a87eb7c535df576d247de44d33d"
+    "previewModeId": "63ced455186cf1c04c2f88a20f3df344",
+    "previewModeSigningKey": "776a570c43d06ef71ba90b6f26f9405f329c7ca5436fe104a5d302879c8cfe07",
+    "previewModeEncryptionKey": "034bdd01036f1e765ea101a5e65361c553b672fd7145e9e8c071615bc239e78f"
   }
 }

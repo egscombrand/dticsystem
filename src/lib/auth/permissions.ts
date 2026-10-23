@@ -49,6 +49,8 @@ export const CAPABILITIES = {
    *  Ini masalah teknis infrastruktur, bukan kewenangan operasional PIC/Manager — PIC/Manager/Pemohon tetap
    *  bisa mengerjakan, mengajukan QC, menyetujui, dsb. tanpa pernah melihat tombol/diagnostik ini. */
   "drive.diagnose": ["super_admin"],
+  /** Mengelola tiket Bantuan & Masukan (lihat dashboard, ubah status/prioritas/penanggung jawab, balas pelapor). */
+  "feedback.manage": ["super_admin"],
 } as const satisfies Record<string, readonly Role[]>;
 
 export type Capability = keyof typeof CAPABILITIES;

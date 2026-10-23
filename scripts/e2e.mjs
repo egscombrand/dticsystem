@@ -65,6 +65,7 @@ const tg = {
     "@grupuji": { id: -1001234567777, type: "supergroup", username: "grupuji", title: "Grup Publik Uji" },
     "-1234567444": { id: -1234567444, type: "group", title: "Grup Biasa Uji" },
     "-1001234567333": { id: -1001234567333, type: "supergroup", is_forum: true, title: "Grup Forum Uji" },
+    "-1001234567900": { id: -1001234567900, type: "supergroup", title: "Grup Tim IT Uji" },
   },
   members: { "-1001234566666": "left" },
   lookup: {}, // mode galat per metode baca: drop | 429 | html | 500 | 401 (diatur tes)
@@ -3787,8 +3788,8 @@ try {
 
     // Permintaan bersamaan pada pengajuan #2 yang baru — hanya satu yang boleh berhasil.
     const concurrent = await Promise.all([
-      publicDecide(orderNumber, deliveryId2, "approved", undefined, "concurrent-key-1"),
-      publicDecide(orderNumber, deliveryId2, "approved", undefined, "concurrent-key-2"),
+      publicDecide(orderNumber, deliveryId2, "approved", undefined, randomUUID()),
+      publicDecide(orderNumber, deliveryId2, "approved", undefined, randomUUID()),
     ]);
     const statuses = concurrent.map((x) => x.status).sort();
     assert.deepEqual(statuses, [200, 409], "tepat satu keputusan bersamaan yang berhasil, lainnya ditolak");
@@ -5709,6 +5710,372 @@ try {
     assert.ok(!after.includes(order1.id), "folder berkas terhapus");
     assert.match((await page(`/dtic/orders/${order1.id}`)).html, /Pekerjaan tidak ditemukan/);
     assert.equal((await internal(`/api/internal/orders/${order1.id}`, "DELETE")).status, 404);
+  });
+
+  console.log("\nBantuan & Masukan (tiket publik)");
+  function feedbackForm(overrides = {}, files = []) {
+    const fd = new FormData();
+    const fields = {
+      kind: "bug",
+      title: "Judul Uji Laporan Bug",
+      relatedPage: "history",
+      detail: "Saat saya menekan tombol tertentu, aplikasi tidak merespons sama sekali padahal koneksi internet normal.",
+      impact: "normal",
+      reporterName: "Pemohon Uji",
+      reporterContact: "081200000000",
+      ...overrides,
+    };
+    for (const [k, v] of Object.entries(fields)) if (v !== undefined && v !== null) fd.set(k, v);
+    for (const f of files) fd.append("attachments", new Blob([f.data], { type: f.type ?? "application/octet-stream" }), f.name);
+    return fd;
+  }
+  const submitFeedback = (fd, headers = {}) =>
+    fetch(`${BASE}/api/public/feedback`, { method: "POST", body: fd, headers: { "X-DTIC-Request": "1", "x-forwarded-for": freshIp(), ...headers } });
+  const lookupFeedback = (ticketNumber) =>
+    fetch(`${BASE}/api/public/feedback/lookup`, { method: "POST", headers: { "Content-Type": "application/json", "x-forwarded-for": freshIp() }, body: JSON.stringify({ ticketNumber }) });
+  const replyFeedback = (ticketNumber, message) =>
+    fetch(`${BASE}/api/public/feedback/reply`, { method: "POST", headers: { "Content-Type": "application/json", "x-forwarded-for": freshIp() }, body: JSON.stringify({ ticketNumber, message }) });
+  const feedbackRow = async (ticketNumber) => (await db`select id, status, priority, assignee_user_id, close_reason, resolution_summary, reporter_user_id from feedback_tickets where ticket_number = ${ticketNumber}`)[0];
+  const feedbackEvents = (ticketId) => db`select kind, visible_to_reporter, message, actor_name from feedback_ticket_events where ticket_id = ${ticketId} order by created_at`;
+
+  await test("Pemohon melaporkan Bug/Kendala → tiket tersimpan, nomor tiket FB-YYYY-NNNNN, status awal 'Baru'", async () => {
+    const r = await submitFeedback(feedbackForm({ title: "Tombol Setujui Hasil tidak berfungsi" }));
+    assert.equal(r.status, 201, await r.clone().text());
+    const { ticketNumber } = await r.json();
+    assert.match(ticketNumber, /^FB-\d{4}-\d{5,}$/);
+    const row = await feedbackRow(ticketNumber);
+    assert.equal(row.status, "new");
+    assert.equal(row.reporter_user_id, null, "pelapor tamu tidak terhubung ke akun manapun");
+  });
+
+  await test("Saran perbaikan & permintaan fitur tidak memerlukan tingkat dampak", async () => {
+    const r1 = await submitFeedback(feedbackForm({ kind: "suggestion", title: "Usulan perbaikan tampilan Riwayat Request", impact: undefined }));
+    assert.equal(r1.status, 201, await r1.clone().text());
+    const r2 = await submitFeedback(feedbackForm({ kind: "feature_request", title: "Permintaan fitur ekspor PDF", impact: undefined }));
+    assert.equal(r2.status, 201, await r2.clone().text());
+  });
+
+  await test("Bug/Kendala wajib tingkat dampak; judul/detail kosong ditolak (422)", async () => {
+    const r1 = await submitFeedback(feedbackForm({ kind: "bug", impact: undefined }));
+    assert.equal(r1.status, 422, "bug tanpa dampak ditolak");
+    const r2 = await submitFeedback(feedbackForm({ title: "" }));
+    assert.equal(r2.status, 422, "judul kosong ditolak");
+    const r3 = await submitFeedback(feedbackForm({ detail: "pendek" }));
+    assert.equal(r3.status, 422, "detail terlalu pendek ditolak");
+  });
+
+  await test("Nomor request terkait divalidasi: harus benar-benar ada sebelum tautan disimpan", async () => {
+    const r = await submitFeedback(feedbackForm({ relatedOrderNumber: "DTIC-2099-99999" }));
+    assert.equal(r.status, 422, await r.clone().text());
+    const { id: realOrderId } = await qcOrder("Judul Uji Request Terkait Tiket");
+    const [{ order_number: realOrderNumber }] = await db`select order_number from orders where id = ${realOrderId}`;
+    const r2 = await submitFeedback(feedbackForm({ relatedOrderNumber: realOrderNumber }));
+    assert.equal(r2.status, 201, await r2.clone().text());
+    const row = await feedbackRow((await r2.json()).ticketNumber);
+    assert.equal((await db`select related_order_id from feedback_tickets where id = ${row.id}`)[0].related_order_id, realOrderId);
+  });
+
+  await test("Pengajuan bersamaan → nomor tiket tetap unik (aman terhadap pengajuan bersamaan, pola identik nomor order)", async () => {
+    const results = await Promise.all(Array.from({ length: 6 }, () => submitFeedback(feedbackForm({ title: "Judul Uji Tiket Bersamaan" }))));
+    assert.ok(results.every((r) => r.status === 201), "seluruh pengajuan bersamaan berhasil");
+    const numbers = await Promise.all(results.map(async (r) => (await r.json()).ticketNumber));
+    assert.equal(new Set(numbers).size, numbers.length, "tidak ada nomor tiket yang bentrok");
+  });
+
+  await test("Lampiran: valid tersimpan & bisa diunduh pelapor sendiri; lampiran tiket LAIN tidak bisa diakses walau ID diketahui", async () => {
+    const r = await submitFeedback(feedbackForm({ kind: "question", title: "Uji lampiran tiket" }, [{ name: "bukti.png", data: PNG_BYTES, type: "image/png" }]));
+    assert.equal(r.status, 201, await r.clone().text());
+    const { ticketNumber } = await r.json();
+    const look = await (await lookupFeedback(ticketNumber)).json();
+    assert.equal(look.attachments.length, 1);
+    const fileId = look.attachments[0].id;
+    assert.equal((await fetch(`${BASE}/api/public/feedback/attachments/${fileId}?ticket=${ticketNumber}`)).status, 200, "pelapor sendiri dapat mengunduh");
+
+    const other = await submitFeedback(feedbackForm({ title: "Tiket lain, bukan pemilik lampiran" }));
+    const { ticketNumber: otherTicket } = await other.json();
+    assert.equal((await fetch(`${BASE}/api/public/feedback/attachments/${fileId}?ticket=${otherTicket}`)).status, 404, "nomor tiket lain tidak bisa membuka lampiran tiket ini");
+    assert.equal((await fetch(`${BASE}/api/public/feedback/attachments/${fileId}?ticket=FB-2099-00001`)).status, 404, "nomor tiket acak tidak bisa membuka lampiran");
+  });
+
+  await test("Lampiran: jenis file tidak didukung & ukuran berlebih ditolak", async () => {
+    const bad = await submitFeedback(feedbackForm({ title: "Uji lampiran tidak valid" }, [{ name: "virus.exe", data: Buffer.from("MZ"), type: "application/octet-stream" }]));
+    assert.equal(bad.status, 422);
+    const big = await submitFeedback(feedbackForm({ title: "Uji lampiran kebesaran" }, [{ name: "besar.png", data: Buffer.concat([PNG_BYTES, Buffer.alloc(11 * 1024 * 1024)]), type: "image/png" }]));
+    assert.equal(big.status, 422);
+  });
+
+  await test("Pengguna internal yang login: identitas pelapor diambil dari SESI, bukan field formulir (tidak bisa dipalsukan)", async () => {
+    const STAFFC = await qcStaff();
+    const fd = feedbackForm({ title: "Laporan dari staf internal", reporterName: "Nama Palsu Dari Form" });
+    const r = await submitFeedback(fd, { Cookie: STAFFC, Origin: BASE });
+    assert.equal(r.status, 201, await r.clone().text());
+    const row = await feedbackRow((await r.json()).ticketNumber);
+    assert.ok(row.reporter_user_id, "terhubung ke akun staf yang login");
+    const [u] = await db`select full_name from app_users where id = ${row.reporter_user_id}`;
+    assert.notEqual(u.full_name, "Nama Palsu Dari Form", "nama dari field formulir TIDAK dipakai — identitas dari sesi");
+  });
+
+  await test("Endpoint admin Bantuan & Masukan: hanya Super Admin (feedback.manage) — Manager/Staff/anonim ditolak backend", async () => {
+    const r = await submitFeedback(feedbackForm({ title: "Judul Uji Otorisasi Admin" }));
+    const { id } = await feedbackRow((await r.json()).ticketNumber);
+    const STAFFC = await qcStaff();
+    assert.equal((await internal(`/api/internal/feedback/${id}/status`, "POST", { status: "reviewed" }, {}, MGR)).status, 403, "Manager ditolak");
+    assert.equal((await internal(`/api/internal/feedback/${id}/status`, "POST", { status: "reviewed" }, {}, STAFFC)).status, 403, "Staff ditolak");
+    assert.equal((await internal(`/api/internal/feedback/${id}/status`, "POST", { status: "reviewed" })).status, 200, "Super Admin diizinkan");
+    assert.equal(await redirectsToLogin(await pageRaw("/dtic/settings/feedback")), true, "dashboard tanpa sesi → login");
+    const staffPage = await pageRaw("/dtic/settings/feedback", STAFFC);
+    assert.ok(await redirectsToUnauthorized(staffPage), "Staff dialihkan ke tidak berizin, bukan hanya tombol disembunyikan");
+  });
+
+  await test("Super Admin: cari, filter, ubah status/prioritas/penanggung jawab — seluruhnya tercatat di audit trail", async () => {
+    const r = await submitFeedback(feedbackForm({ kind: "feature_request", title: "Fitur unik untuk diuji pencarian", impact: undefined }));
+    const { ticketNumber } = await r.json();
+    const { id } = await feedbackRow(ticketNumber);
+
+    const html = await (await pageRaw(`/dtic/settings/feedback?q=${ticketNumber}`, ADMIN)).text();
+    assert.match(html, new RegExp(ticketNumber), "pencarian berdasarkan nomor tiket menemukan tiket ini");
+
+    assert.equal((await internal(`/api/internal/feedback/${id}/priority`, "POST", { priority: "high" })).status, 200);
+    const assignee = await db`select id from app_users where role = 'manager' and is_active limit 1`;
+    assert.equal((await internal(`/api/internal/feedback/${id}/assignee`, "POST", { assigneeUserId: assignee[0].id })).status, 200);
+    assert.equal((await internal(`/api/internal/feedback/${id}/note`, "POST", { message: "Catatan internal: sudah dikonfirmasi ke tim dev." })).status, 200);
+    assert.equal((await internal(`/api/internal/feedback/${id}/status`, "POST", { status: "in_progress" })).status, 200);
+
+    const row = await feedbackRow(ticketNumber);
+    assert.equal(row.priority, "high");
+    assert.equal(row.assignee_user_id, assignee[0].id);
+    assert.equal(row.status, "in_progress");
+
+    const events = await feedbackEvents(id);
+    assert.ok(events.some((e) => e.kind === "priority_changed" && !e.visible_to_reporter));
+    assert.ok(events.some((e) => e.kind === "assignee_changed" && !e.visible_to_reporter));
+    assert.ok(events.some((e) => e.kind === "note_added" && !e.visible_to_reporter && /sudah dikonfirmasi/.test(e.message)));
+    assert.ok(events.some((e) => e.kind === "status_changed" && e.visible_to_reporter));
+    assert.ok(events.every((e) => e.actor_name), "setiap tindakan mencatat pelaku");
+  });
+
+  await test("Status 'Tidak Ditindaklanjuti' wajib alasan; 'Selesai' bisa diberi ringkasan penyelesaian", async () => {
+    const r1 = await submitFeedback(feedbackForm({ title: "Judul Uji Tidak Ditindaklanjuti" }));
+    const t1 = (await r1.json()).ticketNumber;
+    const id1 = (await feedbackRow(t1)).id;
+    assert.equal((await internal(`/api/internal/feedback/${id1}/status`, "POST", { status: "wont_fix" })).status, 422, "alasan wajib");
+    assert.equal((await internal(`/api/internal/feedback/${id1}/status`, "POST", { status: "wont_fix", closeReason: "Duplikat dari FB-2026-00001" })).status, 200);
+    assert.equal((await feedbackRow(t1)).close_reason, "Duplikat dari FB-2026-00001");
+
+    const r2 = await submitFeedback(feedbackForm({ title: "Judul Uji Selesai" }));
+    const t2 = (await r2.json()).ticketNumber;
+    const id2 = (await feedbackRow(t2)).id;
+    assert.equal((await internal(`/api/internal/feedback/${id2}/status`, "POST", { status: "done", resolutionSummary: "Sudah diperbaiki pada rilis berikutnya." })).status, 200);
+    assert.equal((await feedbackRow(t2)).resolution_summary, "Sudah diperbaiki pada rilis berikutnya.");
+  });
+
+  await test("'Menunggu Informasi': pertanyaan wajib diisi, pelapor dapat menjawab lewat pencarian tiket publik, catatan internal TIDAK pernah terlihat pelapor", async () => {
+    const r = await submitFeedback(feedbackForm({ title: "Judul Uji Menunggu Informasi" }));
+    const ticketNumber = (await r.json()).ticketNumber;
+    const { id } = await feedbackRow(ticketNumber);
+
+    assert.equal((await internal(`/api/internal/feedback/${id}/status`, "POST", { status: "need_info" })).status, 422, "pertanyaan wajib diisi");
+    const ask = await internal(`/api/internal/feedback/${id}/status`, "POST", { status: "need_info", message: "Bisa lampirkan screenshot pesan errornya?" });
+    assert.equal(ask.status, 200, await ask.clone().text());
+    assert.equal((await internal(`/api/internal/feedback/${id}/note`, "POST", { message: "Catatan internal: sepertinya terkait rilis minggu lalu." })).status, 200);
+
+    const beforeReply = await lookupFeedback(ticketNumber).then((r) => r.json());
+    assert.equal(beforeReply.awaitingReply, true);
+    assert.ok(beforeReply.updates.some((u) => u.kind === "info_requested" && /screenshot/.test(u.message ?? "")), "pertanyaan terlihat pelapor");
+    assert.ok(!beforeReply.updates.some((u) => /rilis minggu lalu/.test(u.message ?? "")), "catatan internal TIDAK PERNAH terlihat pelapor");
+
+    assert.equal((await replyFeedback(ticketNumber, "")).status, 422, "jawaban kosong ditolak");
+    const replied = await replyFeedback(ticketNumber, "Berikut screenshot pesan errornya: [terlampir]");
+    assert.equal(replied.status, 200, await replied.clone().text());
+    const afterReply = await replied.json();
+    assert.equal(afterReply.awaitingReply, false, "status kembali berubah setelah pelapor menjawab");
+    assert.ok(afterReply.updates.some((u) => u.kind === "info_provided"));
+
+    // Pelapor hanya bisa melihat tiketnya via nomor tiket — lacak tiket LAIN tetap tidak bocor status/catatan tiket ini.
+    const r2 = await submitFeedback(feedbackForm({ title: "Tiket lain, tidak berkaitan" }));
+    const other = await (await lookupFeedback((await r2.json()).ticketNumber)).json();
+    assert.notEqual(other.ticketNumber, ticketNumber);
+  });
+
+  await test("Pengajuan request, QC, revisi, persetujuan, dan penyelesaian pekerjaan tetap berfungsi normal setelah fitur Bantuan & Masukan ditambahkan", async () => {
+    const { id } = await qcOrder("Judul Uji Regresi Setelah Fitur Feedback");
+    const STAFFC = await qcStaff();
+    const MGRC = await qcManager();
+    await setStatusAs(id, "in_progress", STAFFC);
+    const up = await uploadResult(id, { name: "regresi.png", data: PNG_BYTES }, STAFFC);
+    const fileId = (await up.json()).file.id;
+    assert.equal((await workflow(id, { action: "submit_qc", method: "in_app", resultFileIds: [fileId], note: "Mohon diperiksa" }, STAFFC)).status, 200);
+    assert.equal((await workflow(id, { action: "approve_qc" }, MGRC)).status, 200);
+    assert.equal((await workflow(id, { action: "record_delivery", confirmSent: true }, STAFFC)).status, 200);
+    assert.equal((await workflow(id, { action: "record_feedback", needsRevision: false, note: "Pemohon setuju" }, STAFFC)).status, 200);
+    assert.equal((await workflow(id, { action: "complete" }, STAFFC)).status, 200);
+    assert.equal((await qcRow(id)).status, "completed");
+  });
+
+  console.log("\nNotifikasi Telegram — tiket Bantuan & Masukan (Tim IT)");
+  const FBTG = "/api/internal/feedback-telegram";
+  const verifyFbtg = (link, replace = false, cookie = ADMIN) => internal(`${FBTG}/verify`, "POST", { link, replace }, {}, cookie);
+  const feedbackNotif = (ticketId) => db`select status, attempts, last_error, sent_at from feedback_notifications where ticket_id = ${ticketId}`.then((r) => r[0]);
+  const tick = () => internal("/api/internal/telegram/worker/tick", "POST");
+  // Tiket dari bagian "Bantuan & Masukan (tiket publik)" di atas menumpuk di antrean (belum pernah di-tick,
+  // tanpa grup terhubung saat itu). Kosongkan dulu supaya tick() pada tes berikut memproses tiket tes ITU
+  // SENDIRI, bukan tiket lama yang lebih dulu masuk antrean (limit 10 per tick, urut created_at).
+  // Antrean memproses ulang baris 'failed' (attempts < 8) di tick yang sama dengan baris 'pending' baru,
+  // diurutkan created_at — tanpa grup terhubung, backlog LAMA (tertua) terus menang slot (limit 10/tick)
+  // sampai delapan percobaannya habis, sebelum baris yang lebih baru mendapat giliran. Kosongkan sampai
+  // benar-benar tidak ada sisa yang masih bisa diklaim, bukan sekadar sampai satu tick tidak memproses apa pun.
+  for (let i = 0; i < 20; i++) {
+    await tick();
+    const [{ n }] = await db`select count(*)::int as n from feedback_notifications where status in ('pending', 'processing') or (status = 'failed' and attempts < 8)`;
+    if (n === 0) break;
+  }
+
+  await test("tiket baru tanpa grup Tim IT terhubung → baris notifikasi 'failed' dengan pesan jelas; tiket TETAP tersimpan", async () => {
+    const r = await submitFeedback(feedbackForm({ title: "Uji notifikasi tanpa grup terhubung" }));
+    assert.equal(r.status, 201, "tiket tersimpan walau grup belum terhubung");
+    const { id } = await feedbackRow((await r.json()).ticketNumber);
+    await tick();
+    const n = await feedbackNotif(id);
+    assert.equal(n.status, "failed");
+    assert.match(n.last_error, /belum aktif\/terverifikasi/);
+  });
+
+  await test("verifikasi grup Tim IT: link valid → terverifikasi; Manager (bukan Super Admin) ditolak 403", async () => {
+    const asManager = await verifyFbtg("https://t.me/c/1234567900/1", false, await qcManager());
+    assert.equal(asManager.status, 403, "Manager tidak punya izin feedback.manage");
+
+    const r = await verifyFbtg("https://t.me/c/1234567900/1");
+    const body = await r.json();
+    assert.equal(r.status, 200, JSON.stringify(body));
+    assert.equal(body.status, "verified");
+    const row = (await db`select verification_status, is_active, chat_title from feedback_telegram_channel`)[0];
+    assert.equal(row.verification_status, "verified");
+    assert.equal(row.is_active, false, "belum aktif sampai diaktifkan eksplisit");
+  });
+
+  await test("aktifkan integrasi (Super Admin) → notifikasi tiket baru terkirim ke grup Tim IT, bukan grup order", async () => {
+    const put = await internal(FBTG, "PUT", { isActive: true });
+    assert.equal(put.status, 200);
+    const forbidden = await internal(FBTG, "PUT", { isActive: true }, {}, await qcManager());
+    assert.equal(forbidden.status, 403);
+
+    const before = tg.calls.length;
+    const r = await submitFeedback(feedbackForm({ kind: "bug", title: "Tombol Unduh tidak merespons", impact: "high" }));
+    const ticketNumber = (await r.json()).ticketNumber;
+    const { id } = await feedbackRow(ticketNumber);
+    // Mengaktifkan integrasi juga membuat tiket GAGAL sebelumnya (tes di atas, masih punya sisa percobaan)
+    // otomatis dicoba ulang di tick yang sama — pesan tiket ITU mungkin bukan panggilan TERAKHIR ke mock
+    // Telegram, jadi dicari berdasarkan isi pesan, bukan diasumsikan sebagai elemen terakhir array.
+    await tick();
+    const n = await feedbackNotif(id);
+    assert.equal(n.status, "sent");
+    assert.ok(n.sent_at);
+    assert.ok(tg.calls.length > before, "pesan terkirim ke mock Telegram");
+    const sentCall = tg.calls.find((c) => c.body.text.includes(ticketNumber));
+    assert.ok(sentCall, `ada panggilan Telegram yang memuat ${ticketNumber}`);
+    assert.equal(sentCall.body.chat_id, "-1001234567900", "dikirim ke grup Tim IT, bukan grup order");
+    assert.match(sentCall.body.text, /TIKET BARU — DTIC NEXUS/);
+    assert.match(sentCall.body.text, /Tombol Unduh tidak merespons/);
+  });
+
+  await test("tick ulang pada tiket yang sudah 'sent' tidak mengirim pesan kedua (satu baris per tiket, bukan duplikat)", async () => {
+    const r = await submitFeedback(feedbackForm({ title: "Uji anti-duplikat notifikasi" }));
+    const { id } = await feedbackRow((await r.json()).ticketNumber);
+    await tick();
+    assert.equal((await feedbackNotif(id)).status, "sent");
+    const callsAfterFirst = tg.calls.length;
+    await tick();
+    await tick();
+    assert.equal(tg.calls.length, callsAfterFirst, "tidak ada pesan tambahan untuk tiket yang sama");
+  });
+
+  await test("Telegram gagal (500) → tiket tetap tersimpan; status notifikasi 'failed' terlihat Super Admin; tombol 'Kirim ke Telegram' kirim ulang SEKARANG (bukan menunggu tick)", async () => {
+    const r = await submitFeedback(feedbackForm({ title: "Uji kirim ulang setelah gagal" }));
+    const ticketNumber = (await r.json()).ticketNumber;
+    const { id } = await feedbackRow(ticketNumber);
+    tg.queue.push("500");
+    await tick();
+    assert.equal((await feedbackNotif(id)).status, "failed");
+
+    const statusForbidden = await internal(`/api/internal/feedback/${id}/notification`, "GET", undefined, {}, await qcManager());
+    assert.equal(statusForbidden.status, 403, "Manager tidak boleh melihat status notifikasi Telegram");
+    const statusOk = await internal(`/api/internal/feedback/${id}/notification`, "GET");
+    const statusBody = await statusOk.json();
+    assert.equal(statusBody.status.status, "failed");
+    assert.equal(statusBody.attempts[0].kind, "auto");
+    assert.equal(statusBody.attempts[0].status, "failed");
+
+    const retryForbidden = await internal(`/api/internal/feedback/${id}/notification`, "POST", {}, {}, await qcManager());
+    assert.equal(retryForbidden.status, 403);
+    const callsBefore = tg.calls.length;
+    const retry = await internal(`/api/internal/feedback/${id}/notification`, "POST", {});
+    const retryBody = await retry.json();
+    assert.equal(retry.status, 200, JSON.stringify(retryBody));
+    assert.equal(retryBody.ok, true);
+    assert.match(retryBody.message, /berhasil dikirim/);
+    assert.ok(tg.calls.length > callsBefore, "dikirim SEKARANG, bukan menunggu tick berikutnya");
+    assert.equal((await feedbackNotif(id)).status, "sent", "status antrean ikut terupdate oleh pengiriman manual");
+
+    const afterBody = await (await internal(`/api/internal/feedback/${id}/notification`, "GET")).json();
+    assert.equal(afterBody.attempts[0].kind, "manual", "percobaan terbaru tercatat sebagai manual, bukan menimpa riwayat otomatis sebelumnya");
+    assert.equal(afterBody.attempts[0].status, "sent");
+    assert.equal(afterBody.attempts[0].actorName, "Admin Uji");
+    assert.equal(afterBody.attempts.length, 2, "riwayat otomatis (gagal) & manual (berhasil) KEDUANYA tersimpan, tidak ada yang hilang");
+  });
+
+  await test("tiket LAMA tanpa baris antrean sama sekali (dibuat sebelum fitur ini ada) → tombol 'Kirim ke Telegram' tetap berfungsi, baris dibuat saat itu juga", async () => {
+    const { id, ticketNumber } = await (async () => {
+      const r = await submitFeedback(feedbackForm({ title: "Uji tiket tanpa baris notifikasi" }));
+      const tn = (await r.json()).ticketNumber;
+      const row = await feedbackRow(tn);
+      return { id: row.id, ticketNumber: tn };
+    })();
+    // Simulasikan tiket lama: hapus baris antreannya sepenuhnya (seperti tiket dari sebelum fitur Telegram ada).
+    await db`delete from feedback_notifications where ticket_id = ${id}`;
+    assert.equal(await feedbackNotif(id), undefined, "tidak ada baris antrean sama sekali");
+
+    const send = await internal(`/api/internal/feedback/${id}/notification`, "POST", {});
+    const body = await send.json();
+    assert.equal(send.status, 200, JSON.stringify(body));
+    assert.equal(body.ok, true);
+    const n = await feedbackNotif(id);
+    assert.equal(n.status, "sent", "baris antrean dibuat otomatis saat pengiriman manual, bukan error 404");
+    void ticketNumber;
+  });
+
+  await test("nonaktifkan integrasi → tiket baru TIDAK dikirim ke Telegram (ditandai gagal dengan pesan jelas), tiket tetap tersimpan", async () => {
+    await internal(FBTG, "PUT", { isActive: false });
+    const before = tg.calls.length;
+    const r = await submitFeedback(feedbackForm({ title: "Uji saat integrasi nonaktif" }));
+    const { id } = await feedbackRow((await r.json()).ticketNumber);
+    await tick();
+    assert.equal((await feedbackNotif(id)).status, "failed");
+    assert.equal(tg.calls.length, before, "tidak ada panggilan ke Telegram saat integrasi nonaktif");
+    await internal(FBTG, "PUT", { isActive: true }); // kembalikan untuk tes berikutnya
+  });
+
+  await test("Kirim Pesan Uji grup Tim IT: berhasil tercatat; tidak membuat tiket atau antrean notifikasi", async () => {
+    const forbidden = await internal(`${FBTG}/test`, "POST", undefined, {}, await qcManager());
+    assert.equal(forbidden.status, 403);
+    const before = tg.calls.length;
+    const r = await internal(`${FBTG}/test`, "POST");
+    assert.equal(r.status, 200);
+    assert.ok(tg.calls.length > before);
+    const channel = (await db`select last_test_result from feedback_telegram_channel`)[0];
+    assert.equal(channel.last_test_result, "ok");
+  });
+
+  await test("putuskan grup Tim IT: Manager ditolak 403; Super Admin berhasil, riwayat tiket tidak terpengaruh", async () => {
+    const forbidden = await internal(FBTG, "DELETE", undefined, {}, await qcManager());
+    assert.equal(forbidden.status, 403);
+    const existingTicket = await feedbackRow((await (await submitFeedback(feedbackForm({ title: "Uji sebelum putus grup" }))).json()).ticketNumber);
+    const del = await internal(FBTG, "DELETE");
+    assert.equal(del.status, 200);
+    assert.equal((await db`select count(*)::int as n from feedback_telegram_channel`)[0].n, 0);
+    assert.ok(existingTicket.id, "tiket yang dibuat sebelum grup diputus tetap tersimpan");
+    // Hubungkan & aktifkan kembali agar tidak mempengaruhi asumsi tes lain yang berjalan setelah ini.
+    await verifyFbtg("https://t.me/c/1234567900/1");
+    await internal(FBTG, "PUT", { isActive: true });
   });
 
   console.log("\nKegagalan database");

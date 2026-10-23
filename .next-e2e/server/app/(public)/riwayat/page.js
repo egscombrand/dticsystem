@@ -1,6 +1,6 @@
 var R=require("../../../chunks/ssr/[turbopack]_runtime.js")("server/app/(public)/riwayat/page.js")
 R.c("server/chunks/ssr/node_modules_next_dist_esm_build_templates_app-page_1rnt3__yzug9r.js")
-R.c("server/chunks/ssr/[root-of-the-server]__11rd50a4anl0e._.js")
+R.c("server/chunks/ssr/[root-of-the-server]__0flmznkcyq_3_._.js")
 R.c("server/chunks/ssr/node_modules_next_dist_0janj0i6dqko7._.js")
 R.c("server/chunks/ssr/node_modules_next_dist_compiled_@edge-runtime_cookies_index_1kiz_an963mbg.js")
 R.c("server/chunks/ssr/node_modules_next_0ku34k-r1lkdw._.js")

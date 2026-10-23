@@ -9,7 +9,7 @@ import { SESSION_COOKIE } from "@/lib/auth/permissions";
  *  - Lainnya: wajib cookie sesi. Validasi sesi SEBENARNYA dilakukan di server
  *    (PanelShell & authorize()), jadi cookie palsu tetap ditolak di sana.
  */
-const PUBLIC_PAGES = new Set(["/", "/ajukan", "/riwayat", "/dtic/login", "/dtic/unauthorized", "/dtic/display"]);
+const PUBLIC_PAGES = new Set(["/", "/ajukan", "/riwayat", "/bantuan", "/bantuan/riwayat", "/dtic/login", "/dtic/unauthorized", "/dtic/display"]);
 const PUBLIC_API_PREFIXES = ["/api/public/", "/api/dtic/auth/"];
 
 export function proxy(request: NextRequest) {

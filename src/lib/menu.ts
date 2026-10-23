@@ -73,6 +73,7 @@ export const DEFAULT_MENU: MenuRow[] = [
   { key: "integrations", parentKey: "settings", label: "Integrasi Telegram", href: "/dtic/settings/integrations", icon: "layers", requiredCapability: "site.manage", allowedRoles: ["super_admin"], isVisible: true, isCore: true, sortOrder: 74 },
   { key: "google_drive", parentKey: "settings", label: "Google Drive", href: "/dtic/settings/integrations/google-drive", icon: "layers", requiredCapability: "site.manage", allowedRoles: ["super_admin"], isVisible: true, isCore: false, sortOrder: 75 },
   { key: "audit", parentKey: null, label: "Audit Aktivitas", href: "/dtic/settings/audit", icon: "history", requiredCapability: "audit.view", allowedRoles: ["super_admin"], isVisible: true, isCore: true, sortOrder: 90 },
+  { key: "feedback", parentKey: null, label: "Bantuan & Masukan", href: "/dtic/settings/feedback", icon: "history", requiredCapability: "feedback.manage", allowedRoles: ["super_admin"], isVisible: true, isCore: false, sortOrder: 65 },
 ];
 
 export type MenuPatch = { label?: string; isVisible?: boolean; sortOrder?: number; allowedRoles?: Role[]; parentKey?: string | null };

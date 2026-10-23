@@ -1,5 +1,5 @@
 var R=require("../../../../../chunks/[turbopack]_runtime.js")("server/app/api/internal/telegram-brands/[brandId]/route.js")
-R.c("server/chunks/_0pzif8w1vuq15._.js")
+R.c("server/chunks/_20z2og0onyfk5._.js")
 R.c("server/chunks/src_lib_dates_ts_1l2u0e5rkf_t9._.js")
 R.c("server/chunks/src_lib_validation_telegram-brand_ts_15imahhb8emdj._.js")
 R.c("server/chunks/src_lib_server_http_ts_17aupf9muvvi-._.js")

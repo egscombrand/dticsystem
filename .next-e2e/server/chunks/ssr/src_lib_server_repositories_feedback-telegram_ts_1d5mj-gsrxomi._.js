@@ -1,0 +1,6 @@
+module.exports=[19251,a=>{"use strict";var b=a.i(14766),c=a.i(23064);async function d(){let[a]=await (0,b.f)()`select * from feedback_telegram_channel limit 1`;return a?{configId:a.id,chatMasked:(0,c.f)(a.chat_id),chatTitle:a.chat_title,chatUsername:a.chat_username,sourceLink:a.source_link,topicId:a.message_thread_id,isActive:a.is_active,verificationStatus:a.verification_status,verifiedAt:a.verified_at?.toISOString()??null,lastTestedAt:a.last_tested_at?.toISOString()??null,lastTestResult:a.last_test_result,lastTestMessage:a.last_test_message,updatedAt:a.updated_at.toISOString()}:null}async function e(a){let[c]=await (0,b.f)()`
+    select status, attempts, last_error, sent_at from feedback_notifications where ticket_id = ${a}`;return c?{status:c.status,attempts:c.attempts,lastError:c.last_error,sentAt:c.sent_at?.toISOString()??null}:null}async function f(a,c=20){return(await (0,b.f)()`
+    select id, kind, status, actor_name, error, attempted_at from feedback_notification_attempts
+    where ticket_id = ${a} order by attempted_at desc limit ${c}`).map(a=>({id:a.id,kind:a.kind,status:a.status,actorName:a.actor_name,error:a.error,attemptedAt:a.attempted_at.toISOString()}))}a.s(["V",0,d,"m",0,e,"v",0,f])}];
+
+//# sourceMappingURL=src_lib_server_repositories_feedback-telegram_ts_1d5mj-gsrxomi._.js.map
