@@ -142,6 +142,8 @@ dialog::backdrop {
   --color-brand-violet: #8b5cf6;
   --color-brand-violet-soft: #f5f3ff;
   --color-brand-deep: #115e59;
+  --color-brand-amber: #d97706;
+  --color-brand-amber-soft: #fffbeb;
 }
 @keyframes form-rise {
   from { opacity: 0; transform: translateY(10px); }
@@ -151,6 +153,21 @@ dialog::backdrop {
   0% { opacity: 0; transform: scale(0.4); }
   60% { opacity: 1; transform: scale(1.12); }
   100% { opacity: 1; transform: scale(1); }
+}
+/** Sorotan berkedip pada elemen ASLI (kartu kategori dll.) saat panduan mendemonstrasikan pilihan contoh —
+ *  lihat tutorials.ts formDemo.pulseSelector. Dimatikan di bawah prefers-reduced-motion (motion-safe:). */
+@keyframes tour-demo-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgb(13 148 136 / 0.45); }
+  50% { box-shadow: 0 0 0 8px rgb(13 148 136 / 0); }
+}
+.tour-demo-pulse {
+  animation: tour-demo-pulse 0.9s ease-in-out 2;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tour-demo-pulse {
+    animation: none;
+    box-shadow: 0 0 0 3px rgb(13 148 136 / 0.45);
+  }
 }
 @keyframes glow-drift {
   0%, 100% { transform: translate3d(0, 0, 0) scale(1); }

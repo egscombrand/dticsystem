@@ -189,6 +189,7 @@ export function FeedbackTrackingClient({ initialTicketNumber }: { initialTicketN
       <div className="mt-5 flex flex-col gap-4">
         <Field label="Nomor Tiket" htmlFor="track-ticket" required>
           <Input
+            data-tour="bantuan-lacak"
             id="track-ticket"
             value={ticketNumber}
             onChange={(e) => setTicketNumber(e.target.value)}

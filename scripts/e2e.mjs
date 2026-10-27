@@ -1214,6 +1214,17 @@ try {
   } else {
     const browser = await chromium.launch({ executablePath: chromePath, headless: true });
     const ctx = await browser.newContext({ viewport: { width: 1280, height: 1000 } });
+    // Tandai onboarding panduan sudah dilihat SEBELUM halaman apa pun dimuat di konteks bersama ini —
+    // dialog "Selamat datang" (hanya tampil sekali seumur hidup) tidak boleh menghalangi interaksi form
+    // pada tes-tes lain yang tidak terkait panduan. Konteks KHUSUS uji panduan (dibuat terpisah di bawah)
+    // sengaja TIDAK memakai addInitScript ini, supaya tetap mendapat pengalaman kunjungan pertama yang asli.
+    await ctx.addInitScript(() => {
+      try {
+        localStorage.setItem("dtic-tutorial-welcome-seen-v1", "1");
+      } catch {
+        // Dokumen transisi (mis. about:blank) kadang menolak akses localStorage — abaikan, bukan halaman nyata.
+      }
+    });
     // Login sungguhan lewat halaman /dtic/login; sesi (cookie) lalu dipakai semua halaman uji.
     const loginPage = await ctx.newPage();
     await loginPage.goto(`${BASE}/dtic/login`);
@@ -1328,6 +1339,46 @@ try {
         assert.match(docJson, /"underline"/);
         assert.match(docJson, /"textAlign":"right"/);
         assert.match(docJson, /"textAlign":"justify"/);
+        await p.close();
+      });
+      await test("Beban kerja anggota tim: urut dari teringan, badge & jumlah pekerjaan aktif sesuai database, kapasitas belum tersedia, pilihan tidak hilang saat re-render", async () => {
+        // Hitung langsung dari database (bukan angka diasumsikan) — state terakumulasi dari tes-tes sebelumnya di seluruh suite.
+        const activeCountOf = async (name) =>
+          (
+            await db`select count(*)::int as c from order_assignments a join orders o on o.id = a.order_id
+                     where a.member_id = ${M[name].id} and o.status in ('submitted', 'assigned', 'in_progress', 'pending_confirmation', 'internal_revision', 'awaiting_requester')`
+          )[0].c;
+        const [gilarActive, fathinActive] = await Promise.all([activeCountOf("Gilar Dwi Rahayu"), activeCountOf("Fathin Maqbulloh Sawiji")]);
+        assert.notEqual(gilarActive, fathinActive, "pra-syarat tes: kedua anggota harus punya beban berbeda agar urutan teruji nyata");
+        const [lighter, heavier] = gilarActive < fathinActive ? ["Gilar Dwi Rahayu", "Fathin Maqbulloh Sawiji"] : ["Fathin Maqbulloh Sawiji", "Gilar Dwi Rahayu"];
+        const p = await ctx.newPage();
+        await p.goto(`${BASE}/`);
+        await pickTeam(p, "Graphic Design");
+        await p.selectOption("#designTypeId", { label: "Poster" });
+        await nextStep(p); // langkah Detail
+        await p.fill("#requesterName", "Penguji Beban Kerja");
+        await p.fill("#title", "Judul Uji Beban Kerja");
+        await p.selectOption("#brandId", { label: "LSP PLI" });
+        await p.fill("#department", "Sertifikasi");
+        await p.fill("#requesterWhatsapp", "0812-3456-7890");
+        await p.selectOption("#sizePreset", "A3");
+        await p.locator("#brief").click();
+        await p.keyboard.type("Brief uji beban kerja");
+        await nextStep(p); // langkah Tim, PIC, dan deadline
+        const panel = p.getByTestId("team-panel");
+        await panel.waitFor();
+        const labels = panel.locator("label");
+        assert.equal(await labels.count(), 2, "dua anggota tim Graphic Design");
+        const texts = await labels.allTextContents();
+        assert.ok(texts[0].includes(lighter) && texts[1].includes(heavier), "urut dari beban teringan ke terberat sesuai database");
+        assert.match(texts[0], new RegExp(`${Math.min(gilarActive, fathinActive)} pekerjaan aktif`));
+        assert.match(texts[1], new RegExp(`${Math.max(gilarActive, fathinActive)} pekerjaan aktif`));
+        assert.match(texts[0], /Kapasitas: belum cukup data/, "tidak mengarang persentase kapasitas");
+        assert.match(texts[1], /Kapasitas: belum cukup data/);
+        // Pilihan tidak hilang ketika bagian lain form berganti dan memicu render ulang.
+        await panel.getByRole("checkbox", { name: heavier }).check();
+        await p.selectOption("#priority", { index: 1 });
+        assert.equal(await panel.getByRole("checkbox", { name: heavier }).isChecked(), true, "pilihan PIC tetap setelah render ulang");
         await p.close();
       });
       // ---- konfirmasi "Kirim pengajuan" (browser)
@@ -1811,6 +1862,266 @@ try {
         assert.ok(tableHidden, "tabel desktop tidak dipaksakan tampil penuh di layar mobile");
         const pageOverflow = await p.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
         assert.equal(pageOverflow, false, "tidak ada horizontal overflow halaman di layar mobile (390px) akibat tabel");
+        await c2.close();
+      });
+
+      await test("Panduan Penggunaan: halaman pusat panduan menampilkan 5 kartu tutorial, semua 'Belum Dimulai' untuk browser baru", async () => {
+        const c2 = await ctx.browser().newContext({ viewport: { width: 1280, height: 1000 } });
+        const p = await c2.newPage();
+        await p.goto(`${BASE}/panduan`);
+        await p.getByRole("heading", { name: "Panduan Penggunaan DTIC Nexus" }).waitFor();
+        assert.equal(await p.getByText("Belum Dimulai").count(), 5, "lima tutorial, semua belum dimulai");
+        for (const title of ["Mengenal Dashboard", "Mengajukan Request", "Memantau Request", "Memeriksa Hasil Pekerjaan", "Bantuan dan Masukan"]) {
+          assert.equal(await p.getByRole("heading", { name: title }).count(), 1, `kartu "${title}" tampil`);
+        }
+        await c2.close();
+      });
+
+      await test("Panduan Penggunaan: mulai tutorial → tour tampil di '/', sorot elemen nav asli, Berikutnya/Kembali berfungsi, Tutup menghentikan tour", async () => {
+        const c2 = await ctx.browser().newContext({ viewport: { width: 1280, height: 1000 } });
+        const p = await c2.newPage();
+        const tour = p.getByRole("dialog", { name: /^Panduan:/ }); // dipersempit: stepper form asli juga punya teks "Langkah X dari N"
+        await p.goto(`${BASE}/panduan`);
+        await p.getByRole("button", { name: "Mulai Tutorial" }).first().click();
+        await p.waitForURL(`${BASE}/`);
+        await tour.getByText("Langkah 1 dari 4").waitFor();
+        assert.equal(await tour.getByText("Selamat datang di DTIC Nexus").count(), 1, "langkah 1: sambutan tanpa sorotan");
+
+        await tour.getByRole("button", { name: "Berikutnya" }).click();
+        await tour.getByText("Langkah 2 dari 4").waitFor();
+        const ring = await p.evaluate(() => !!document.querySelector(".ring-2.ring-accent"));
+        assert.ok(ring, "langkah 2: elemen nav 'Ajukan Request' tersorot");
+
+        await tour.getByRole("button", { name: "Kembali" }).click();
+        await tour.getByText("Langkah 1 dari 4").waitFor();
+
+        await tour.getByRole("button", { name: "Tutup panduan" }).click();
+        assert.equal(await tour.count(), 0, "tour benar-benar tertutup");
+
+        await p.goto(`${BASE}/panduan`);
+        assert.equal(await p.getByText("Sedang Dipelajari").count(), 1, "progres tersimpan sebagai sedang dipelajari, bukan selesai atau hilang");
+        await c2.close();
+      });
+
+      await test("Panduan Penggunaan: Escape menutup tour yang sedang berjalan", async () => {
+        const c2 = await ctx.browser().newContext({ viewport: { width: 1280, height: 1000 } });
+        const p = await c2.newPage();
+        const tour = p.getByRole("dialog", { name: /^Panduan:/ });
+        await p.goto(`${BASE}/panduan`);
+        await p.getByRole("button", { name: "Mulai Tutorial" }).first().click();
+        await p.waitForURL(`${BASE}/`);
+        await tour.getByText("Langkah 1 dari 4").waitFor();
+        await p.keyboard.press("Escape");
+        await p.waitForTimeout(150);
+        assert.equal(await tour.count(), 0, "Escape menutup tour");
+        await c2.close();
+      });
+
+      await test("Panduan Penggunaan: menyelesaikan seluruh langkah menampilkan modal penutup (tahap umum: dua pilihan) dan menandai tutorial 'Selesai'", async () => {
+        const c2 = await ctx.browser().newContext({ viewport: { width: 1280, height: 1000 } });
+        const p = await c2.newPage();
+        const tour = p.getByRole("dialog", { name: /^Panduan:/ });
+        await p.goto(`${BASE}/panduan`);
+        await p.getByRole("button", { name: "Mulai Tutorial" }).first().click(); // "Mengenal Dashboard" — tahap penutup umum, bukan pengantar pengajuan
+        await p.waitForURL(`${BASE}/`);
+        for (let i = 0; i < 3; i++) {
+          await tour.getByRole("button", { name: "Berikutnya" }).click();
+          await p.waitForTimeout(100);
+        }
+        await tour.getByText("Langkah 4 dari 4").waitFor();
+        await tour.getByRole("button", { name: "Selesai", exact: true }).click();
+        const completion = p.getByRole("dialog", { name: "Tutorial Selesai!" });
+        await completion.waitFor();
+        assert.equal(await completion.getByRole("button", { name: "Kembali ke Awal" }).count(), 1, "tahap umum: dua pilihan jelas tersedia");
+        assert.equal(await completion.getByRole("button", { name: "Mulai Pengajuan" }).count(), 1);
+        await completion.getByRole("button", { name: "Mulai Pengajuan" }).click();
+        await p.waitForTimeout(150);
+        assert.equal(await tour.count(), 0, "tour benar-benar tertutup setelah modal penutup");
+        assert.equal(await completion.count(), 0, "modal penutup juga tertutup");
+        await p.goto(`${BASE}/panduan`);
+        await p.getByText("Selesai", { exact: true }).first().waitFor({ timeout: 5000 }); // status badge dibaca dari localStorage setelah mount — tunggu, jangan baca HTML langsung
+        await c2.close();
+      });
+
+      await test("Panduan Penggunaan 'Mengajukan Request': langkah terakhir berlabel 'Selesai dan Mulai Pengajuan'; modal penutup satu tombol; formulir kembali ke langkah 1 mode normal", async () => {
+        const c2 = await ctx.browser().newContext({ viewport: { width: 1280, height: 1000 } });
+        const p = await c2.newPage();
+        const tour = p.getByRole("dialog", { name: /^Panduan:/ });
+        await p.goto(`${BASE}/panduan`);
+        await p.getByRole("button", { name: "Mulai Tutorial" }).nth(1).click(); // "Mengajukan Request" — completion: start_request
+        await p.waitForURL(`${BASE}/`);
+        // 6 langkah (indeks 0–5): 5x "Berikutnya" membawa dari langkah 1 ke langkah 6 (terakhir, label
+        // tombolnya berubah jadi "Selesai dan Mulai Pengajuan" PERSIS di situ) — klik eksplisit satu per
+        // satu (bukan loop dengan nama tombol campuran) supaya tidak ambigu saat label berubah di tengah render.
+        for (let i = 0; i < 5; i++) {
+          await tour.getByText(`Langkah ${i + 1} dari 6`).waitFor({ timeout: 5000 });
+          await tour.locator('button:has-text("Berikutnya"), button:has-text("Selesai dan Mulai Pengajuan")').click();
+        }
+        await tour.getByText("Langkah 6 dari 6").waitFor({ timeout: 5000 });
+        await tour.getByRole("button", { name: "Selesai dan Mulai Pengajuan" }).click();
+        const completion = p.getByRole("dialog", { name: "Tutorial Selesai!" });
+        await completion.waitFor();
+        assert.equal(await completion.getByRole("button", { name: "Kembali ke Awal" }).count(), 0, "pengantar pengajuan: bukan dua pilihan generik");
+        const finishBtn = completion.getByRole("button", { name: "Selesai dan Mulai Pengajuan" });
+        assert.equal(await finishBtn.count(), 1);
+        await finishBtn.click();
+        await p.waitForTimeout(150);
+        assert.equal(await tour.count(), 0, "tour tertutup");
+        await p.getByRole("heading", { name: "Pilih kategori pekerjaan" }).waitFor({ timeout: 3000 });
+        await p.getByRole("button", { name: "Lanjutkan", exact: true }).click();
+        assert.ok((await p.locator('p[id$="-error"]').count()) > 0, "formulir kembali mode normal (validasi berlaku) setelah tutorial pengajuan selesai");
+        await c2.close();
+      });
+
+      await test("Panduan Penggunaan: tutorial dengan elemen target di halaman LAIN (belum pernah dicari nomor order) tidak macet/error", async () => {
+        const c2 = await ctx.browser().newContext({ viewport: { width: 1280, height: 1000 } });
+        const p = await c2.newPage();
+        const tour = p.getByRole("dialog", { name: /^Panduan:/ });
+        const errors = [];
+        p.on("pageerror", (e) => errors.push(e.message));
+        await p.goto(`${BASE}/panduan`);
+        await p.getByRole("button", { name: "Mulai Tutorial" }).nth(3).click();
+        await p.waitForURL(`${BASE}/riwayat`);
+        await tour.getByText("Langkah 1 dari 3").waitFor();
+        await p.locator("#track-order").waitFor({ timeout: 5000 }); // halaman publik bisa hidrasi sedikit belakangan dari teks tour
+        assert.equal(await p.locator("#track-order").count(), 1, "halaman riwayat tetap termuat normal");
+        // Elemen "riwayat-setujui" (langkah berikutnya) belum ada di DOM (belum mencari nomor order) —
+        // tour harus menampilkan panel tanpa sorotan, tidak melempar error.
+        await tour.getByRole("button", { name: "Berikutnya" }).click();
+        await p.waitForTimeout(300);
+        assert.equal(await tour.getByText(/Langkah \d dari 3/).count(), 1, "tour tetap tampil walau elemen tidak ditemukan");
+        assert.deepEqual(errors, [], "tidak ada JS error saat elemen target tidak ada");
+        await c2.close();
+      });
+
+      await test("Panduan Penggunaan: sambutan otomatis sekali seumur hidup — 'Masuk ke Dashboard' tidak memulai tour & tidak muncul lagi pada kunjungan berikutnya", async () => {
+        const c2 = await ctx.browser().newContext({ viewport: { width: 1280, height: 1000 } });
+        const p = await c2.newPage();
+        await p.goto(`${BASE}/`);
+        await p.getByText("Selamat Datang di DTIC Nexus").waitFor({ timeout: 3000 });
+        assert.equal(await p.getByText("Pusat pengelolaan permintaan pekerjaan yang terintegrasi.").count(), 1);
+        await p.getByRole("button", { name: "Masuk ke Dashboard" }).click();
+        assert.equal(await p.getByRole("dialog", { name: /^Panduan:/ }).count(), 0, "tidak memulai tour apa pun");
+        await p.reload();
+        await p.waitForTimeout(1000);
+        assert.equal(await p.getByText("Selamat Datang di DTIC Nexus").count(), 0, "sambutan tidak muncul lagi setelah dilewati");
+        await c2.close();
+      });
+
+      await test("Panduan Penggunaan: menonaktifkan preferensi sambutan otomatis → tidak tampil lagi; mengaktifkan kembali → tampil lagi pada kunjungan berikutnya", async () => {
+        const c2 = await ctx.browser().newContext({ viewport: { width: 1280, height: 1000 } });
+        const p = await c2.newPage();
+        await p.goto(`${BASE}/panduan`);
+        await p.getByLabel("Tampilkan sambutan otomatis").uncheck();
+        await p.goto(`${BASE}/`);
+        await p.waitForTimeout(900);
+        assert.equal(await p.getByText("Selamat Datang di DTIC Nexus").count(), 0, "preferensi nonaktif → sambutan tidak tampil sama sekali");
+
+        await p.goto(`${BASE}/panduan`);
+        await p.getByLabel("Tampilkan sambutan otomatis").check();
+        await p.goto(`${BASE}/`);
+        await p.getByText("Selamat Datang di DTIC Nexus").waitFor({ timeout: 3000 });
+        assert.ok(true, "mengaktifkan kembali preferensi membuat sambutan tampil lagi");
+        await c2.close();
+      });
+
+      await test("Panduan Penggunaan: panel tour tidak overflow di layar mobile (390px)", async () => {
+        const c2 = await ctx.browser().newContext({ viewport: { width: 390, height: 844 } });
+        const p = await c2.newPage();
+        await p.goto(`${BASE}/panduan`);
+        await p.getByRole("button", { name: "Mulai Tutorial" }).first().click();
+        await p.waitForURL(`${BASE}/`);
+        await p.getByRole("dialog", { name: /^Panduan:/ }).getByText("Langkah 1 dari 4").waitFor();
+        const overflow = await p.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
+        assert.equal(overflow, false, "panel tour tidak menyebabkan overflow horizontal di mobile");
+        await c2.close();
+      });
+
+      await test("Tutorial 'Mengajukan Request': kursor simulasi + klik pada kartu kategori asli, mengetik LANGSUNG ke SELURUH field relevan (termasuk WhatsApp & Departemen), seret-lepas file ke area unggah asli, Tinjau menjelaskan ringkasan — semuanya dibersihkan tuntas saat tour ditutup", async () => {
+        const c2 = await ctx.browser().newContext({ viewport: { width: 1280, height: 1000 } });
+        const p = await c2.newPage();
+        const tour = p.getByRole("dialog", { name: /^Panduan:/ });
+        await p.goto(`${BASE}/panduan`);
+        await p.getByRole("button", { name: "Mulai Tutorial" }).nth(1).click();
+        await p.waitForURL(`${BASE}/`);
+        await tour.getByText("Langkah 1 dari 6").waitFor();
+        assert.equal(await p.locator('[data-team-slug="graphic-design"].tour-demo-pulse').count(), 0, "langkah sambutan (tanpa target) tidak menjalankan demonstrasi apa pun");
+
+        // Langkah 2: kategori — kursor simulasi bergerak ke kartu ASLI lalu "klik" sebelum berkedip; tidak mengubah pilihan pengguna.
+        await tour.getByRole("button", { name: "Berikutnya" }).click();
+        await p.waitForFunction(() => document.querySelector('[data-team-slug="graphic-design"]')?.classList.contains("tour-demo-pulse"), null, { timeout: 5000 });
+        assert.equal(await p.locator('[data-team-slug="graphic-design"][aria-pressed="true"]').count(), 0, "pulsa demonstrasi TIDAK mengubah kategori yang benar-benar terpilih");
+
+        // Langkah 3: SELURUH field relevan terisi lewat efek mengetik LANGSUNG pada field aslinya —
+        // bukan hanya judul, termasuk Nama, Departemen, Nomor WhatsApp, dan deskripsi lengkap di editor asli.
+        await tour.getByRole("button", { name: "Berikutnya" }).click();
+        await p.waitForFunction(() => document.querySelector("#title")?.value === "Desain Poster Seminar Lingkungan 2026", null, { timeout: 8000 });
+        assert.equal(await p.locator("#requesterName").inputValue(), "Ani Lestari", "Nama terisi contoh lengkap");
+        assert.equal(await p.locator("#department").inputValue(), "Marketing", "Departemen terisi — sebelumnya kosong, sekarang diperbaiki");
+        assert.equal(await p.locator("#requesterWhatsapp").inputValue(), "0812-3456-7890", "Nomor WhatsApp terisi contoh yang jelas bukan nomor pribadi — sebelumnya kosong, sekarang diperbaiki");
+        await p.waitForFunction(() => (document.querySelector("#brief")?.textContent ?? "").includes("Seminar Lingkungan 2026") && (document.querySelector("#brief")?.textContent ?? "").length > 100, null, { timeout: 10000 });
+        const briefLen = await p.locator("#brief").evaluate((el) => el.textContent?.length ?? 0);
+        assert.ok(briefLen > 100, `deskripsi lengkap (bukan hanya judul) muncul di editor asli, panjang=${briefLen}`);
+
+        // Langkah 4: seret-lepas simulasi — dropzone ASLI memakai state `dragging` sungguhan (efek visual
+        // identik dengan drag asli) sebelum file contoh muncul pada area unggah yang sama (bukan daftar terpisah).
+        await tour.getByRole("button", { name: "Berikutnya" }).click();
+        const dropzone = p.locator('[data-tour="form-lampiran"]');
+        await p.waitForFunction(() => document.querySelector('[data-tour="form-lampiran"] label')?.className.includes("brand-emerald"), null, { timeout: 3000 });
+        await dropzone.getByText("referensi-desain.png", { exact: true }).waitFor({ timeout: 3000 });
+        await dropzone.getByText("Simulasi penambahan file selesai", { exact: false }).waitFor();
+        assert.equal(await dropzone.getByLabel("File terpilih").count(), 0, "file contoh TIDAK masuk daftar lampiran sungguhan (aria-label berbeda)");
+
+        // Langkah 5: Tinjau Pengajuan Anda — menjelaskan ringkasan & kelengkapan isian, menyorot bagian yang benar.
+        await tour.getByRole("button", { name: "Berikutnya" }).click();
+        await tour.getByText("Tinjau Pengajuan Anda").waitFor({ timeout: 5000 });
+        const ringHighlighted = await p.evaluate(() => !!document.querySelector(".ring-2.ring-accent"));
+        assert.ok(ringHighlighted, "ringkasan Tinjau tersorot (highlight nyata, bukan posisi sembarangan)");
+
+        // Menutup tour: SELURUH demonstrasi (field teks, deskripsi, file contoh, pulsa kategori, dragging) harus
+        // bersih total — formulir kembali seperti baru dibuka, tanpa jejak data simulasi mana pun.
+        await p.getByRole("dialog", { name: /^Panduan:/ }).getByRole("button", { name: "Tutup panduan" }).click();
+        await p.waitForTimeout(200);
+        assert.equal(await p.locator("#requesterName").inputValue(), "", "#requesterName dikosongkan lagi setelah tour ditutup");
+        assert.equal(await p.locator("#department").inputValue(), "", "#department dikosongkan lagi setelah tour ditutup");
+        assert.equal(await p.locator("#requesterWhatsapp").inputValue(), "", "#requesterWhatsapp dikosongkan lagi setelah tour ditutup");
+        assert.equal(await p.locator("#title").inputValue(), "", "#title dikosongkan lagi setelah tour ditutup");
+        assert.equal((await p.locator("#brief").innerText()).trim().length, 0, "deskripsi dikosongkan lagi (editor remount) setelah tour ditutup");
+        assert.equal(await dropzone.getByText("referensi-desain.png").count(), 0, "file contoh hilang dari area unggah setelah tour ditutup");
+        await c2.close();
+      });
+
+      await test("Mode simulasi tutorial 'Mengajukan Request': semua tahap formulir bisa dibuka tanpa mengisi kolom wajib; tombol kirim TIDAK membuat pengajuan sungguhan", async () => {
+        const c2 = await ctx.browser().newContext({ viewport: { width: 1280, height: 1000 } });
+        const p = await c2.newPage();
+        const ordersBefore = (await db`select count(*)::int as c from orders`)[0].c;
+        await p.goto(`${BASE}/panduan`);
+        await p.getByRole("button", { name: "Mulai Tutorial" }).nth(1).click();
+        await p.waitForURL(`${BASE}/`);
+        // Normal: tombol "Lanjutkan" menolak langkah 1 tanpa kategori dipilih. Dalam mode simulasi (tour
+        // "Mengajukan Request" aktif) ini harus LOLOS tanpa mengisi apa pun.
+        await p.getByRole("button", { name: "Lanjutkan", exact: true }).click();
+        await p.getByRole("heading", { name: "Detail pekerjaan", exact: true }).waitFor({ timeout: 5000 });
+        assert.equal(await p.locator('p[id$="-error"]').count(), 0, "tidak ada galat validasi muncul dalam mode simulasi");
+
+        // Lompat langsung ke langkah terakhir lewat titik stepper (biasanya terkunci bila belum "selesai").
+        await p.getByRole("button", { name: "Tinjau", exact: false }).click();
+        await p.getByRole("heading", { name: "Tinjau Pengajuan" }).waitFor();
+
+        await p.getByRole("button", { name: "Kirim Pengajuan", exact: false }).click();
+        await p.getByText("pengajuan sungguhan tidak dikirim", { exact: false }).waitFor({ timeout: 3000 });
+        assert.equal(await p.getByRole("dialog", { name: "Konfirmasi Pengajuan" }).count(), 0, "dialog konfirmasi pengiriman sungguhan TIDAK terbuka");
+        assert.equal((await db`select count(*)::int as c from orders`)[0].c, ordersBefore, "tidak ada order baru tersimpan");
+
+        // Menutup tour mengembalikan formulir ke perilaku normal: validasi langkah 1 berlaku lagi, DAN
+        // wizard tidak "tertinggal" di langkah Tinjau (dengan ringkasan dari isian simulasi) — langsung
+        // kembali ke langkah 1 TANPA perlu reload.
+        await p.getByRole("dialog", { name: /^Panduan:/ }).getByRole("button", { name: "Tutup panduan" }).click();
+        await p.waitForTimeout(150);
+        await p.getByRole("heading", { name: "Pilih kategori pekerjaan" }).waitFor({ timeout: 3000 });
+        await p.reload();
+        await p.getByRole("button", { name: "Lanjutkan", exact: true }).click();
+        assert.ok((await p.locator('p[id$="-error"]').count()) > 0, "validasi normal berlaku lagi setelah tour ditutup");
         await c2.close();
       });
 
@@ -2542,6 +2853,41 @@ try {
       assert.ok(tg.calls.some((c) => c.body.text.includes(orderNumber) && c.body.text.includes(`Judul: <b>${title}</b>`)), "Telegram memuat judul");
       assert.ok((await page(`/dtic/orders/${row.id}`)).html.includes(title), "tampil di detail order");
       assert.ok((await page("/dtic/orders")).html.includes(title), "tampil di daftar order");
+    });
+
+    await test("Kategori baru 'Editing Kelas GreenSkill ID' tampil di form publik dengan tiga jenis pekerjaannya", async () => {
+      const { html } = await page("/", false);
+      assert.ok(html.includes("Editing Kelas GreenSkill ID"), "nama kategori tampil");
+      for (const t of ["Produksi Video LMS", "Editing Rekaman Webinar", "Editing Clipper Kelas"]) {
+        assert.ok(html.includes(t), `jenis pekerjaan "${t}" tampil di form`);
+      }
+    });
+
+    await test("Kategori baru: pengajuan ketiga jenis pekerjaan tersimpan & tampil benar di detail, daftar, dan riwayat publik", async () => {
+      for (const typeName of ["Produksi Video LMS", "Editing Rekaman Webinar", "Editing Clipper Kelas"]) {
+        tg.mode = "ok";
+        const title = `Judul Uji ${typeName}`;
+        const r = await submit(orderForm(brand1, { designTypeId: TYPES[typeName], picIds: [nuri, stevan], title }).fd);
+        assert.equal(r.status, 201, `${typeName}: ${await r.clone().text()}`);
+        const { orderNumber } = await r.json();
+        const t = await teamOf(orderNumber);
+        assert.equal(t.team, "editing-kelas-greenskill-id", `${typeName}: tim tersimpan benar`);
+        assert.deepEqual(t.names, ["Nuri Khusnaini", "Stevan Hary Laksono"], `${typeName}: PIC tersimpan benar`);
+        const [row] = await db`select id, design_type from orders where order_number = ${orderNumber}`;
+        assert.equal(row.design_type, typeName, `${typeName}: jenis pekerjaan tersimpan sesuai nama`);
+        const detail = await page(`/dtic/orders/${row.id}`);
+        assert.ok(detail.html.includes(typeName) && detail.html.includes("Editing Kelas GreenSkill ID"), `${typeName}: tampil di detail order`);
+        const list = await page("/dtic/orders");
+        assert.ok(list.html.includes(orderNumber), `${typeName}: tampil di daftar order`);
+        const tracking = await (await fetch(`${BASE}/api/public/tracking`, { method: "POST", headers: { "Content-Type": "application/json", "x-forwarded-for": freshIp() }, body: JSON.stringify({ orderNumber }) })).json();
+        assert.equal(tracking.designType, typeName, `${typeName}: tampil benar di riwayat publik`);
+      }
+    });
+
+    await test("Kategori lama (Graphic Design, IT, Dokumentasi & Event) tetap berfungsi normal setelah kategori baru ditambahkan", async () => {
+      const r = await submit(poster([gilar]));
+      assert.equal(r.status, 201, await r.clone().text());
+      assert.deepEqual((await teamOf((await r.json()).orderNumber)).names, ["Gilar Dwi Rahayu"]);
     });
   }
 
@@ -6076,6 +6422,221 @@ try {
     // Hubungkan & aktifkan kembali agar tidak mempengaruhi asumsi tes lain yang berjalan setelah ini.
     await verifyFbtg("https://t.me/c/1234567900/1");
     await internal(FBTG, "PUT", { isActive: true });
+  });
+
+  console.log("\nPanduan Penggunaan — Manager");
+  await test("Panduan: akses /dtic/panduan dibatasi di SERVER (bukan hanya menu disembunyikan) — Super Admin dialihkan (belum punya panduan sendiri); Manager & Staff masing-masing berhasil melihat panduannya sendiri", async () => {
+    // Redirect dari layout panel yang di-stream (Cache Components) membalas 200 dengan instruksi redirect
+    // di body, BUKAN 307 — fetch({redirect:"follow"}) tidak menangkap ini (lihat redirectsToUnauthorized / komentar pageRaw).
+    const admin = await pageRaw("/dtic/panduan", ADMIN);
+    assert.ok(await redirectsToUnauthorized(admin), "Super Admin dialihkan ke halaman tidak berwenang (belum punya panduan sendiri)");
+    const manager = await pageRaw("/dtic/panduan", await qcManager());
+    assert.equal(manager.status, 200);
+    const managerHtml = await manager.text();
+    assert.match(managerHtml, /Panduan Penggunaan/, "Manager berhasil membuka halaman panduan");
+    assert.match(managerHtml, /Mengenal Dashboard Manager/, "Manager melihat panduannya sendiri");
+    assert.doesNotMatch(managerHtml, /Mengenal Dashboard PIC/, "Manager TIDAK melihat panduan Staff");
+    const staff = await pageRaw("/dtic/panduan", await qcStaff());
+    assert.equal(staff.status, 200);
+    const staffHtml = await staff.text();
+    assert.match(staffHtml, /Panduan Penggunaan/, "Staff berhasil membuka halaman panduan");
+    assert.match(staffHtml, /Mengenal Dashboard PIC/, "Staff melihat panduannya sendiri");
+    assert.doesNotMatch(staffHtml, /Mengenal Dashboard Manager/, "Staff TIDAK melihat panduan Manager");
+  });
+
+  await test("Panduan Manager (browser): mulai dari Dashboard, sorot elemen asli, lanjut lintas halaman ke Pengelolaan Pekerjaan, sorot elemen pada HALAMAN DETAIL order apa pun (pola dinamis), selesai menavigasi lewat tombol penutup, refresh tidak menyisakan overlay rusak", async () => {
+    const chromePath = process.env.CHROME_PATH ?? "/usr/bin/google-chrome";
+    const { chromium } = await import("playwright-core");
+    const browser = await chromium.launch({ executablePath: chromePath, headless: true });
+    try {
+      const { id: orderId } = await qcOrder("Judul Uji Panduan Manager");
+      const [name, value] = (await qcManager()).split("=");
+      const ctx2 = await browser.newContext({ viewport: { width: 1366, height: 900 } });
+      await ctx2.addCookies([{ name, value, url: BASE }]);
+      const pageErrors = [];
+      const p = await ctx2.newPage();
+      p.on("pageerror", (e) => pageErrors.push(e.message));
+      await p.goto(`${BASE}/dtic/panduan`);
+      await p.getByRole("heading", { name: "Panduan Penggunaan" }).waitFor();
+      const cardTitles = await p.locator("h3").allTextContents();
+      assert.deepEqual(cardTitles, [
+        "Mengenal Dashboard Manager",
+        "Memeriksa Request",
+        "Memutuskan Hasil QC",
+        "Mengelola PIC dan Memantau Beban Kerja",
+        "Riwayat QC dan Fitur Pendukung",
+      ]);
+      // Mulai tutorial pertama → navigasi otomatis ke Dashboard.
+      await p.getByRole("button", { name: "Mulai Tutorial" }).first().click();
+      await p.waitForURL(/\/dtic\/dashboard$/);
+      await p.getByText("Langkah 1 dari 5").waitFor();
+      const next = () => p.getByRole("button", { name: "Berikutnya", exact: true }).click();
+      await next(); // → "Menunggu QC Manager"
+      await p.waitForFunction(() => document.querySelector('[data-tour="dash-qc-queue"]')?.getBoundingClientRect().width > 0, null, { timeout: 5000 });
+      await next(); // → "Menunggu Tindakan"
+      await p.waitForFunction(() => document.querySelector('[data-tour="dash-action-needed"]')?.getBoundingClientRect().width > 0, null, { timeout: 5000 });
+      await next(); // → "Pekerjaan terbaru"
+      await next(); // → "Menu Pengelolaan Pekerjaan" (langkah terakhir)
+      await p.getByText("Langkah 5 dari 5").waitFor();
+      await p.getByRole("button", { name: "Selesai", exact: true }).click();
+      const completion = p.getByRole("dialog", { name: "Tutorial Selesai!" });
+      await completion.waitFor();
+      await completion.getByRole("button", { name: "Buka Pengelolaan Pekerjaan" }).click();
+      await p.waitForURL(/\/dtic\/orders$/);
+      // Tutorial kedua: mulai manual, pastikan sorotan pada daftar pekerjaan sungguhan.
+      await p.goto(`${BASE}/dtic/panduan`);
+      await p.getByRole("button", { name: "Mulai Tutorial" }).first().click();
+      await p.waitForURL(/\/dtic\/orders$/);
+      await next(); // langkah 0 (sambutan, tanpa target) → langkah 1
+      await p.waitForFunction(() => document.querySelector('[data-tour="orders-tab-action"]')?.getBoundingClientRect().width > 0, null, { timeout: 5000 });
+      await next();
+      await p.waitForFunction(() => document.querySelector('[data-tour="orders-tab-qc"]')?.getBoundingClientRect().width > 0, null, { timeout: 5000 });
+      await next();
+      await p.waitForFunction(() => document.querySelector('[data-tour="orders-row"]')?.getBoundingClientRect().width > 0, null, { timeout: 5000 });
+      // "Berikutnya" di langkah ini mengklik baris pertama secara otomatis (clickTargetOnAdvance) → navigasi SUNGGUHAN ke halaman detail, tanpa p.goto manual.
+      await next();
+      await p.waitForURL(/\/dtic\/orders\/[0-9a-f-]{36}$/);
+      await p.getByTestId("brief").waitFor();
+      // Sorotan (ring) benar-benar diposisikan di atas elemen brief sungguhan, bukan macet di tengah layar.
+      await p.waitForFunction(
+        () => {
+          const ring = document.querySelector('[role="dialog"][aria-modal="true"] > div:first-child');
+          const target = document.querySelector('[data-testid="brief"]');
+          if (!ring || !target) return false;
+          const a = ring.getBoundingClientRect();
+          const b = target.getBoundingClientRect();
+          return Math.abs(a.top - (b.top - 6)) < 4;
+        },
+        null,
+        { timeout: 5000 },
+      );
+      await next(); // → "Langkah Berikutnya" (next-step)
+      // Tutup panduan — tombol Tutup selalu tersedia, tidak ada mutasi bisnis apa pun selama ini.
+      await p.getByRole("button", { name: "Tutup panduan" }).click();
+      assert.equal(await p.locator('[role="dialog"][aria-label^="Panduan:"]').count(), 0, "overlay tour tertutup");
+      const orderAfter = await db`select status, qc_status from orders where id = ${orderId}`;
+      assert.deepEqual(orderAfter[0], { status: "assigned", qc_status: "none" }, "tidak ada mutasi status/QC akibat tour");
+      // Refresh tidak menyisakan overlay/sorotan rusak.
+      await p.reload();
+      await p.waitForLoadState("networkidle");
+      assert.equal(await p.locator('[role="dialog"][aria-label^="Panduan:"]').count(), 0, "tidak ada overlay tersisa setelah refresh");
+      assert.deepEqual(pageErrors, [], "tidak ada error React/konsol baru selama tour Manager");
+      await ctx2.close();
+    } finally {
+      await browser.close();
+    }
+  });
+
+  await test("Panduan Manager (browser, mobile 390px): panel tour tidak overflow layar", async () => {
+    const chromePath = process.env.CHROME_PATH ?? "/usr/bin/google-chrome";
+    const { chromium } = await import("playwright-core");
+    const browser = await chromium.launch({ executablePath: chromePath, headless: true });
+    try {
+      const [name, value] = (await qcManager()).split("=");
+      const ctx2 = await browser.newContext({ viewport: { width: 390, height: 844 } });
+      await ctx2.addCookies([{ name, value, url: BASE }]);
+      const p = await ctx2.newPage();
+      await p.goto(`${BASE}/dtic/panduan`);
+      await p.getByRole("button", { name: "Mulai Tutorial" }).first().click();
+      await p.waitForURL(/\/dtic\/dashboard$/);
+      await p.getByText("Langkah 1 dari 5").waitFor();
+      const overflow = await p.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      assert.ok(overflow <= 1, `tanpa overflow horizontal (selisih ${overflow}px)`);
+      const panelBox = await p.locator('[role="dialog"][aria-label^="Panduan:"] > div.pointer-events-auto').boundingBox();
+      const debugInfo = await p.evaluate(() => {
+        const el = document.querySelector('[role="dialog"][aria-label^="Panduan:"] > div.pointer-events-auto');
+        const cs = el ? getComputedStyle(el) : null;
+        return {
+          innerWidth: window.innerWidth,
+          devicePixelRatio: window.devicePixelRatio,
+          styleWidth: el?.style.width,
+          computedWidth: cs?.width,
+          boxSizing: cs?.boxSizing,
+          borderLeft: cs?.borderLeftWidth,
+          borderRight: cs?.borderRightWidth,
+          paddingLeft: cs?.paddingLeft,
+          paddingRight: cs?.paddingRight,
+          styleLeft: el?.style.left,
+        };
+      });
+      assert.ok(panelBox.left >= 0 && panelBox.left + panelBox.width <= 390 + 1, `panel tour berada dalam lebar viewport (left=${panelBox.left}, width=${panelBox.width}, right=${panelBox.left + panelBox.width}; debug=${JSON.stringify(debugInfo)})`);
+      await ctx2.close();
+    } finally {
+      await browser.close();
+    }
+  });
+
+  await test("Panduan PIC (browser): 6 kartu panduan Staff, mulai dari Dashboard (scope sendiri), lanjut lintas halaman ke Pengelolaan Pekerjaan, sorot elemen hasil/QC pada HALAMAN DETAIL pekerjaan sungguhan, tutup tanpa mutasi, refresh tidak menyisakan overlay rusak", async () => {
+    const chromePath = process.env.CHROME_PATH ?? "/usr/bin/google-chrome";
+    const { chromium } = await import("playwright-core");
+    const browser = await chromium.launch({ executablePath: chromePath, headless: true });
+    try {
+      const { id: orderId } = await qcOrder("Judul Uji Panduan PIC");
+      const [name, value] = (await qcStaff()).split("=");
+      const ctx2 = await browser.newContext({ viewport: { width: 1366, height: 900 } });
+      await ctx2.addCookies([{ name, value, url: BASE }]);
+      const pageErrors = [];
+      const p = await ctx2.newPage();
+      p.on("pageerror", (e) => pageErrors.push(e.message));
+      await p.goto(`${BASE}/dtic/panduan`);
+      await p.getByRole("heading", { name: "Panduan Penggunaan" }).waitFor();
+      const cardTitles = await p.locator("h3").allTextContents();
+      assert.deepEqual(cardTitles, [
+        "Mengenal Dashboard PIC",
+        "Memahami Tugas Baru",
+        "Berkomunikasi dengan Pemohon",
+        "Mengerjakan dan Memperbarui Status",
+        "Mengunggah Hasil dan Mengajukan QC",
+        "Revisi dan Penyelesaian Pekerjaan",
+      ]);
+      // Mulai tutorial pertama → navigasi otomatis ke Dashboard.
+      await p.getByRole("button", { name: "Mulai Tutorial" }).first().click();
+      await p.waitForURL(/\/dtic\/dashboard$/);
+      await p.getByText("Langkah 1 dari 5").waitFor();
+      const next = () => p.getByRole("button", { name: "Berikutnya", exact: true }).click();
+      await next(); // → "Menunggu Tindakan"
+      await p.waitForFunction(() => document.querySelector('[data-tour="dash-action-needed"]')?.getBoundingClientRect().width > 0, null, { timeout: 5000 });
+      await next(); // → "Pekerjaan terbaru"
+      await p.waitForFunction(() => document.querySelector('[data-tour="dash-pekerjaan-terbaru"]')?.getBoundingClientRect().width > 0, null, { timeout: 5000 });
+      await next(); // → "Catatan tentang notifikasi" (tanpa sorotan — kekurangan fitur dijelaskan apa adanya, bukan diklaim tersedia)
+      await p.getByText("Langkah 4 dari 5").waitFor();
+      assert.match(await p.getByRole("dialog", { name: /^Panduan:/ }).innerText(), /belum memiliki pusat notifikasi/, "kekurangan notifikasi dijelaskan jujur, bukan diklaim ada");
+      await next(); // → "Menu Pengelolaan Pekerjaan" (langkah terakhir)
+      await p.getByText("Langkah 5 dari 5").waitFor();
+      await p.getByRole("button", { name: "Selesai", exact: true }).click();
+      const completion = p.getByRole("dialog", { name: "Tutorial Selesai!" });
+      await completion.waitFor();
+      await completion.getByRole("button", { name: "Buka Pengelolaan Pekerjaan" }).click();
+      await p.waitForURL(/\/dtic\/orders$/);
+      // Tutorial "Mengunggah Hasil dan Mengajukan QC": mulai manual, verifikasi sorotan pada pekerjaan sungguhan milik Staff ini.
+      await p.goto(`${BASE}/dtic/panduan`);
+      await p.getByRole("button", { name: "Mulai Tutorial" }).nth(4).click();
+      await p.waitForURL(/\/dtic\/orders$/);
+      // Tunggu baris sungguhan benar-benar dirender sebelum menekan Berikutnya — tanpa ini, klik otomatis
+      // (clickTargetOnAdvance) bisa menembak querySelector sebelum tabel selesai hidrasi (race), sama
+      // seperti tes Manager di atas yang menunggu sorotan orders-row dulu sebelum lanjut.
+      await p.waitForFunction(() => document.querySelector('[data-tour="orders-row"] a')?.getBoundingClientRect().width > 0, null, { timeout: 5000 });
+      // "Berikutnya" di langkah 0 ("Sebelum mengajukan QC") mengklik baris pertama secara otomatis (clickTargetOnAdvance) → navigasi SUNGGUHAN ke halaman detail, tanpa p.goto manual.
+      await next();
+      await p.waitForURL(/\/dtic\/orders\/[0-9a-f-]{36}$/);
+      await p.getByTestId("results").waitFor();
+      await p.waitForFunction(() => document.querySelector('[data-testid="results"]')?.getBoundingClientRect().width > 0, null, { timeout: 5000 });
+      await next(); // → "Mengunggah dan mengajukan QC" (qc-actions), halaman yang sama
+      await p.waitForFunction(() => document.querySelector('[data-testid="qc-actions"]')?.getBoundingClientRect().width > 0, null, { timeout: 5000 });
+      // Tutup panduan — tombol Tutup selalu tersedia, tidak ada mutasi bisnis apa pun selama ini.
+      await p.getByRole("button", { name: "Tutup panduan" }).click();
+      assert.equal(await p.locator('[role="dialog"][aria-label^="Panduan:"]').count(), 0, "overlay tour tertutup");
+      const orderAfter = await db`select status, qc_status from orders where id = ${orderId}`;
+      assert.deepEqual(orderAfter[0], { status: "assigned", qc_status: "none" }, "tidak ada mutasi status/QC akibat tour");
+      // Refresh tidak menyisakan overlay/sorotan rusak.
+      await p.reload();
+      await p.waitForLoadState("networkidle");
+      assert.equal(await p.locator('[role="dialog"][aria-label^="Panduan:"]').count(), 0, "tidak ada overlay tersisa setelah refresh");
+      assert.deepEqual(pageErrors, [], "tidak ada error React/konsol baru selama tour PIC");
+      await ctx2.close();
+    } finally {
+      await browser.close();
+    }
   });
 
   console.log("\nKegagalan database");

@@ -40,6 +40,7 @@ export function OrderTabs({
         return (
           <Link
             key={t.key}
+            data-tour={`orders-tab-${t.key}`}
             href={`/dtic/orders${buildQuery({ ...query, view: t.key === "active" ? undefined : t.key, status: undefined, page: undefined })}`}
             aria-current={isActive ? "page" : undefined}
             className={cn(

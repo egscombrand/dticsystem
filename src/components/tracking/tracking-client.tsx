@@ -30,7 +30,7 @@ function Timeline({ view }: { view: TrackingView }) {
   const timeOf = (s: OrderStatus) => view.history.filter((h) => h.status === s).at(-1)?.changedAt;
 
   return (
-    <ol aria-label="Progres request" className="relative flex flex-col">
+    <ol data-tour="riwayat-timeline" aria-label="Progres request" className="relative flex flex-col">
       {stages.map((s, i) => {
         // Manager sudah ACC (status pindah ke awaiting_requester) tapi PIC belum benar-benar
         // mengajukan ke pemohon — tahap ini belum boleh terlihat "selesai"/tercapai.
@@ -127,7 +127,7 @@ function DeliveriesSection({ view, onDecided }: { view: TrackingView; onDecided:
   }
 
   return (
-    <section className="rounded-2xl border border-line bg-surface p-5 shadow-card sm:p-6" aria-labelledby="deliveries-title">
+    <section data-tour="riwayat-hasil" className="rounded-2xl border border-line bg-surface p-5 shadow-card sm:p-6" aria-labelledby="deliveries-title">
       <h2 id="deliveries-title" className="text-[15px] font-semibold text-navy">File Hasil yang Diajukan</h2>
       {!view.deliveries.length ? (
         <p className="mt-2 text-[13px] text-ink-3">Belum ada hasil yang diajukan kepada Anda.</p>
@@ -220,10 +220,10 @@ function DeliveriesSection({ view, onDecided }: { view: TrackingView; onDecided:
               )}
               {d.decision === "awaiting" && (
                 <div className="mt-3 flex flex-wrap gap-2 border-t border-line/70 pt-3">
-                  <Button size="sm" icon={<CheckCircle2 className="size-4" aria-hidden="true" />} onClick={() => openDecision(d, "approve")} className="bg-teal hover:bg-teal/90">
+                  <Button data-tour="riwayat-setujui" size="sm" icon={<CheckCircle2 className="size-4" aria-hidden="true" />} onClick={() => openDecision(d, "approve")} className="bg-teal hover:bg-teal/90">
                     Setujui Hasil
                   </Button>
-                  <Button size="sm" variant="secondary" icon={<Undo2 className="size-4" aria-hidden="true" />} onClick={() => openDecision(d, "revision")}>
+                  <Button data-tour="riwayat-revisi" size="sm" variant="secondary" icon={<Undo2 className="size-4" aria-hidden="true" />} onClick={() => openDecision(d, "revision")}>
                     Minta Revisi
                   </Button>
                 </div>
@@ -346,7 +346,7 @@ export function TrackingClient({ initialOrderNumber }: { initialOrderNumber?: st
           </dl>
         </div>
 
-        <section className="rounded-2xl border border-line bg-surface p-5 shadow-card sm:p-7" aria-labelledby="progress-title">
+        <section data-tour="riwayat-status" className="rounded-2xl border border-line bg-surface p-5 shadow-card sm:p-7" aria-labelledby="progress-title">
           <div className="mb-5 flex flex-wrap items-center justify-between gap-2">
             <h2 id="progress-title" className="text-[15px] font-semibold text-navy">Progres request</h2>
             <span className="rounded-full bg-teal/10 px-3 py-1 text-xs font-semibold text-teal">{clientStatusLabel(view.status, view.awaitingSubmissionToRequester).label}</span>
@@ -397,6 +397,7 @@ export function TrackingClient({ initialOrderNumber }: { initialOrderNumber?: st
       <div className="mt-5 flex flex-col gap-4">
         <Field label="Nomor Order" htmlFor="track-order" required>
           <Input
+            data-tour="riwayat-cari"
             id="track-order"
             value={orderNumber}
             onChange={(e) => setOrderNumber(e.target.value)}

@@ -74,6 +74,19 @@ export async function getMemberWorkloads(filters: WorkloadFilters | string | nul
   }));
 }
 
+export type PublicMemberWorkload = { memberId: string; active: number };
+
+/**
+ * Versi PUBLIK (untuk form pengajuan, tanpa login) dari getMemberWorkloads — HANYA agregat aman untuk
+ * ditampilkan ke pemohon anonim: jumlah pekerjaan aktif. TIDAK menyertakan overdue, onHold, deadline
+ * terdekat, atau detail pekerjaan lain (itu untuk panel internal Kelola PIC saja, lihat getMemberWorkloads
+ * di atas) — pemohon tidak berhak melihat informasi operasional tim sedetail itu.
+ */
+export async function getPublicMemberWorkloads(): Promise<PublicMemberWorkload[]> {
+  const rows = await getMemberWorkloads(null);
+  return rows.map((r) => ({ memberId: r.memberId, active: r.active }));
+}
+
 export type MemberActiveOrder = { memberId: string; id: string; orderNumber: string; title: string; status: OrderStatus; deadlineAt: string };
 
 /** Order berjalan (belum selesai/dibatalkan) per anggota, urut deadline terdekat. */

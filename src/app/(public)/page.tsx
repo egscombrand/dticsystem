@@ -6,6 +6,7 @@ import { ClipboardList } from "lucide-react";
 import { SubmissionForm } from "@/components/orders/submission-form";
 import { listBrands } from "@/lib/server/repositories/brands";
 import { listOrderTypes, listPriorities, listTeamsWithMembers, resolveDefaultPriority } from "@/lib/server/repositories/master-data";
+import { getPublicMemberWorkloads } from "@/lib/server/repositories/workload";
 
 export const metadata: Metadata = {
   title: "Pengajuan Order Desain",
@@ -39,12 +40,13 @@ export default function HomeSubmitPage() {
 async function SubmissionFormLoader() {
   await connection();
   // Semua pilihan dibaca dari database (hanya data aktif; hanya field yang diperlukan dikirim ke browser).
-  const [brands, orderTypes, priorities, defaultPriority, teams] = await Promise.all([
+  const [brands, orderTypes, priorities, defaultPriority, teams, workloads] = await Promise.all([
     listBrands({ activeOnly: true }),
     listOrderTypes({ activeOnly: true }),
     listPriorities({ activeOnly: true }),
     resolveDefaultPriority(),
     listTeamsWithMembers(),
+    getPublicMemberWorkloads(),
   ]);
   return (
     <SubmissionForm
@@ -53,8 +55,11 @@ async function SubmissionFormLoader() {
       orderTypes={orderTypes.filter((t) => t.teamId).map((t) => ({ id: t.id, name: t.name, requiresDetail: t.requiresDetail, teamId: t.teamId }))}
       priorities={priorities.map((p) => ({ code: p.code, name: p.name }))}
       defaultPriority={defaultPriority}
-      // Tim aktif & anggota aktifnya (hanya id dan nama). PIC ditentukan server, bukan dipilih pemohon.
+      // Tim aktif & anggota aktifnya (hanya id dan nama). Pemohon memilih sendiri satu/lebih PIC dari daftar ini.
       teams={teams}
+      // Beban kerja agregat (jumlah pekerjaan aktif) per anggota — hanya untuk membantu Pemohon memilih,
+      // TIDAK menyertakan detail pekerjaan lain (lihat getPublicMemberWorkloads).
+      workloads={workloads}
     />
   );
 }

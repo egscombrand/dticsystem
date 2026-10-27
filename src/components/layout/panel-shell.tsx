@@ -29,6 +29,7 @@ export async function PanelShell({ children }: { children: React.ReactNode }) {
       systemName={site.systemName}
       tagline={site.tagline}
       defaultCollapsed={site.sidebarDefaultCollapsed}
+      userId={session.userId}
     >
       {children}
     </AppFrame>

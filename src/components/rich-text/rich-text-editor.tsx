@@ -18,7 +18,7 @@ import {
   Undo2,
   type LucideIcon,
 } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { cn } from "@/components/ui/cn";
 import "@/components/rich-text/rich-text.css";
 import type { RichDoc } from "@/lib/rich-text";
@@ -96,6 +96,7 @@ export function RichTextEditor({
   invalid,
   describedBy,
   onChange,
+  demoText,
 }: {
   id: string;
   initialContent?: RichDoc | null;
@@ -104,6 +105,13 @@ export function RichTextEditor({
   invalid?: boolean;
   describedBy?: string;
   onChange: (value: RichTextChange) => void;
+  /**
+   * Demonstrasi tutorial — mengetik LANGSUNG ke editor sungguhan ini (bukan kotak terpisah), hanya jika
+   * editor masih kosong (tidak pernah menimpa isi pengguna). `null` membersihkan kembali SELAMA isinya
+   * masih hasil demo (lihat demoActiveRef) — pemanggil (submission-form.tsx) juga me-remount seluruh
+   * editor lewat `key={formKey}` saat tutorial berakhir, sebagai jaring pengaman kedua yang pasti bersih.
+   */
+  demoText?: string | null;
 }) {
   const editor = useEditor({
     immediatelyRender: false,
@@ -140,6 +148,34 @@ export function RichTextEditor({
   useEffect(() => {
     if (editor && editor.isEditable === !!disabled) editor.setEditable(!disabled);
   }, [editor, disabled]);
+
+  const demoActiveRef = useRef(false);
+  useEffect(() => {
+    if (!editor) return;
+    const run = () => {
+      if (demoText) {
+        if (!demoActiveRef.current && !editor.isEmpty) return; // ada isi sungguhan dari pengguna — jangan ditimpa
+        demoActiveRef.current = true;
+        const setPlain = (text: string) => editor.commands.setContent({ type: "doc", content: [{ type: "paragraph", content: text ? [{ type: "text", text }] : [] }] });
+        if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+          setPlain(demoText);
+          return;
+        }
+        let i = 0;
+        const timer = window.setInterval(() => {
+          i += 4; // beberapa karakter sekaligus — animasi tetap terlihat tanpa membuat deskripsi panjang terasa lambat
+          setPlain(demoText.slice(0, i));
+          if (i >= demoText.length) window.clearInterval(timer);
+        }, 30);
+        return () => window.clearInterval(timer);
+      }
+      if (demoActiveRef.current) {
+        editor.commands.clearContent();
+        demoActiveRef.current = false;
+      }
+    };
+    return run();
+  }, [demoText, editor]);
 
   return (
     <div

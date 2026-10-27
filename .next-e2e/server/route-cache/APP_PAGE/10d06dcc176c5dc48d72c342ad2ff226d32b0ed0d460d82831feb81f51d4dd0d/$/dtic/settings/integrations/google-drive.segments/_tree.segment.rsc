@@ -1,0 +1,10 @@
+:HL["/_next/static/chunks/39r2cg310fbv8.css","style"]
+:HL["/_next/static/media/07a39a8a4660cc7c-s.p.0r6juujl39pe6.woff2","font",{"crossOrigin":"","type":"font/woff2"}]
+:HL["/_next/static/media/605ce01b664af129-s.p.0wgildi0cnwt9.woff2","font",{"crossOrigin":"","type":"font/woff2"}]
+6:[["children",{"s":"__PAGE__","h":162}]]
+5:[["children",{"s":"google-drive","h":98,"c":"$Q6"}]]
+4:[["children",{"s":"integrations","h":98,"c":"$Q5"}]]
+3:[["children",{"s":"settings","h":98,"c":"$Q4"}]]
+2:[["children",{"s":"(panel)","h":98,"c":"$Q3"}]]
+1:[["children",{"s":"dtic","h":98,"c":"$Q2"}]]
+0:{"b":"dglR-D90zc6kbX_IlO9Bg","t":{"t":{"s":"","h":82,"c":"$Q1"}}}

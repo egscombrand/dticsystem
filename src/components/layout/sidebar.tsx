@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  BookOpen,
   CalendarDays,
   ChevronDown,
   Database,
@@ -30,6 +31,9 @@ import { Logo } from "@/components/layout/logo";
 import { ROLE_LABEL, type Role } from "@/lib/auth/permissions";
 import { internalRequest } from "@/lib/client/api";
 import type { MenuIcon, MenuNode } from "@/lib/menu";
+import { TutorialProvider } from "@/components/tutorial/tutorial-context";
+import { ProductTour } from "@/components/tutorial/product-tour";
+import { OnboardingPrompt } from "@/components/tutorial/onboarding-prompt";
 
 const ICONS: Record<MenuIcon, LucideIcon> = {
   dashboard: LayoutDashboard,
@@ -45,6 +49,7 @@ const ICONS: Record<MenuIcon, LucideIcon> = {
   globe: Globe,
   database: Database,
   layers: Layers,
+  book: BookOpen,
 };
 
 const PREF_KEY = "dtic.sidebar.collapsed";
@@ -149,6 +154,7 @@ function NavTree({
             href={node.href}
             onClick={onNavigate}
             data-nav-item
+            data-tour={`nav-${node.key}`}
             aria-current={active ? "page" : undefined}
             aria-describedby={collapsed ? tooltipId : undefined}
             className={cn(rowClass, "min-w-0 flex-1 focus-visible:ring-2 focus-visible:ring-accent/40 focus-visible:outline-none")}
@@ -254,6 +260,10 @@ export type AppFrameProps = {
   systemName: string;
   tagline: string;
   defaultCollapsed: boolean;
+  /** Dipakai sebagai namespace penyimpanan preferensi/progres Panduan Penggunaan (lihat tutorial-progress.ts)
+   *  supaya tidak bercampur antar-akun pada komputer yang dipakai bersama — berbeda dari area publik
+   *  (tanpa akun) yang menyimpan progres per-browser saja. */
+  userId: string;
   children: ReactNode;
 };
 
@@ -261,7 +271,7 @@ export type AppFrameProps = {
  * Kerangka panel: sidebar desktop (bisa diciutkan) + drawer mobile + area konten.
  * Menu sudah difilter server per role; komponen ini hanya menampilkan.
  */
-export function AppFrame({ role, name, menu, systemName, tagline, defaultCollapsed, children }: AppFrameProps) {
+export function AppFrame({ role, name, menu, systemName, tagline, defaultCollapsed, userId, children }: AppFrameProps) {
   const pathname = usePathname();
   const collapsed = useSyncExternalStore(subscribePref, () => readPref(defaultCollapsed), () => defaultCollapsed);
   // Transisi lebar hanya aktif setelah hidrasi: preferensi tersimpan tidak beranimasi saat halaman dimuat.
@@ -308,6 +318,7 @@ export function AppFrame({ role, name, menu, systemName, tagline, defaultCollaps
   );
 
   return (
+    <TutorialProvider namespace={userId}>
     <div className="min-h-screen">
       <aside
         className={cn(
@@ -407,6 +418,18 @@ export function AppFrame({ role, name, menu, systemName, tagline, defaultCollaps
           {children}
         </div>
       </main>
+      <ProductTour />
+      {role === "manager" && (
+        <OnboardingPrompt
+          welcomePath="/dtic/dashboard"
+          tutorialId="manager-dashboard"
+          title="Selamat Datang, Manager"
+          description="Panduan singkat untuk memeriksa, memutuskan, dan memantau pekerjaan tim."
+          intro="Panduan ini menunjukkan cara memeriksa request yang masuk, memutuskan hasil QC, memantau penugasan PIC, dan menyelesaikan pekerjaan di DTIC Nexus."
+          dismissLabel="Masuk ke Dashboard"
+        />
+      )}
     </div>
+    </TutorialProvider>
   );
 }

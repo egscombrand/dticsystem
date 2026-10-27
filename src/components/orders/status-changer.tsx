@@ -52,7 +52,7 @@ export function StatusChanger({ orderId, status, actions, compact }: { orderId: 
   }
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col gap-3" data-testid="status-changer">
       {!compact && <p className="text-sm text-ink-2">Status saat ini: <span className="font-medium">{STATUS_META[status].label}</span></p>}
       <div className="flex flex-wrap gap-2">
         {actions.map((t) => (

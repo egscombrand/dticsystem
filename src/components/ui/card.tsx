@@ -1,8 +1,12 @@
-import type { ReactNode } from "react";
+import type { ComponentPropsWithoutRef, ReactNode } from "react";
 import { cn } from "@/components/ui/cn";
 
-export function Card({ children, className }: { children: ReactNode; className?: string }) {
-  return <section className={cn("rounded-xl border border-line bg-surface shadow-card", className)}>{children}</section>;
+export function Card({ children, className, ...rest }: { children: ReactNode; className?: string } & ComponentPropsWithoutRef<"section">) {
+  return (
+    <section className={cn("rounded-xl border border-line bg-surface shadow-card", className)} {...rest}>
+      {children}
+    </section>
+  );
 }
 
 export function CardHeader({ title, description, action }: { title: ReactNode; description?: ReactNode; action?: ReactNode }) {

@@ -73,14 +73,18 @@ async function DashboardContent({ searchParams }: { searchParams: PageProps<"/dt
         <StatCard label="Total order" value={stats.total} icon={Layers} hint="Semua status" href={listLink({})} />
         <StatCard label="Siap Dikerjakan" value={stats.byStatus.assigned} icon={Inbox} tone="accent" hint="Belum dimulai PIC" href={listLink({ status: "assigned" })} />
         <StatCard label="Sedang Dikerjakan" value={stats.byStatus.in_progress} icon={Clock3} tone="info" hint="Termasuk revisi" href={listLink({ status: "in_progress" })} />
-        <StatCard label="Menunggu QC Manager" value={stats.byStatus.pending_confirmation} icon={MessageSquareText} tone="accent" hint="Hasil menunggu pemeriksaan" href={listLink({ status: "pending_confirmation" })} />
+        <div data-tour="dash-qc-queue">
+          <StatCard label="Menunggu QC Manager" value={stats.byStatus.pending_confirmation} icon={MessageSquareText} tone="accent" hint="Hasil menunggu pemeriksaan" href={listLink({ status: "pending_confirmation" })} />
+        </div>
         <StatCard label="Perlu Revisi Internal" value={stats.byStatus.internal_revision} icon={Undo2} tone="danger" hint="Diminta Manager" href={listLink({ status: "internal_revision" })} />
         <StatCard label="Menunggu Masukan Pemohon" value={stats.byStatus.awaiting_requester} icon={Hourglass} tone="warning" hint="Hasil sudah dikirim" href={listLink({ status: "awaiting_requester" })} />
         <StatCard label="Ditunda" value={stats.byStatus.on_hold} icon={PauseCircle} tone="warning" hint="Ada alasan penundaan" href={listLink({ status: "on_hold" })} />
         <StatCard label="Selesai" value={stats.byStatus.completed} icon={CheckCircle2} tone="success" hint="Sudah dikonfirmasi" href={listLink({ status: "completed" })} />
         <StatCard label="Dibatalkan" value={stats.byStatus.cancelled} icon={XCircle} tone="neutral" hint="Alasan tercatat" href={listLink({ status: "cancelled" })} />
         <StatCard label="Terlambat" value={stats.overdue} icon={AlarmClock} tone="danger" hint="Lewat deadline, belum selesai" href={listLink({ deadline: "overdue" })} />
-        <StatCard label="Menunggu Tindakan" value={stats.actionNeeded} icon={Hourglass} tone="warning" hint="Belum mulai, menunggu QC, atau perlu revisi" href={`/dtic/orders?view=action`} />
+        <div data-tour="dash-action-needed">
+          <StatCard label="Menunggu Tindakan" value={stats.actionNeeded} icon={Hourglass} tone="warning" hint="Belum mulai, menunggu QC, atau perlu revisi" href={`/dtic/orders?view=action`} />
+        </div>
       </div>
 
       <div className="mt-6 grid gap-6 xl:grid-cols-3">
@@ -99,7 +103,7 @@ async function DashboardContent({ searchParams }: { searchParams: PageProps<"/dt
             />
           </div>
         </Card>
-        <Card className="xl:col-span-3">
+        <Card className="xl:col-span-3" data-tour="dash-pekerjaan-per-tim">
           <CardHeader title="Pekerjaan per tim" description="Kategori pekerjaan pada rentang tanggal masuk yang dipilih" />
           <div className="px-5 pb-5">
             <HBars
@@ -110,7 +114,7 @@ async function DashboardContent({ searchParams }: { searchParams: PageProps<"/dt
         </Card>
 
         <div className="flex flex-col gap-6 xl:col-span-2">
-          <Card>
+          <Card data-tour="dash-pekerjaan-terbaru">
             <CardHeader
               title="Pekerjaan terbaru"
               description="Pengajuan yang paling baru masuk"

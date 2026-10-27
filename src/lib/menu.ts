@@ -8,7 +8,7 @@
  */
 import { can, isRole, ROLES, type Capability, type Role } from "@/lib/auth/permissions";
 
-export type MenuIcon = "dashboard" | "list" | "kanban" | "calendar" | "file-plus" | "users" | "settings" | "shield" | "history" | "sliders" | "globe" | "database" | "layers";
+export type MenuIcon = "dashboard" | "list" | "kanban" | "calendar" | "file-plus" | "users" | "settings" | "shield" | "history" | "sliders" | "globe" | "database" | "layers" | "book";
 
 export type MenuRow = {
   key: string;
@@ -64,6 +64,7 @@ export const DEFAULT_MENU: MenuRow[] = [
   { key: "workload", parentKey: null, label: "Beban Kerja Tim", href: "/dtic/workload", icon: "users", requiredCapability: "orders.view_all", allowedRoles: ["super_admin", "manager"], isVisible: true, isCore: false, sortOrder: 35 },
   { key: "calendar", parentKey: null, label: "Kalender", href: "/dtic/calendar", icon: "calendar", requiredCapability: "dashboard.view", allowedRoles: ["super_admin", "manager", "staff"], isVisible: true, isCore: false, sortOrder: 40 },
   { key: "intake", parentKey: null, label: "Form Pengajuan", href: "/", icon: "file-plus", requiredCapability: "dashboard.view", allowedRoles: ["manager"], isVisible: true, isCore: false, sortOrder: 50 },
+  { key: "panduan", parentKey: null, label: "Panduan Penggunaan", href: "/dtic/panduan", icon: "book", requiredCapability: "dashboard.view", allowedRoles: ["manager", "staff"], isVisible: true, isCore: false, sortOrder: 55 },
   { key: "members", parentKey: null, label: "Anggota DTIC", href: "/dtic/settings/members", icon: "users", requiredCapability: "members.view", allowedRoles: ["super_admin", "manager"], isVisible: true, isCore: false, sortOrder: 60 },
   { key: "settings", parentKey: null, label: "Pengaturan", href: "/dtic/settings", icon: "settings", requiredCapability: "master.manage", allowedRoles: ["super_admin"], isVisible: true, isCore: false, sortOrder: 70 },
   { key: "master", parentKey: "settings", label: "Master Data", href: "/dtic/settings/brands", icon: "database", requiredCapability: "master.manage", allowedRoles: ["super_admin"], isVisible: true, isCore: false, sortOrder: 71 },

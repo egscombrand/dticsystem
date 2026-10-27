@@ -701,6 +701,12 @@
       "namedRegex": "^/dtic/orders(?:/)?$"
     },
     {
+      "page": "/dtic/panduan",
+      "regex": "^/dtic/panduan(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/dtic/panduan(?:/)?$"
+    },
+    {
       "page": "/dtic/qc-history",
       "regex": "^/dtic/qc\\-history(?:/)?$",
       "routeKeys": {},
@@ -783,6 +789,12 @@
       "regex": "^/favicon\\.ico(?:/)?$",
       "routeKeys": {},
       "namedRegex": "^/favicon\\.ico(?:/)?$"
+    },
+    {
+      "page": "/panduan",
+      "regex": "^/panduan(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/panduan(?:/)?$"
     },
     {
       "page": "/riwayat",

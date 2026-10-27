@@ -5,43 +5,42 @@
 5:"/_next/static/chunks/0735tn4i5ehe4.js"
 6:I[5014,["$2","$5"],"default"]
 7:I[22016,["$2","$5"],""]
-c:"/_next/static/chunks/1m95w5uo4ce3x.js"
-d:I[71460,["$2","$5","$c"],"default"]
-1a:"ViewportBoundary"
-1b:I[97367,["$2"],"$1a"]
-1c:"MetadataBoundary"
-1d:I[97367,["$2"],"$1c"]
-1e:"$Sreact.suspense"
-1f:I[27201,["$2"],"IconMark"]
-:HL["/_next/static/chunks/41q_wqy26yq8k.css","style"]
+c:"ClientSegmentRoot"
+d:I[92825,["$2"],"$c"]
+e:"/_next/static/chunks/2br0gozwp3itv.js"
+f:"/_next/static/chunks/1cfi9c7w2j2_h.js"
+10:I[48053,["$2","$e","$f"],"default"]
+11:"/_next/static/chunks/0_s7hj-ny32et.js"
+12:I[71460,["$2","$e","$f","$11"],"default"]
+18:"$Sreact.suspense"
+1a:I[97367,["$2"],"OutletBoundary"]
+1e:"ViewportBoundary"
+1f:I[97367,["$2"],"$1e"]
+20:"MetadataBoundary"
+21:I[97367,["$2"],"$20"]
+22:I[27201,["$2"],"IconMark"]
+:HL["/_next/static/chunks/39r2cg310fbv8.css","style"]
 9:X
 9:C
 a:X
 a:300
 a:C
-11:X
-11:C
-15:X
-15:C
-19:X
-19:C
-16:[["children",{"s":"__PAGE__","h":49314,"d":{"r":"$L17","p":"$@18","v":"$19","s":"$a"}}]]
-12:[["children",{"s":"riwayat","h":49250,"d":{"r":"$L13","p":"$@14","v":"$15","s":"$a"},"c":"$Q16"}]]
-b:[["children",{"s":"(public)","h":49250,"d":{"r":["$","$1","c",{"children":[[["$","script","script-0",{"src":"/_next/static/chunks/0735tn4i5ehe4.js","async":true}]],["$","div",null,{"className":"min-h-screen","children":[["$","header",null,{"className":"sticky top-0 z-30 border-b border-line bg-surface/95 backdrop-blur","children":["$","div",null,{"className":"mx-auto flex h-16 max-w-6xl items-center justify-between gap-2 px-3 sm:gap-4 sm:px-6","children":[["$","$L7",null,{"href":"/","aria-label":"DTIC Connect — beranda","className":"rounded-md","children":["$","div",null,{"className":"flex items-center gap-2 sm:gap-2.5","children":[["$","span",null,{"className":"flex size-8 shrink-0 items-center justify-center rounded-lg bg-navy text-[12px] font-bold tracking-tight text-white sm:size-9 sm:text-[13px]","aria-hidden":"true","children":"DC"}],["$","span",null,{"className":"leading-tight","children":[["$","span",null,{"className":"block text-[15px] font-semibold text-navy","children":"DTIC Connect"}],["$","span",null,{"className":"hidden text-[11.5px] text-ink-3 sm:block","children":"One Portal for Creative & IT Requests"}]]}]]}]}],["$","nav",null,{"aria-label":"Navigasi utama","className":"flex min-w-0 items-center gap-px text-[12px] font-medium sm:gap-1 sm:text-[13px]","children":[["$","$L7",null,{"href":"/","className":"shrink-0 rounded-lg px-1 py-2 text-navy hover:bg-teal/10 hover:text-teal sm:px-3","children":[["$","span",null,{"className":"sm:hidden","children":"Ajukan"}],["$","span",null,{"className":"hidden sm:inline","children":"Ajukan Request"}]]}],["$","$L7",null,{"href":"/riwayat","className":"shrink-0 rounded-lg px-1 py-2 text-navy hover:bg-teal/10 hover:text-teal sm:px-3","children":[["$","span",null,{"className":"sm:hidden","children":"Riwayat"}],["$","span",null,{"className":"hidden sm:inline","children":"Riwayat Request"}]]}],["$","$L7",null,{"href":"/bantuan","className":"flex shrink-0 items-center gap-1.5 rounded-lg px-1 py-2 text-navy hover:bg-teal/10 hover:text-teal sm:px-3","children":[["$","$L6",null,{"icon":{"name":"message-circle-question-mark","size":24,"node":[["path",{"d":"M2.992 16.342a2 2 0 0 1 .094 1.167l-1.065 3.29a1 1 0 0 0 1.236 1.168l3.413-.998a2 2 0 0 1 1.099.092 10 10 0 1 0-4.777-4.719","key":"1sd12s"}],["path",{"d":"M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3","key":"1u773s"}],["path",{"d":"M12 17h.01","key":"p32p05"}]],"aliases":["message-circle-question"]},"className":"hidden size-4 sm:inline","aria-hidden":"true"}],["$","span",null,{"className":"sm:hidden","children":"Bantuan"}],["$","span",null,{"className":"hidden sm:inline","children":"Bantuan & Masukan"}]]}]]}]]}]}],["$","main",null,{"className":"mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10","children":["$","$L3",null,{"parallelRouterKey":"children","error":"$d","errorStyles":[],"errorScripts":[["$","script","script-0",{"src":"/_next/static/chunks/1m95w5uo4ce3x.js","async":true}]],"template":"$Le","notFound":["$Lf",[]]}]}]]}]]}],"p":"$@10","v":"$11","s":"$a"},"c":"$Q12"}]]
-21:X
-21:C
+14:X
+14:C
+1d:X
+1d:C
+17:[["children",{"s":"__PAGE__","h":49314,"d":{"r":["$","$1","c",{"children":[[["$","div",null,{"className":"mb-8","children":[["$","h1",null,{"className":"text-2xl font-semibold tracking-tight text-navy sm:text-[28px]","children":"Riwayat Request"}],["$","p",null,{"className":"mt-2 max-w-2xl text-sm text-ink-3","children":"Cari request dengan nomor order untuk melihat status terkini dan progresnya."}]]}],["$","$18",null,{"fallback":["$","div",null,{"aria-busy":"true","className":"mx-auto max-w-xl rounded-2xl border border-line bg-surface p-5 shadow-card sm:p-7","children":[["$","span",null,{"className":"sr-only","children":"Memuat…"}],["$","div",null,{"className":"animate-pulse rounded-md bg-[#eceef1] h-4 w-44","aria-hidden":"true"}],["$","div",null,{"className":"animate-pulse rounded-md bg-[#eceef1] mt-5 h-10 w-full","aria-hidden":"true"}],["$","div",null,{"className":"animate-pulse rounded-md bg-[#eceef1] mt-4 h-10 w-full","aria-hidden":"true"}]]}],"children":"$L19"}]],[["$","script","script-0",{"src":"/_next/static/chunks/1832na88ryvxd.js","async":true}]],["$","$L1a",null,{"children":["$","$18",null,{"name":"Next.MetadataOutlet","children":"$@1b"}]}]]}],"p":"$@1c","v":"$1d","s":"$a"}}]]
+15:[["children",{"s":"riwayat","h":49250,"d":{"r":["$","$1","c",{"children":[null,["$","$L3",null,{"parallelRouterKey":"children","template":["$","$L4",null,{}]}]]}],"p":"$@16","v":"$14","s":"$a"},"c":"$Q17"}]]
+b:[["children",{"s":"(public)","h":49250,"d":{"r":["$","$1","c",{"children":[[["$","script","script-0",{"src":"/_next/static/chunks/2br0gozwp3itv.js","async":true}],["$","script","script-1",{"src":"/_next/static/chunks/1cfi9c7w2j2_h.js","async":true}]],["$","$Ld",null,{"Component":"$10","slots":{"children":["$","$L3",null,{"parallelRouterKey":"children","error":"$12","errorStyles":[],"errorScripts":[["$","script","script-0",{"src":"/_next/static/chunks/0_s7hj-ny32et.js","async":true}]],"template":["$","$L4",null,{}],"notFound":[["$","div",null,{"className":"flex min-h-screen items-center justify-center px-4","children":["$","div",null,{"className":"max-w-sm text-center","children":[["$","div",null,{"className":"mx-auto flex size-11 items-center justify-center rounded-full bg-surface ring-1 ring-line","children":["$","$L6",null,{"icon":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:props:children:props:children:0:props:children:props:icon","className":"size-5 text-ink-3","aria-hidden":"true"}]}],["$","h1",null,{"className":"mt-4 text-base font-semibold text-ink","children":"Halaman tidak ditemukan"}],["$","p",null,{"className":"mt-1 text-sm text-ink-3","children":"Alamat yang Anda buka tidak tersedia."}],["$","$L7",null,{"href":"/","className":"mt-5 inline-block text-sm font-medium text-accent hover:text-accent-hover","children":"Ke form pengajuan order"}]]}]}],[]]}]},"serverProvidedParams":null}]]}],"p":"$@13","v":"$14","s":"$a"},"c":"$Q15"}]]
 24:X
 24:C
-0:{"t":{"t":{"s":"","h":49234,"d":{"r":["$","$1","c",{"children":[[["$","link","0",{"rel":"stylesheet","href":"/_next/static/chunks/41q_wqy26yq8k.css","precedence":"next"}],["$","script","script-0",{"src":"/_next/static/chunks/1tq6ppe__m8m-.js","async":true}]],["$","html",null,{"lang":"id","className":"T19VSG_variable _8Li5zG_variable h-full antialiased","children":["$","body",null,{"className":"min-h-full","children":["$","$L3",null,{"parallelRouterKey":"children","template":["$","$L4",null,{}],"notFound":[["$","div",null,{"className":"flex min-h-screen items-center justify-center px-4","children":["$","div",null,{"className":"max-w-sm text-center","children":[["$","div",null,{"className":"mx-auto flex size-11 items-center justify-center rounded-full bg-surface ring-1 ring-line","children":["$","$L6",null,{"icon":{"name":"search-x","size":24,"node":[["path",{"d":"m13.5 8.5-5 5","key":"1cs55j"}],["path",{"d":"m8.5 8.5 5 5","key":"a8mexj"}],["circle",{"cx":"11","cy":"11","r":"8","key":"4ej97u"}],["path",{"d":"m21 21-4.3-4.3","key":"1qie3q"}]]},"className":"size-5 text-ink-3","aria-hidden":"true"}]}],["$","h1",null,{"className":"mt-4 text-base font-semibold text-ink","children":"Halaman tidak ditemukan"}],["$","p",null,{"className":"mt-1 text-sm text-ink-3","children":"Alamat yang Anda buka tidak tersedia."}],["$","$L7",null,{"href":"/","className":"mt-5 inline-block text-sm font-medium text-accent hover:text-accent-hover","children":"Ke form pengajuan order"}]]}]}],[]]}]}]}]]}],"p":"$@8","v":"$9","s":"$a"},"c":"$Qb"},"h":{"r":["$","$1","h",{"children":[null,["$","$L1b",null,{"children":[["$","meta","0",{"charSet":"utf-8"}],["$","meta","1",{"name":"viewport","content":"width=device-width, initial-scale=1"}],["$","meta","2",{"name":"theme-color","content":"#ffffff"}],["$","meta","3",{"name":"color-scheme","content":"light"}]]}],["$","$L1d",null,{"children":[["$","div",null,{"hidden":true,"children":["$","$1e",null,{"name":"Next.Metadata","children":[["$","title","0",{"children":"Riwayat Request · DTIC System"}],["$","meta","1",{"name":"description","content":"Sistem pengajuan dan manajemen order desain Department Creative IT."}],["$","meta","2",{"name":"robots","content":"noindex, nofollow"}],["$","link","3",{"rel":"icon","href":"/favicon.ico?favicon.117ezoe8m31dk.ico","sizes":"48x48","type":"image/x-icon"}],["$","$L1f","4",{}]]}]}],null]}],["$","meta",null,{"name":"next-size-adjust","content":""}]]}],"p":"$@20","v":"$21","s":"$a"}},"a":"$@22","u":"$@23","b":"z7yt5yCP2zlwPNB97uAs2","r":"$24"}
-26:I[97367,["$2"],"OutletBoundary"]
-e:["$","$L4",null,{}]
-f:["$","div",null,{"className":"flex min-h-screen items-center justify-center px-4","children":["$","div",null,{"className":"max-w-sm text-center","children":[["$","div",null,{"className":"mx-auto flex size-11 items-center justify-center rounded-full bg-surface ring-1 ring-line","children":["$","$L6",null,{"icon":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:props:children:props:children:0:props:children:props:icon","className":"size-5 text-ink-3","aria-hidden":"true"}]}],["$","h1",null,{"className":"mt-4 text-base font-semibold text-ink","children":"Halaman tidak ditemukan"}],["$","p",null,{"className":"mt-1 text-sm text-ink-3","children":"Alamat yang Anda buka tidak tersedia."}],["$","$L7",null,{"href":"/","className":"mt-5 inline-block text-sm font-medium text-accent hover:text-accent-hover","children":"Ke form pengajuan order"}]]}]}]
-13:["$","$1","c",{"children":[null,["$","$L3",null,{"parallelRouterKey":"children","template":["$","$L4",null,{}]}]]}]
-17:["$","$1","c",{"children":[[["$","div",null,{"className":"mb-8","children":[["$","h1",null,{"className":"text-2xl font-semibold tracking-tight text-navy sm:text-[28px]","children":"Riwayat Request"}],["$","p",null,{"className":"mt-2 max-w-2xl text-sm text-ink-3","children":"Cari request dengan nomor order untuk melihat status terkini dan progresnya."}]]}],["$","$1e",null,{"fallback":["$","div",null,{"aria-busy":"true","className":"mx-auto max-w-xl rounded-2xl border border-line bg-surface p-5 shadow-card sm:p-7","children":[["$","span",null,{"className":"sr-only","children":"Memuat…"}],["$","div",null,{"className":"animate-pulse rounded-md bg-[#eceef1] h-4 w-44","aria-hidden":"true"}],["$","div",null,{"className":"animate-pulse rounded-md bg-[#eceef1] mt-5 h-10 w-full","aria-hidden":"true"}],["$","div",null,{"className":"animate-pulse rounded-md bg-[#eceef1] mt-4 h-10 w-full","aria-hidden":"true"}]]}],"children":"$L25"}]],[["$","script","script-0",{"src":"/_next/static/chunks/43n30o1c6u5n6.js","async":true}]],["$","$L26",null,{"children":["$","$1e",null,{"name":"Next.MetadataOutlet","children":"$@27"}]}]]}]
-23:false
-27:null
-22:null
-14:"$undefined"
-10:"$undefined"
+27:X
+27:C
+0:{"t":{"t":{"s":"","h":49234,"d":{"r":["$","$1","c",{"children":[[["$","link","0",{"rel":"stylesheet","href":"/_next/static/chunks/39r2cg310fbv8.css","precedence":"next"}],["$","script","script-0",{"src":"/_next/static/chunks/1tq6ppe__m8m-.js","async":true}]],["$","html",null,{"lang":"id","className":"T19VSG_variable _8Li5zG_variable h-full antialiased","children":["$","body",null,{"className":"min-h-full","children":["$","$L3",null,{"parallelRouterKey":"children","template":["$","$L4",null,{}],"notFound":[["$","div",null,{"className":"flex min-h-screen items-center justify-center px-4","children":["$","div",null,{"className":"max-w-sm text-center","children":[["$","div",null,{"className":"mx-auto flex size-11 items-center justify-center rounded-full bg-surface ring-1 ring-line","children":["$","$L6",null,{"icon":{"name":"search-x","size":24,"node":[["path",{"d":"m13.5 8.5-5 5","key":"1cs55j"}],["path",{"d":"m8.5 8.5 5 5","key":"a8mexj"}],["circle",{"cx":"11","cy":"11","r":"8","key":"4ej97u"}],["path",{"d":"m21 21-4.3-4.3","key":"1qie3q"}]]},"className":"size-5 text-ink-3","aria-hidden":"true"}]}],["$","h1",null,{"className":"mt-4 text-base font-semibold text-ink","children":"Halaman tidak ditemukan"}],["$","p",null,{"className":"mt-1 text-sm text-ink-3","children":"Alamat yang Anda buka tidak tersedia."}],["$","$L7",null,{"href":"/","className":"mt-5 inline-block text-sm font-medium text-accent hover:text-accent-hover","children":"Ke form pengajuan order"}]]}]}],[]]}]}]}]]}],"p":"$@8","v":"$9","s":"$a"},"c":"$Qb"},"h":{"r":["$","$1","h",{"children":[null,["$","$L1f",null,{"children":[["$","meta","0",{"charSet":"utf-8"}],["$","meta","1",{"name":"viewport","content":"width=device-width, initial-scale=1"}],["$","meta","2",{"name":"theme-color","content":"#ffffff"}],["$","meta","3",{"name":"color-scheme","content":"light"}]]}],["$","$L21",null,{"children":[["$","div",null,{"hidden":true,"children":["$","$18",null,{"name":"Next.Metadata","children":[["$","title","0",{"children":"Riwayat Request · DTIC System"}],["$","meta","1",{"name":"description","content":"Sistem pengajuan dan manajemen order desain Department Creative IT."}],["$","meta","2",{"name":"robots","content":"noindex, nofollow"}],["$","link","3",{"rel":"icon","href":"/favicon.ico?favicon.117ezoe8m31dk.ico","sizes":"48x48","type":"image/x-icon"}],["$","$L22","4",{}]]}]}],null]}],["$","meta",null,{"name":"next-size-adjust","content":""}]]}],"p":"$@23","v":"$24","s":"$a"}},"a":"$@25","u":"$@26","b":"dglR-D90zc6kbX_IlO9Bg","r":"$27"}
+1b:null
+26:false
+25:null
+16:"$undefined"
+13:"$undefined"
 8:"$undefined"
-20:"$undefined"
+23:"$undefined"

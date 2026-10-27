@@ -36,7 +36,7 @@ export function OrderTable({ orders, now, superAdmin = false }: { orders: OrderL
             {orders.map((o) => {
               const late = isOverdue(o.deadlineAt, o.status, now);
               return (
-                <tr key={o.id} className="group hover:bg-subtle/70">
+                <tr key={o.id} data-tour="orders-row" className="group hover:bg-subtle/70">
                   <td className="max-w-[280px] px-5 py-3.5">
                     <Link href={`/dtic/orders/${o.id}`} className="block rounded focus-visible:outline-offset-4">
                       <span className="block truncate font-medium text-ink group-hover:text-accent">{o.title}</span>
@@ -116,7 +116,7 @@ export function OrderTable({ orders, now, superAdmin = false }: { orders: OrderL
       {/* Mobile */}
       <ul className="divide-y divide-line md:hidden">
         {orders.map((o) => (
-          <li key={o.id}>
+          <li key={o.id} data-tour="orders-row">
             <Link href={`/dtic/orders/${o.id}`} className="block px-4 pt-4 pb-3 hover:bg-subtle">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">

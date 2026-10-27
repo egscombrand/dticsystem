@@ -280,7 +280,7 @@ async function OrderDetailContent({ params }: { params: PageProps<"/dtic/orders/
         )}
       </header>
 
-      <div className="rounded-2xl border border-line bg-surface p-4 shadow-card">
+      <div className="rounded-2xl border border-line bg-surface p-4 shadow-card" data-testid="work-stepper">
         <WorkStepper current={workStage} cancelled={order.status === "cancelled"} hasEverRequestedRevision={hasEverRequestedRevision} revisionCount={revisionEvents.length} requesterDecision={requesterDecision} />
       </div>
 
@@ -533,7 +533,7 @@ async function OrderDetailContent({ params }: { params: PageProps<"/dtic/orders/
 
         <aside className="flex min-w-0 flex-col gap-6 xl:col-start-2 xl:row-start-2 xl:self-start">
           {canAssign && (
-            <SideCard title="Kelola PIC">
+            <SideCard title="Kelola PIC" testId="pic-panel">
               <AssignmentField orderId={order.id} assignees={order.assignees} members={members} canAssign={canAssign} workloads={workloads} />
             </SideCard>
           )}

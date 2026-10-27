@@ -105,7 +105,7 @@ export function FeedbackForm({ initialOrderNumber = "" }: { initialOrderNumber?:
     <form ref={formRef} onSubmit={onSubmit} className="mx-auto max-w-2xl rounded-2xl border border-line bg-surface p-5 shadow-card sm:p-7" noValidate>
       <div className="flex flex-col gap-4">
         <Field label="Jenis Laporan" htmlFor="kind" required error={fieldErrors.kind}>
-          <Select id="kind" name="kind" value={kind} onChange={(e) => setKind(e.target.value as FeedbackKind)} disabled={busy}>
+          <Select data-tour="bantuan-jenis" id="kind" name="kind" value={kind} onChange={(e) => setKind(e.target.value as FeedbackKind)} disabled={busy}>
             {FEEDBACK_KINDS.map((k) => <option key={k} value={k}>{FEEDBACK_KIND_LABEL[k]}</option>)}
           </Select>
         </Field>
@@ -121,7 +121,7 @@ export function FeedbackForm({ initialOrderNumber = "" }: { initialOrderNumber?:
         </Field>
 
         <Field label="Detail Laporan" htmlFor="detail" required error={fieldErrors.detail} hint={DETAIL_HINT[kind]}>
-          <Textarea id="detail" name="detail" maxLength={5000} className="min-h-32" disabled={busy} invalid={!!fieldErrors.detail} />
+          <Textarea data-tour="bantuan-detail" id="detail" name="detail" maxLength={5000} className="min-h-32" disabled={busy} invalid={!!fieldErrors.detail} />
         </Field>
 
         {kind === "bug" && (
@@ -173,7 +173,7 @@ export function FeedbackForm({ initialOrderNumber = "" }: { initialOrderNumber?:
           </p>
         )}
 
-        <Button type="submit" loading={busy} className="bg-navy hover:bg-navy/90">{busy ? "Mengirim…" : "Kirim Laporan"}</Button>
+        <Button data-tour="bantuan-kirim" type="submit" loading={busy} className="bg-navy hover:bg-navy/90">{busy ? "Mengirim…" : "Kirim Laporan"}</Button>
       </div>
     </form>
   );

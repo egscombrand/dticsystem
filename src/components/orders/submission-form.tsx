@@ -1,12 +1,13 @@
 "use client";
 
-import { ArrowLeft, ArrowRight, Briefcase, CalendarClock, Camera, Check, CheckCircle2, ClipboardCheck, Copy, ExternalLink, FileText, KeyRound, Link2, Monitor, Palette, Paperclip, Send, Upload, UserRound, Users, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Briefcase, CalendarClock, Camera, Check, CheckCircle2, ClipboardCheck, Copy, ExternalLink, FileText, KeyRound, Link2, Monitor, Palette, Paperclip, Send, Upload, UserRound, Users, Video, X } from "lucide-react";
 import Link from "next/link";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Alert } from "@/components/ui/alert";
 import { cn } from "@/components/ui/cn";
 import { Button } from "@/components/ui/button";
 import { SubmitConfirmDialog } from "@/components/orders/submit-confirm-dialog";
+import { useTutorial } from "@/components/tutorial/tutorial-context";
 import { RichTextEditor, type RichTextChange } from "@/components/rich-text/rich-text-editor";
 import { Field, Input, Select } from "@/components/ui/form";
 import { UPLOAD_LIMITS } from "@/lib/config/app";
@@ -16,6 +17,7 @@ import { ACCEPT_ATTRIBUTE, ALLOWED_EXTENSIONS_LABEL, checkFileBasics, formatFile
 import { toFieldErrors, type FieldErrors } from "@/lib/validation/common";
 import { orderSubmissionSchema } from "@/lib/validation/order";
 import type { OrderTypeOption, PriorityOption, TeamOption } from "@/lib/types";
+import { loadLevels, LOAD_LABEL, type LoadLevel } from "@/lib/workload";
 
 type Brand = { id: string; name: string };
 export type SubmissionOptions = {
@@ -23,8 +25,12 @@ export type SubmissionOptions = {
   orderTypes: Pick<OrderTypeOption, "id" | "name" | "requiresDetail" | "teamId">[];
   priorities: Pick<PriorityOption, "code" | "name">[];
   defaultPriority: string;
-  /** Tim penanggung jawab per kategori, dengan anggota aktif. Seluruh anggota tim menjadi PIC (ditentukan server). */
+  /** Tim penanggung jawab per kategori, dengan anggota aktif. Pemohon memilih sendiri satu/lebih PIC dari daftar ini. */
   teams: TeamOption[];
+  /** Beban kerja agregat (jumlah pekerjaan aktif) per anggota — lihat getPublicMemberWorkloads. Tipe
+   *  didefinisikan di sini (bukan diimpor dari repository "server-only") supaya komponen klien ini tetap
+   *  aman dibundel ke browser. */
+  workloads?: { memberId: string; active: number }[];
 };
 /** Status notifikasi Telegram, terpisah dari status penyimpanan pengajuan. */
 type NotificationState = "sent" | "pending" | "failed" | "no_destination";
@@ -253,9 +259,30 @@ const TEAM_TONE: Record<string, { card: string; hover: string; iconOn: string; i
     iconOff: "bg-brand-mint text-brand-emerald",
     text: "text-brand-emerald",
   },
+  "editing-kelas-greenskill-id": {
+    card: "border-brand-amber bg-brand-amber-soft shadow-card ring-1 ring-brand-amber/30",
+    hover: "hover:border-brand-amber/60",
+    iconOn: "bg-brand-amber text-white",
+    iconOff: "bg-brand-amber-soft text-brand-amber",
+    text: "text-brand-amber",
+  },
 };
 
-export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority, teams }: SubmissionOptions) {
+/** Warna indikator beban kerja (lihat src/lib/workload.ts LoadLevel) — relatif terhadap tim yang ditampilkan. */
+const LOAD_TONE: Record<LoadLevel, string> = {
+  low: "bg-ok-soft text-ok ring-ok/30",
+  medium: "bg-warn-soft text-warn ring-warn/30",
+  high: "bg-bad-soft text-bad ring-bad/30",
+  even: "bg-subtle text-ink-2 ring-line",
+};
+
+export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority, teams, workloads = [] }: SubmissionOptions) {
+  // Mode simulasi tutorial: HANYA aktif saat tutorial "Mengajukan Request" sedang berjalan (lihat
+  // useTutorial). Melonggarkan validasi PER LANGKAH di frontend supaya semua tahap bisa dilihat tanpa
+  // mengisi kolom wajib — tidak pernah mengubah validasi server, dan onSubmit tetap memblokir pengiriman
+  // sungguhan selama mode ini aktif (lihat onSubmit). Berakhir otomatis begitu tour ditutup.
+  const { active: activeTutorial, stepIndex: tourStepIndex } = useTutorial();
+  const tourSimulation = activeTutorial?.id === "mengajukan-request";
   const formRef = useRef<HTMLFormElement>(null);
   const submissionKey = useRef<string | null>(null);
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
@@ -271,15 +298,204 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
   const [step, setStep] = useState(0); // langkah aktif (0–3): mengatur tampilan dan validasi per langkah
   const [summary, setSummary] = useState<ReviewSummary | null>(null);
   const [dragging, setDragging] = useState(false); // dropzone: file sedang diseret ke area unggah
+  const [demoFile, setDemoFile] = useState<{ fileName: string; fileSize: string } | null>(null); // contoh lampiran tutorial — TIDAK PERNAH masuk ke `files` sungguhan
+  const [demoBriefText, setDemoBriefText] = useState<string | null>(null); // diteruskan ke RichTextEditor.demoText
+  const [demoCursor, setDemoCursor] = useState<{ x: number; y: number; clicking: boolean } | null>(null); // kursor simulasi murni visual (fixed, pointer-events-none)
   const inFlight = useRef(false); // guard sinkron: klik berulang tidak memulai pengiriman kedua
   // Kategori = tim. Jenis pekerjaan & tim penanggung jawab mengikuti kategori; server menetapkan seluruh anggota tim.
   const team = teams.find((t) => t.id === teamId) ?? null;
   const typesForTeam = orderTypes.filter((t) => t.teamId === teamId);
+  // Beban kerja (lihat src/lib/workload.ts — logika murni yang SAMA dipakai panel Kelola PIC internal):
+  // anggota diurutkan beban aktif TERENDAH dulu; anggota tanpa data workload ditempatkan SETELAH yang
+  // punya data (bukan dianggap nol/beban terendah). Hanya dihitung relatif terhadap tim yang sedang
+  // ditampilkan, bukan seluruh tim sekaligus. Persentase kapasitas TIDAK ditampilkan — sistem belum
+  // memiliki data kapasitas/bobot pekerjaan yang valid (lihat workload.ts), jadi field itu akan
+  // menampilkan "Belum cukup data" di UI, bukan angka karangan.
+  const workloadOf = (id: string) => workloads.find((w) => w.memberId === id);
+  const teamLoadLevels = team ? loadLevels(workloads.filter((w) => team.members.some((m) => m.id === w.memberId))) : {};
+  const sortedMembers = team
+    ? [...team.members].sort((a, b) => {
+        const wa = workloadOf(a.id)?.active;
+        const wb = workloadOf(b.id)?.active;
+        if (wa === undefined && wb === undefined) return a.name.localeCompare(b.name);
+        if (wa === undefined) return 1;
+        if (wb === undefined) return -1;
+        return wa - wb || a.name.localeCompare(b.name);
+      })
+    : [];
   const isDesign = team?.slug === "graphic-design";
   const requiresDetail = orderTypes.find((t) => t.id === designTypeId)?.requiresDetail ?? false;
   const [minDeadline, setMinDeadline] = useState<string | undefined>(undefined);
 
   const sending = phase.kind === "sending";
+  const STEP_LABELS = ["Kategori", "Detail pekerjaan", "Tim & deadline", "Tinjau"];
+
+  function buildSummary(): ReviewSummary {
+    const form = formRef.current;
+    const fd = form ? new FormData(form) : new FormData();
+    const text = (k: string) => (typeof fd.get(k) === "string" ? String(fd.get(k)) : "");
+    const dateKey = text("deadline");
+    const timeKey = text("deadlineTime");
+    const typeName = typesForTeam.find((t) => t.id === designTypeId)?.name ?? "";
+    return {
+      title: text("title"),
+      teamName: team?.name ?? "",
+      teamSlug: team?.slug ?? "",
+      typeName: text("designTypeOther") || typeName,
+      brandName: brands.find((b) => b.id === text("brandId"))?.name ?? "",
+      requesterName: text("requesterName"),
+      pics: team ? team.members.filter((m) => picIds.includes(m.id)).map((m) => ({ id: m.id, name: m.name })) : [],
+      priorityName: priorities.find((p) => p.code === text("priority"))?.name ?? "",
+      deadlineDate: dateKey ? formatDate(`${dateKey}T12:00:00+07:00`) : "",
+      deadlineTime: timeKey ? `${timeKey.replace(":", ".")} WIB` : "23.59 WIB",
+      endOfDay: !timeKey,
+      sizeLabel: isDesign ? (DESIGN_SIZE_PRESETS.find((sp) => sp.value === sizePreset)?.label ?? "") : "",
+      driveUrl: text("driveUrl"),
+      briefText: brief?.text.trim() ?? "",
+      files: files.map((file) => ({ name: file.name, size: file.size })),
+    };
+  }
+
+  function goTo(i: number, opts: { scroll?: boolean } = {}) {
+    setPhase((p) => (p.kind === "error" ? { kind: "idle" } : p));
+    setStep(i);
+    if (i === STEP_LABELS.length - 1) setSummary(buildSummary());
+    if (opts.scroll !== false) window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  // Sinkronkan wizard ke langkah yang DIBAHAS tour "Mengajukan Request" (lihat tutorials.ts wizardStep) —
+  // tanpa ini, tour bisa menjelaskan elemen yang masih tersembunyi karena wizard belum dipindah ke sana
+  // (akar masalah highlight tidak sesuai modal). Scroll dilewatkan ke false: ProductTour sendiri yang
+  // men-scroll ke posisi target setelah elemen benar-benar terlihat. Diletakkan SEBELUM early return
+  // "phase.kind === success" di bawah — hook harus selalu terpanggil di urutan yang sama tiap render.
+  // Field yang pernah diisi demo SELAMA sesi tour ini berjalan — SENGAJA bertahan lintas langkah (supaya
+  // langkah Tinjau menampilkan ringkasan dari data yang "baru saja diketik", seperti demonstrasi sungguhan),
+  // dan HANYA dikosongkan total saat tour benar-benar berakhir (lihat cabang "wasTourSimulating" di bawah).
+  const demoFieldsRef = useRef<Set<HTMLInputElement>>(new Set());
+  const wasTourSimulating = useRef(false);
+  useEffect(() => {
+    const apply = () => {
+      if (tourSimulation && activeTutorial) {
+        const wizardStep = activeTutorial.steps[tourStepIndex]?.target?.wizardStep;
+        if (wizardStep !== undefined && wizardStep !== step) goTo(wizardStep, { scroll: false });
+      } else if (wasTourSimulating.current) {
+        // Tour baru saja ditutup/selesai: jangan biarkan pengguna "tertinggal" di langkah mana pun tour
+        // terakhir berada (terutama Tinjau dengan ringkasan dari isian simulasi) — kembalikan ke langkah
+        // 1 yang bersih, siap diisi sungguhan dalam mode NORMAL (tourSimulation sudah false di sini).
+        // formKey di-naikkan sebagai jaring pengaman KEDUA (selain demoText) agar editor deskripsi pasti
+        // remount bersih — tidak mengandalkan satu mekanisme saja untuk sesuatu sepenting ini. Field teks
+        // yang terisi demo SEPANJANG sesi tour (bukan hanya langkah terakhir) dikosongkan tuntas di sini.
+        setStep(0);
+        setSummary(null);
+        setErrors({});
+        setFormKey((k) => k + 1);
+        setDemoBriefText(null);
+        setDemoFile(null);
+        for (const el of demoFieldsRef.current) el.value = "";
+        demoFieldsRef.current.clear();
+      }
+      wasTourSimulating.current = tourSimulation;
+    };
+    apply();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tourSimulation, tourStepIndex, activeTutorial]);
+
+  // Demonstrasi tutorial LANGSUNG pada field asli (lihat tutorials.ts FormDemo) — field teks dimanipulasi
+  // via DOM (tidak controlled React, aman — nilai hanya dibaca lewat FormData saat pengajuan sungguhan).
+  // HANYA mengisi field yang masih kosong (tidak pernah menimpa isian pengguna). Efek ini hanya menjalankan
+  // ANIMASI langkah saat ini — pengosongan field dilakukan terpusat di efek sinkronisasi wizard di atas
+  // (saat tour benar-benar berakhir), BUKAN di sini, supaya isian demo bertahan sampai langkah Tinjau.
+  useEffect(() => {
+    const timers: number[] = [];
+    const run = () => {
+      const tourStep = tourSimulation && activeTutorial ? activeTutorial.steps[tourStepIndex] : null;
+      const fd = tourStep?.formDemo;
+      if (!fd) return;
+      // Field terkait baru benar-benar terlihat setelah wizard disinkronkan ke langkah yang sesuai (lihat
+      // efek di atas) — hindari mendemonstrasikan elemen yang masih tersembunyi.
+      if (tourStep!.target?.wizardStep !== undefined && tourStep!.target.wizardStep !== step) return;
+      const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      if (fd.pulseSelector) {
+        const el = document.querySelector<HTMLElement>(fd.pulseSelector);
+        if (el) {
+          const r = el.getBoundingClientRect();
+          const target = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+          if (reduced) {
+            el.classList.add("tour-demo-pulse");
+            timers.push(window.setTimeout(() => el.classList.remove("tour-demo-pulse"), 1200));
+          } else {
+            // Kursor simulasi bergerak ke kartu lalu "klik" (skala kecil) sebelum kartu berkedip menandai
+            // contoh pilihan — bukan sekadar kedip tiba-tiba tanpa interaksi yang terlihat.
+            setDemoCursor({ x: Math.max(60, r.left - 50), y: Math.max(60, r.top - 40), clicking: false });
+            timers.push(window.setTimeout(() => setDemoCursor({ x: target.x, y: target.y, clicking: false }), 60));
+            timers.push(
+              window.setTimeout(() => {
+                setDemoCursor({ x: target.x, y: target.y, clicking: true });
+                el.classList.add("tour-demo-pulse");
+              }, 650),
+            );
+            timers.push(window.setTimeout(() => setDemoCursor({ x: target.x, y: target.y, clicking: false }), 820));
+            timers.push(window.setTimeout(() => setDemoCursor(null), 1300));
+            timers.push(window.setTimeout(() => el.classList.remove("tour-demo-pulse"), 2600));
+          }
+        }
+      }
+
+      for (const f of fd.fields ?? []) {
+        const el = document.querySelector<HTMLInputElement>(f.selector);
+        if (!el || el.value.trim() !== "") continue; // sudah ada isian sungguhan — jangan disentuh
+        demoFieldsRef.current.add(el);
+        if (reduced) {
+          el.value = f.text;
+          continue;
+        }
+        let i = 0;
+        const id = window.setInterval(() => {
+          i += 1;
+          el.value = f.text.slice(0, i);
+          if (i >= f.text.length) window.clearInterval(id);
+        }, 40);
+        timers.push(id);
+      }
+
+      if (fd.richText && !brief?.text.trim()) setDemoBriefText(fd.richText.text);
+
+      if (fd.file) {
+        const dz = document.querySelector<HTMLElement>('[data-tour="form-lampiran"] label');
+        if (reduced || !dz) {
+          setDemoFile(fd.file);
+        } else {
+          // Seret-dan-lepas simulasi: kursor bergerak dari "luar" area unggah menuju dropzone, dropzone
+          // memakai state `dragging` ASLI (efek visual drag-over yang sama persis dengan drag sungguhan,
+          // bukan tiruan terpisah), lalu "dilepas" — file contoh baru muncul setelah itu.
+          const r = dz.getBoundingClientRect();
+          const target = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+          setDemoCursor({ x: target.x, y: Math.max(60, r.top - 120), clicking: false });
+          timers.push(window.setTimeout(() => setDemoCursor({ x: target.x, y: target.y, clicking: false }), 60));
+          timers.push(window.setTimeout(() => setDragging(true), 700));
+          timers.push(
+            window.setTimeout(() => {
+              setDemoCursor({ x: target.x, y: target.y, clicking: true });
+              setDragging(false);
+              setDemoFile(fd.file!);
+            }, 1350),
+          );
+          timers.push(window.setTimeout(() => setDemoCursor(null), 1650));
+        }
+      }
+    };
+    run();
+    return () => {
+      for (const t of timers) {
+        window.clearInterval(t);
+        window.clearTimeout(t);
+      }
+      setDragging(false);
+      setDemoCursor(null);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tourSimulation, tourStepIndex, activeTutorial, step]);
 
   function addFiles(list: FileList | null) {
     if (!list) return;
@@ -346,6 +562,10 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
   /** Tekan "Kirim pengajuan": hanya validasi lalu buka konfirmasi. Belum ada data yang dikirim. */
   function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    if (tourSimulation) {
+      setPhase({ kind: "error", message: "Ini contoh langkah dari panduan — pengajuan sungguhan tidak dikirim. Tutup panduan untuk mengajukan request sesungguhnya." });
+      return;
+    }
     if (sending || inFlight.current || confirmOpen) return;
     if (!collect(e.currentTarget)) return;
     setConfirmOpen(true);
@@ -453,13 +673,12 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
 
   const e = errors;
   const totalSize = files.reduce((s, f) => s + f.size, 0);
-  const STEP_LABELS = ["Kategori", "Detail pekerjaan", "Tim & deadline", "Tinjau"];
   const STEP_FIELDS: string[][] = [
     ["teamId", "designTypeId"],
     ["requesterName", "requesterWhatsapp", "brandId", "department", "title", "sizePreset", "customWidth", "customHeight", "designTypeOther", "briefDoc", "driveUrl", "attachments"],
     ["picIds", "deadline", "deadlineTime", "priority"],
   ];
-  const TEAM_ICON: Record<string, typeof Palette> = { "graphic-design": Palette, "it-system-management": Monitor, "dokumentasi-event": Camera };
+  const TEAM_ICON: Record<string, typeof Palette> = { "graphic-design": Palette, "it-system-management": Monitor, "dokumentasi-event": Camera, "editing-kelas-greenskill-id": Video };
   const stepLast = step >= STEP_LABELS.length - 1;
 
   /** Isi mentah form (sama dengan collect) untuk validasi per langkah. Tidak mengubah state. */
@@ -485,40 +704,11 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
     return Object.fromEntries(Object.entries(all).filter(([k]) => STEP_FIELDS[i].includes(k))) as FieldErrors;
   }
 
-  function buildSummary(): ReviewSummary {
-    const form = formRef.current;
-    const fd = form ? new FormData(form) : new FormData();
-    const text = (k: string) => (typeof fd.get(k) === "string" ? String(fd.get(k)) : "");
-    const dateKey = text("deadline");
-    const timeKey = text("deadlineTime");
-    const typeName = typesForTeam.find((t) => t.id === designTypeId)?.name ?? "";
-    return {
-      title: text("title"),
-      teamName: team?.name ?? "",
-      teamSlug: team?.slug ?? "",
-      typeName: text("designTypeOther") || typeName,
-      brandName: brands.find((b) => b.id === text("brandId"))?.name ?? "",
-      requesterName: text("requesterName"),
-      pics: team ? team.members.filter((m) => picIds.includes(m.id)).map((m) => ({ id: m.id, name: m.name })) : [],
-      priorityName: priorities.find((p) => p.code === text("priority"))?.name ?? "",
-      deadlineDate: dateKey ? formatDate(`${dateKey}T12:00:00+07:00`) : "",
-      deadlineTime: timeKey ? `${timeKey.replace(":", ".")} WIB` : "23.59 WIB",
-      endOfDay: !timeKey,
-      sizeLabel: isDesign ? (DESIGN_SIZE_PRESETS.find((sp) => sp.value === sizePreset)?.label ?? "") : "",
-      driveUrl: text("driveUrl"),
-      briefText: brief?.text.trim() ?? "",
-      files: files.map((file) => ({ name: file.name, size: file.size })),
-    };
-  }
-
-  function goTo(i: number) {
-    setPhase((p) => (p.kind === "error" ? { kind: "idle" } : p));
-    setStep(i);
-    if (i === STEP_LABELS.length - 1) setSummary(buildSummary());
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  }
-
   function next() {
+    if (tourSimulation) {
+      goTo(step + 1);
+      return;
+    }
     const errs = stepErrors(step);
     setErrors((prev) => {
       const rest = Object.fromEntries(Object.entries(prev).filter(([k]) => !STEP_FIELDS[step].includes(k)));
@@ -557,6 +747,17 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
   return (
     <form ref={formRef} onSubmit={onSubmit} noValidate className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_17.5rem]">
       <input type="hidden" name="teamId" value={teamId} />
+      {demoCursor && (
+        <div
+          className="pointer-events-none fixed z-[102] transition-[left,top] duration-500 ease-out"
+          style={{ left: demoCursor.x, top: demoCursor.y, transform: `translate(-6px, -4px) scale(${demoCursor.clicking ? 0.8 : 1})` }}
+          aria-hidden="true"
+        >
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" className="drop-shadow-md">
+            <path d="M4 2l14 6.5-5.5 2L10 16 4 2z" fill="#0f766e" stroke="white" strokeWidth="1.2" strokeLinejoin="round" />
+          </svg>
+        </div>
+      )}
       <div className="flex min-w-0 flex-col gap-6">
         {phase.kind === "error" && <Alert kind="error" title={phase.title ?? "Pengajuan belum tersimpan"}>{phase.message}</Alert>}
         {phase.kind === "unknown" && (
@@ -579,8 +780,8 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
                 <li key={label} className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
                   <button
                     type="button"
-                    disabled={i > step || sending}
-                    onClick={() => i < step && goTo(i)}
+                    disabled={sending || (!tourSimulation && i > step)}
+                    onClick={() => (i < step || tourSimulation) && goTo(i)}
                     aria-current={active ? "step" : undefined}
                     className={cn(
                       "flex min-w-0 items-center gap-2 rounded-lg text-left disabled:cursor-default",
@@ -619,7 +820,7 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
           </header>
           <fieldset disabled={sending} className="flex flex-col gap-6">
             <legend className="sr-only">Kategori pekerjaan</legend>
-            <div className="grid gap-3 sm:grid-cols-3" role="group" aria-label="Kategori pekerjaan">
+            <div data-tour="form-kategori" className="grid grid-cols-1 gap-3 sm:grid-cols-2" role="group" aria-label="Kategori pekerjaan">
               {teams.map((t) => {
                 const selected = teamId === t.id;
                 const Icon = TEAM_ICON[t.slug] ?? Palette;
@@ -627,6 +828,7 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
                 return (
                   <button
                     key={t.id}
+                    data-team-slug={t.slug}
                     type="button"
                     aria-pressed={selected}
                     onClick={() => {
@@ -669,7 +871,7 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
         </section>
 
         {/* Langkah 2 — Detail pekerjaan dan data pemohon */}
-        <section hidden={step !== 1} className={"step-panel flex flex-col gap-6 rounded-2xl border border-line bg-surface p-5 shadow-card sm:p-8" + (step !== 1 ? " hidden" : "")} aria-labelledby="step-1-title">
+        <section data-tour="form-detail" hidden={step !== 1} className={"step-panel flex flex-col gap-6 rounded-2xl border border-line bg-surface p-5 shadow-card sm:p-8" + (step !== 1 ? " hidden" : "")} aria-labelledby="step-1-title">
           <header>
             <h2 id="step-1-title" className="text-lg font-semibold tracking-tight text-ink">Detail pekerjaan</h2>
             <p className="mt-1 text-sm text-ink-3">Data pemohon, judul, dan brief. Judul dan deskripsi diisi terpisah.</p>
@@ -733,7 +935,7 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
                   ))}
                 </ul>
               </div>
-              <RichTextEditor key={formKey} id="brief" placeholder={BRIEF_PLACEHOLDER} disabled={sending} invalid={!!e.briefDoc} describedBy={e.briefDoc ? "brief-error" : "brief-hint"} onChange={setBrief} />
+              <RichTextEditor key={formKey} id="brief" placeholder={BRIEF_PLACEHOLDER} disabled={sending} invalid={!!e.briefDoc} describedBy={e.briefDoc ? "brief-error" : "brief-hint"} onChange={setBrief} demoText={demoBriefText} />
               {e.briefDoc && <p id="brief-error" className="text-[12.5px] text-bad">{e.briefDoc}</p>}
             </div>
             <Field label="URL Google Drive" htmlFor="driveUrl" error={e.driveUrl} hint="Tautan folder/file Google Drive atau Docs. Pastikan izin berbagi sudah dibuka untuk tim DTIC." className="sm:col-span-2">
@@ -742,7 +944,7 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
                 <Input id="driveUrl" name="driveUrl" type="url" inputMode="url" maxLength={2000} placeholder="https://drive.google.com/…" className="h-11 pl-9" invalid={!!e.driveUrl} />
               </div>
             </Field>
-            <div className="flex flex-col gap-2 sm:col-span-2">
+            <div data-tour="form-lampiran" className="flex flex-col gap-2 sm:col-span-2">
               <p className="text-[13px] font-medium text-ink">Dokumen pendukung <span className="font-normal text-ink-3">(opsional)</span></p>
               <label
                 htmlFor="attachments"
@@ -784,6 +986,19 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
                   <li className="flex items-center gap-2 px-3 py-2 text-xs text-ink-3"><Paperclip className="size-3.5" aria-hidden="true" /> {files.length} file · {formatFileSize(totalSize)}</li>
                 </ul>
               )}
+              {/* Contoh lampiran tutorial — di area unggah ASLI, ditandai jelas "(contoh)", TIDAK PERNAH
+                  masuk ke `files` (daftar sungguhan di atas) dan tidak pernah dikirim ke server. */}
+              {demoFile && (
+                <ul className="divide-y divide-line rounded-xl border border-dashed border-accent/50 bg-accent-soft/30" aria-label="Contoh lampiran (demonstrasi panduan)">
+                  <li className="flex items-center gap-3 px-3 py-2.5">
+                    <FileText className="size-4 shrink-0 text-accent" aria-hidden="true" />
+                    <span className="min-w-0 flex-1 truncate text-[13px] text-ink">{demoFile.fileName}</span>
+                    <span className="text-xs text-ink-3">{demoFile.fileSize}</span>
+                    <span className="shrink-0 rounded-full bg-accent-soft px-2 py-0.5 text-[11px] font-medium text-accent">contoh</span>
+                  </li>
+                  <li className="px-3 py-2 text-[12px] text-accent">Simulasi penambahan file selesai — bukan unggahan sungguhan, tidak dikirim ke server.</li>
+                </ul>
+              )}
             </div>
           </fieldset>
         </section>
@@ -803,14 +1018,34 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
                 <p className="mt-1 text-sm font-semibold text-ink">{team.name}</p>
                 {team.members.length > 0 ? (
                   <>
-                    <p className="mt-1 text-sm text-ink-2">Pilih anggota yang akan menerima request ini. Boleh lebih dari satu orang.</p>
+                    <p className="mt-1 text-sm text-ink-2">Pilih anggota yang akan menerima request ini. Boleh lebih dari satu orang. Daftar diurutkan dari beban kerja teringan.</p>
                     <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                      {team.members.map((m) => (
-                        <label key={m.id} className={cn("flex cursor-pointer items-center gap-3 rounded-lg border bg-surface px-3 py-2.5 text-sm text-ink transition-colors hover:border-line-strong", picIds.includes(m.id) ? "border-accent ring-1 ring-accent/30" : "border-line")}>
-                          <input type="checkbox" name="picIds" value={m.id} checked={picIds.includes(m.id)} onChange={(ev) => setPicIds((cur) => (ev.target.checked ? [...cur, m.id] : cur.filter((id) => id !== m.id)))} className="size-4 accent-accent" />
-                          {m.name}
-                        </label>
-                      ))}
+                      {sortedMembers.map((m) => {
+                        const w = workloadOf(m.id);
+                        const level = w ? teamLoadLevels[m.id] : undefined;
+                        return (
+                          <label key={m.id} className={cn("flex cursor-pointer items-start gap-3 rounded-lg border bg-surface px-3 py-2.5 text-sm text-ink transition-colors hover:border-line-strong", picIds.includes(m.id) ? "border-accent ring-1 ring-accent/30" : "border-line")}>
+                            <input type="checkbox" name="picIds" value={m.id} checked={picIds.includes(m.id)} onChange={(ev) => setPicIds((cur) => (ev.target.checked ? [...cur, m.id] : cur.filter((id) => id !== m.id)))} className="mt-0.5 size-4 accent-accent" />
+                            <span className="flex min-w-0 flex-col gap-1">
+                              <span>{m.name}</span>
+                              <span className="flex flex-wrap items-center gap-1.5 text-[12px] text-ink-3">
+                                {w ? (
+                                  <>
+                                    <span className={cn("inline-flex items-center gap-1 rounded-full px-1.5 py-px font-medium ring-1", level && LOAD_TONE[level])}>
+                                      <span className="size-1.5 rounded-full bg-current" aria-hidden="true" />
+                                      {level ? LOAD_LABEL[level] : "—"}
+                                    </span>
+                                    <span>{w.active} pekerjaan aktif</span>
+                                  </>
+                                ) : (
+                                  <span>Beban kerja: belum cukup data</span>
+                                )}
+                                <span>· Kapasitas: belum cukup data</span>
+                              </span>
+                            </span>
+                          </label>
+                        );
+                      })}
                     </div>
                     <p id="pic-help" className={cn("mt-2 text-xs", e.picIds ? "text-bad" : "text-ink-3")}>
                       {e.picIds ?? "Pilih minimal satu anggota tim yang sesuai dengan kebutuhan pekerjaanmu."}
@@ -858,7 +1093,7 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
           {summary && (
             <>
               {/* Ringkasan pekerjaan: fokus utama, judul paling menonjol. */}
-              <div className="form-rise relative overflow-hidden rounded-2xl border border-brand-emerald/30 bg-[linear-gradient(135deg,#ecfdf5_0%,#f0fdfa_55%,#eff6ff_100%)] p-5 sm:p-7" data-testid="review-hero">
+              <div data-tour="form-tinjau-ringkasan" className="form-rise relative overflow-hidden rounded-2xl border border-brand-emerald/30 bg-[linear-gradient(135deg,#ecfdf5_0%,#f0fdfa_55%,#eff6ff_100%)] p-5 sm:p-7" data-testid="review-hero">
                 <p className="flex items-center gap-2 text-[11px] font-semibold tracking-[0.12em] text-brand-deep uppercase">
                   <FileText className="size-4" aria-hidden="true" /> Ringkasan pekerjaan
                 </p>
@@ -969,7 +1204,7 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
           ) : (
             <div className="flex w-full flex-col-reverse gap-3 sm:flex-row sm:justify-between">
               <Button variant="secondary" onClick={() => goTo(step - 1)} disabled={sending} className="min-w-44" icon={<ArrowLeft className="size-4" aria-hidden="true" />}>Kembali untuk Mengedit</Button>
-              <Button type="submit" loading={sending} disabled={brands.length === 0 || orderTypes.length === 0} className={`min-w-44 ${primaryBtn}`}>
+              <Button data-tour="form-kirim" type="submit" loading={sending} disabled={brands.length === 0 || orderTypes.length === 0} className={`min-w-44 ${primaryBtn}`}>
                 {sending ? (phase.kind === "sending" && phase.progress > 0 && phase.progress < 100 ? `Mengirim ${phase.progress}%` : "Menyimpan…") : (<>Kirim Pengajuan <Send className="size-4" aria-hidden="true" /></>)}
               </Button>
             </div>

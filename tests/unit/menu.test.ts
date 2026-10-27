@@ -16,9 +16,9 @@ describe("visibilitas menu", () => {
     expect(isMenuVisibleFor(orders, "super_admin")).toBe(false);
   });
 
-  it("pohon: anak hanya tampil bila induk tampil; role staff tidak melihat menu pengaturan", () => {
+  it("pohon: anak hanya tampil bila induk tampil; role staff tidak melihat menu pengaturan (tapi melihat Panduan Penggunaan)", () => {
     const staffTree = buildMenuTree(DEFAULT_MENU, "staff").map((n) => n.key);
-    expect(staffTree).toEqual(["dashboard", "orders", "workboard", "calendar"]);
+    expect(staffTree).toEqual(["dashboard", "orders", "workboard", "calendar", "panduan"]);
     const adminTree = buildMenuTree(DEFAULT_MENU, "super_admin");
     const settings = adminTree.find((n) => n.key === "settings");
     expect(settings?.children.map((c) => c.key)).toEqual(["master", "website", "menu", "integrations", "google_drive"]);
