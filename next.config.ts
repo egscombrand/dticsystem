@@ -5,6 +5,9 @@ const nextConfig: NextConfig = {
   distDir: process.env.NEXT_DIST_DIR || ".next",
   cacheComponents: true,
   partialPrefetching: true,
+  experimental: {
+    agentUpgrade: "security",
+  },
   // Form pengajuan client kini di halaman utama `/`; alamat lama tetap berfungsi.
   async redirects() {
     // Alamat lama area internal dialihkan ke /dtic/*; /ajukan ke form pengajuan di `/`.
