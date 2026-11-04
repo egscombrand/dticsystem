@@ -114,9 +114,9 @@ export const TUTORIALS: Tutorial[] = [
         target: { page: "/", selector: '[data-tour="nav-riwayat"]' },
       },
       {
-        title: "Bantuan & Masukan",
-        body: "Jika ada kendala, saran, atau pertanyaan di luar request yang sedang berjalan, laporkan lewat menu ini.",
-        target: { page: "/", selector: '[data-tour="nav-bantuan"]' },
+        title: "Pusat Bantuan",
+        body: "Jika ada kendala, saran, atau pertanyaan di luar request yang sedang berjalan, klik tombol bantuan mengambang ini — tersedia di pojok kanan bawah pada semua halaman.",
+        target: { page: "/", selector: '[data-tour="help-button"]' },
       },
     ],
   },

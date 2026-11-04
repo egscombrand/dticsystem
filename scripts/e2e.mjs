@@ -288,6 +288,11 @@ const app = spawn("node_modules/.bin/next", ["start", "-p", String(APP_PORT), "-
     // Default: worker mati agar tes deterministik (tick dipanggil manual). E2E_WORKER_LIVE=1: worker sungguhan.
     TELEGRAM_WORKER: process.env.E2E_WORKER_LIVE === "1" ? "on" : "off",
     TELEGRAM_WORKER_INTERVAL_MS: "500",
+    // Worker SLA: sama seperti worker Telegram di atas — mati secara default (tick dipanggil manual lewat
+    // endpoint internal agar tes deterministik), E2E_WORKER_LIVE=1 menjalankan worker sungguhan (setInterval
+    // nyata di proses server, tanpa sesi/browser pengguna) untuk satu skenario yang membuktikan itu.
+    SLA_WORKER: process.env.E2E_WORKER_LIVE === "1" ? "on" : "off",
+    SLA_WORKER_INTERVAL_MS: "500",
     TELEGRAM_RETRY_DELAYS_SECONDS: "0.1,0.1,0.1,0.1",
     // Jaring pengaman pemulihan gagal-permanen (lihat reviveStaleFailedOutbox) — cooldown & interval
     // pemeriksaan dipercepat drastis HANYA di pengujian (nilai produksi: 30 menit / 5 menit).
@@ -568,6 +573,20 @@ try {
       const after = await row();
       assert.equal(after.status, "failed", "tidak dipulihkan kedua kalinya (dibatasi sekali per baris)");
       assert.equal(after.max_attempts, first.max_attempts + 1, "max_attempts tidak bertambah lagi");
+    });
+
+    await test("worker SLA live: order dengan tahapan melewati deadline ditutup otomatis oleh timer di proses server — TANPA permintaan HTTP, sesi, atau browser pengguna", async () => {
+      assert.ok(appLog.includes("[sla-worker] berjalan setiap 500 ms"), "worker SLA dimulai oleh instrumentation server (sama seperti worker Telegram)");
+      const r = await submit(orderForm(brand1).fd);
+      assert.equal(r.status, 201, await r.clone().text());
+      const { orderNumber } = await r.json();
+      // Paksa deadline sudah lewat LANGSUNG di database — satu-satunya interaksi tes ini dengan order ini
+      // selain menunggu; tidak ada panggilan endpoint/API apa pun terhadap order ini sampai pemeriksaan akhir.
+      await db`update orders set stage_deadline_at = now() - interval '1 second' where order_number = ${orderNumber}`;
+      const statusOf = async () => (await db`select status from orders where order_number = ${orderNumber}`)[0].status;
+      const end = Date.now() + 10000;
+      while (Date.now() < end && (await statusOf()) !== "closed_sla") await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.equal(await statusOf(), "closed_sla", "worker latar menutup otomatis tanpa dipicu permintaan pengguna mana pun");
     });
   }
   if (process.env.E2E_WORKER_LIVE !== "1") {
@@ -2262,6 +2281,9 @@ try {
     assert.equal((await internal(`/api/internal/orders/${assignedId}/status`, "POST", { status: "cancelled", note: "Staff tidak boleh membatalkan" }, {}, STAFF)).status, 403, "staff tidak boleh membatalkan");
   });
   await test("Staff: status order yang ditugaskan boleh diubah; order orang lain → 404", async () => {
+    // Pengajuan baru wajib sepakat waktu dulu sebelum PIC mulai (lihat bagian "Kesepakatan waktu pengerjaan").
+    const agree = await internal(`/api/internal/orders/${assignedId}/deadline-agreement`, "POST", { action: "accept_requested" }, {}, STAFF);
+    assert.equal(agree.status, 200, await agree.clone().text());
     const ok = await internal(`/api/internal/orders/${assignedId}/status`, "POST", { status: "in_progress", note: "Mulai dikerjakan" }, {}, STAFF);
     assert.equal(ok.status, 200, await ok.clone().text());
     const other = await internal(`/api/internal/orders/${otherId}/status`, "POST", { status: "in_progress" }, {}, STAFF);
@@ -3625,6 +3647,8 @@ try {
     const [o] = await db`select id from orders where order_number = ${orderNumber}`;
     const [st] = await db`select m.id from app_users u join dtic_members m on m.id = u.member_id where u.email = 'staff@dtic.example'`;
     await db`insert into order_assignments (order_id, member_id) values (${o.id}, ${st.id}) on conflict do nothing`;
+    // Tes QC/SLA berangkat dari pekerjaan yang waktunya SUDAH disepakati (alur kesepakatan diuji di bagiannya sendiri).
+    await db`update orders set deadline_agreement_status = 'agreed', agreed_deadline = deadline_at, agreed_at = now() where id = ${o.id}`;
     return { id: o.id, orderNumber };
   };
   // Satu sesi PIC dipakai ulang (login dibatasi laju per akun).
@@ -6258,6 +6282,153 @@ try {
     assert.equal((await qcRow(id)).status, "completed");
   });
 
+  console.log("\nFloating Help Center — Pusat Bantuan");
+
+  await test("/api/public/me: tamu → role null; Staff/Manager login → role sesuai sesi, tanpa data sensitif", async () => {
+    const guest = await fetch(`${BASE}/api/public/me`, { headers: { "X-DTIC-Request": "1" } });
+    assert.equal(guest.status, 200);
+    assert.deepEqual(await guest.json(), { role: null, name: null });
+    const staffR = await fetch(`${BASE}/api/public/me`, { headers: { Cookie: await qcStaff(), "X-DTIC-Request": "1" } });
+    assert.equal((await staffR.json()).role, "staff");
+    const mgrR = await fetch(`${BASE}/api/public/me`, { headers: { Cookie: await qcManager(), "X-DTIC-Request": "1" } });
+    assert.equal((await mgrR.json()).role, "manager");
+  });
+
+  await test("Tiket dari Pusat Bantuan mencatat role pelapor saat itu (reporter_role) — null untuk tamu", async () => {
+    const guestR = await submitFeedback(feedbackForm({ title: "Kendala dari tamu via Pusat Bantuan" }));
+    const guestRow = await feedbackRow((await guestR.json()).ticketNumber);
+    assert.equal(guestRow.reporter_user_id, null);
+    const staffR = await submitFeedback(feedbackForm({ title: "Kendala dari Staff via Pusat Bantuan", kind: "suggestion", impact: undefined }), { Cookie: await qcStaff() });
+    assert.equal(staffR.status, 201, await staffR.clone().text());
+    const [staffRow] = await db`select reporter_role from feedback_tickets where ticket_number = ${(await staffR.json()).ticketNumber}`;
+    assert.equal(staffRow.reporter_role, "staff");
+  });
+
+  await test("Tiket Saya (API): tanpa sesi → 401; login → hanya tiket milik akun sendiri, bukan milik akun lain", async () => {
+    const anon = await fetch(`${BASE}/api/internal/feedback/mine`, { headers: { "X-DTIC-Request": "1" } });
+    assert.equal(anon.status, 401);
+    const STAFFC = await qcStaff();
+    const MGRC = await qcManager();
+    const myTicket = await submitFeedback(feedbackForm({ title: "Tiket Staff — hanya milik saya" }), { Cookie: STAFFC });
+    assert.equal(myTicket.status, 201, await myTicket.clone().text());
+    const mine = await (await fetch(`${BASE}/api/internal/feedback/mine`, { headers: { Cookie: STAFFC, "X-DTIC-Request": "1" } })).json();
+    assert.ok(mine.tickets.some((t) => t.title === "Tiket Staff — hanya milik saya"));
+    const mgrView = await (await fetch(`${BASE}/api/internal/feedback/mine`, { headers: { Cookie: MGRC, "X-DTIC-Request": "1" } })).json();
+    assert.ok(!mgrView.tickets.some((t) => t.title === "Tiket Staff — hanya milik saya"), "tiket Staff tidak bocor ke daftar Manager");
+  });
+
+  await test("/dtic/bantuan (Tiket Saya): tanpa sesi → dialihkan login; Staff login → daftar tiketnya sendiri saja", async () => {
+    const r = await pageRaw("/dtic/bantuan");
+    assert.ok(await redirectsToLogin(r), "tanpa sesi dialihkan ke login");
+    const STAFFC = await qcStaff();
+    const page2 = await pageRaw("/dtic/bantuan", STAFFC);
+    assert.equal(page2.status, 200);
+    const html = await page2.text();
+    assert.match(html, /Tiket Saya/);
+  });
+
+  await test("Pusat Bantuan (browser, publik): avatar mengambang selalu terlihat, panel 4 layanan, Laporkan Kendala membuat tiket sungguhan tanpa pindah halaman", async () => {
+    const chromePath = process.env.CHROME_PATH ?? "/usr/bin/google-chrome";
+    const { chromium } = await import("playwright-core");
+    const browser = await chromium.launch({ executablePath: chromePath, headless: true });
+    try {
+      const ctx2 = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+      // Sambutan onboarding ("Selamat datang") tidak boleh menghalangi tes ini — bukan tes panduan,
+      // konteks baru selalu "belum pernah melihat" tanpa ini (lihat seeding identik pada `ctx` bersama).
+      await ctx2.addInitScript(() => { try { localStorage.setItem("dtic-tutorial-welcome-seen-v1", "1"); } catch {} });
+      const p = await ctx2.newPage();
+      const pageErrors = [];
+      p.on("pageerror", (e) => pageErrors.push(e.message));
+      let submitResp = null;
+      p.on("response", async (r) => {
+        if (r.url().endsWith("/api/public/feedback") && r.request().method() === "POST") {
+          submitResp = { status: r.status(), body: await r.text().catch(() => "<unreadable>") };
+        }
+      });
+      await p.goto(`${BASE}/`);
+      assert.equal(await p.locator('[data-tour="help-button"]').count(), 1, "tombol bantuan mengambang ada di beranda publik");
+      assert.equal(await p.getByRole("link", { name: /Bantuan & Masukan/ }).count(), 0, "menu nav lama sudah diganti tombol mengambang, bukan ditambah");
+      await p.getByRole("button", { name: "Butuh bantuan? Buka Pusat Bantuan" }).click();
+      await p.getByRole("dialog", { name: "Pusat Bantuan DTIC Nexus" }).waitFor();
+      await p.getByRole("button", { name: "Laporkan Kendala" }).click();
+      await p.getByLabel("Judul Laporan").fill("Tombol unduh tidak merespons (uji Pusat Bantuan)");
+      await p.getByLabel("Halaman atau Fitur Terkait").selectOption("home");
+      await p.getByLabel("Detail Laporan").fill("Saat tombol unduh ditekan di beranda, tidak ada respons apa pun dari aplikasi.");
+      await p.getByLabel("Tingkat Dampak").selectOption("normal");
+      await p.getByLabel("Nama Anda").fill("Penguji Pusat Bantuan");
+      await p.getByRole("button", { name: "Kirim Laporan" }).click();
+      try {
+        await p.getByText("Laporan terkirim").waitFor({ timeout: 10000 });
+      } catch (e) {
+        throw new Error(`Laporan terkirim tidak muncul. submitResp=${JSON.stringify(submitResp)}`, { cause: e });
+      }
+      assert.match(await p.url(), /\/$/, "tidak berpindah halaman — seluruhnya di dalam panel");
+      const [row] = await db`select reporter_user_id from feedback_tickets where title = 'Tombol unduh tidak merespons (uji Pusat Bantuan)'`;
+      assert.equal(row.reporter_user_id, null, "tersimpan sebagai tamu (tidak login)");
+      assert.deepEqual(pageErrors, [], "tidak ada error React/konsol baru");
+      await ctx2.close();
+    } finally {
+      await browser.close();
+    }
+  });
+
+  await test("Pusat Bantuan (browser, Staff login): 'Tiket Saya' menampilkan tiket sendiri; 'Panduan Penggunaan' mengarah ke /dtic/panduan", async () => {
+    const chromePath = process.env.CHROME_PATH ?? "/usr/bin/google-chrome";
+    const { chromium } = await import("playwright-core");
+    const browser = await chromium.launch({ executablePath: chromePath, headless: true });
+    try {
+      const [name, value] = (await qcStaff()).split("=");
+      const ctx2 = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+      await ctx2.addCookies([{ name, value, url: BASE }]);
+      // Staff tidak mendapat OnboardingPrompt (hanya Manager, lihat AppFrame), tapi tetap diseed untuk
+      // konsisten dengan tes lain yang memakai konteks baru.
+      await ctx2.addInitScript(() => { try { localStorage.setItem("dtic-tutorial-welcome-seen-v1", "1"); } catch {} });
+      const p = await ctx2.newPage();
+      await p.goto(`${BASE}/dtic/dashboard`);
+      assert.equal(await p.locator('[data-tour="help-button"]').count(), 1, "tombol bantuan mengambang ada di area internal");
+      await p.getByRole("button", { name: "Butuh bantuan? Buka Pusat Bantuan" }).click();
+      const helpDialog = p.getByRole("dialog", { name: "Pusat Bantuan DTIC Nexus" });
+      const panduanLink = helpDialog.getByRole("link", { name: /Panduan Penggunaan/ });
+      await panduanLink.waitFor();
+      assert.equal(await panduanLink.getAttribute("href"), "/dtic/panduan", "Staff diarahkan ke panduan internal, bukan panduan publik");
+      await p.getByRole("button", { name: "Kirim Masukan" }).click();
+      assert.equal(await p.getByLabel("Nama Anda").count(), 0, "field nama tamu disembunyikan untuk akun yang sudah login");
+      await p.getByLabel("Judul Laporan").fill("Saran tampilan dashboard (uji Pusat Bantuan Staff)");
+      await p.getByLabel("Halaman atau Fitur Terkait").selectOption("home");
+      await p.getByLabel("Detail Laporan").fill("Akan lebih baik jika grafik tren bisa diperbesar.");
+      await p.getByRole("button", { name: "Kirim Laporan" }).click();
+      await p.getByText("Laporan terkirim").waitFor({ timeout: 10000 });
+      await p.getByRole("button", { name: "Buat Laporan Lain" }).click();
+      await p.getByRole("button", { name: "Kembali" }).click();
+      await p.getByRole("button", { name: "Tiket Saya" }).click();
+      await p.getByText("Saran tampilan dashboard (uji Pusat Bantuan Staff)").waitFor({ timeout: 10000 });
+      await ctx2.close();
+    } finally {
+      await browser.close();
+    }
+  });
+
+  await test("Pusat Bantuan (browser, mobile 390px): panel tidak overflow layar, tombol tidak menutupi konten penting", async () => {
+    const chromePath = process.env.CHROME_PATH ?? "/usr/bin/google-chrome";
+    const { chromium } = await import("playwright-core");
+    const browser = await chromium.launch({ executablePath: chromePath, headless: true });
+    try {
+      const ctx2 = await browser.newContext({ viewport: { width: 390, height: 844 } });
+      await ctx2.addInitScript(() => { try { localStorage.setItem("dtic-tutorial-welcome-seen-v1", "1"); } catch {} });
+      const p = await ctx2.newPage();
+      await p.goto(`${BASE}/`);
+      await p.getByRole("button", { name: "Butuh bantuan? Buka Pusat Bantuan" }).click();
+      await p.getByRole("dialog", { name: "Pusat Bantuan DTIC Nexus" }).waitFor();
+      const overflow = await p.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      assert.ok(overflow <= 1, `tanpa overflow horizontal di mobile (selisih ${overflow}px)`);
+      const box = await p.getByRole("dialog", { name: "Pusat Bantuan DTIC Nexus" }).boundingBox();
+      assert.ok(box.x >= 0 && box.x + box.width <= 390 + 1, `panel berada dalam lebar viewport (x=${box.x}, width=${box.width})`);
+      await ctx2.close();
+    } finally {
+      await browser.close();
+    }
+  });
+
   console.log("\nNotifikasi Telegram — tiket Bantuan & Masukan (Tim IT)");
   const FBTG = "/api/internal/feedback-telegram";
   const verifyFbtg = (link, replace = false, cookie = ADMIN) => internal(`${FBTG}/verify`, "POST", { link, replace }, {}, cookie);
@@ -6542,24 +6713,13 @@ try {
       await p.getByText("Langkah 1 dari 5").waitFor();
       const overflow = await p.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
       assert.ok(overflow <= 1, `tanpa overflow horizontal (selisih ${overflow}px)`);
+      // boundingBox() Playwright mengembalikan {x, y, width, height} — BUKAN {left, top} (jebakan: object
+      // ini terlihat seperti DOMRect tapi bukan; memakai .left/.top di sini selalu undefined dan membuat
+      // assert.ok(undefined >= 0, …) gagal TERLEPAS dari posisi panel sungguhan — ini penyebab asli
+      // kegagalan tes ini yang sempat dikira bug penempatan panel; computePlacement() di product-tour.tsx
+      // sudah benar sejak awal, dibuktikan clampX() yang menjepit `left` ke dalam [MARGIN, vw-panelW-MARGIN].
       const panelBox = await p.locator('[role="dialog"][aria-label^="Panduan:"] > div.pointer-events-auto').boundingBox();
-      const debugInfo = await p.evaluate(() => {
-        const el = document.querySelector('[role="dialog"][aria-label^="Panduan:"] > div.pointer-events-auto');
-        const cs = el ? getComputedStyle(el) : null;
-        return {
-          innerWidth: window.innerWidth,
-          devicePixelRatio: window.devicePixelRatio,
-          styleWidth: el?.style.width,
-          computedWidth: cs?.width,
-          boxSizing: cs?.boxSizing,
-          borderLeft: cs?.borderLeftWidth,
-          borderRight: cs?.borderRightWidth,
-          paddingLeft: cs?.paddingLeft,
-          paddingRight: cs?.paddingRight,
-          styleLeft: el?.style.left,
-        };
-      });
-      assert.ok(panelBox.left >= 0 && panelBox.left + panelBox.width <= 390 + 1, `panel tour berada dalam lebar viewport (left=${panelBox.left}, width=${panelBox.width}, right=${panelBox.left + panelBox.width}; debug=${JSON.stringify(debugInfo)})`);
+      assert.ok(panelBox.x >= 0 && panelBox.x + panelBox.width <= 390 + 1, `panel tour berada dalam lebar viewport (x=${panelBox.x}, width=${panelBox.width}, right=${panelBox.x + panelBox.width})`);
       await ctx2.close();
     } finally {
       await browser.close();
@@ -6615,7 +6775,7 @@ try {
       // Tunggu baris sungguhan benar-benar dirender sebelum menekan Berikutnya — tanpa ini, klik otomatis
       // (clickTargetOnAdvance) bisa menembak querySelector sebelum tabel selesai hidrasi (race), sama
       // seperti tes Manager di atas yang menunggu sorotan orders-row dulu sebelum lanjut.
-      await p.waitForFunction(() => document.querySelector('[data-tour="orders-row"] a')?.getBoundingClientRect().width > 0, null, { timeout: 5000 });
+      await p.waitForFunction(() => document.querySelector('[data-tour="orders-row"] a')?.getBoundingClientRect().width > 0, null, { timeout: 15000 });
       // "Berikutnya" di langkah 0 ("Sebelum mengajukan QC") mengklik baris pertama secara otomatis (clickTargetOnAdvance) → navigasi SUNGGUHAN ke halaman detail, tanpa p.goto manual.
       await next();
       await p.waitForURL(/\/dtic\/orders\/[0-9a-f-]{36}$/);
@@ -6638,6 +6798,1231 @@ try {
       await browser.close();
     }
   });
+
+  {
+    // Pertahanan terhadap urutan tes: tes "migrasi idempoten" di atas (QC) MENJALANKAN ULANG migrasi
+    // 20261017000000_qc_workflow.sql apa adanya — definisi constraint di FILE ITU sendiri belum tahu soal
+    // nilai kind baru dari migrasi SLA (ditambahkan belakangan), jadi menjalankannya ulang DI TENGAH suite
+    // mengembalikan constraint ke daftar lama (bukan masalah di produksi: migrasi di sana hanya berjalan
+    // SEKALI per file, berurutan, tidak pernah dijalankan ulang di luar urutan seperti skenario uji ini).
+    // Pastikan constraint memuat nilai SLA lagi sebelum bagian ini berjalan, terlepas urutan tes di atas.
+    await db`alter table order_workflow_events drop constraint if exists order_workflow_events_kind_check`;
+    await db`alter table order_workflow_events add constraint order_workflow_events_kind_check
+      check (kind in ('qc_submitted', 'qc_withdrawn', 'qc_approved', 'qc_revision_requested', 'qc_access_requested',
+                       'delivery_recorded', 'feedback_recorded', 'completed', 'whatsapp_opened',
+                       'sla_auto_closed', 'sla_resumed', 'sla_confirmed_complete'))`;
+  }
+  console.log("\nSLA, deadline otomatis & penutupan case");
+  {
+    const slaTick = async () => {
+      const r = await internal("/api/internal/sla/worker/tick", "POST", undefined);
+      assert.equal(r.status, 200, await r.clone().text());
+      return (await r.json()).closed;
+    };
+    // Ekspresi interval SQL (BUKAN nilai Date/ISO sisi JS) — pola yang sudah terbukti bekerja di tes lain
+    // (mis. baris 932-933 di atas) untuk memaksa deadline/stage sudah lewat secara langsung di database.
+    const setStagePast = (id) => db`update orders set stage_deadline_at = now() - interval '1 second' where id = ${id}`;
+    const setStageFuture = (id) => db`update orders set stage_deadline_at = now() + interval '1 hour' where id = ${id}`;
+    const orderOf = (id) => db`select status, deadline_at, stage_deadline_at, sla_closed_at from orders where id = ${id}`.then((r) => r[0]);
+    const eventsOf = (id, kind) => db`select count(*)::int as c from order_workflow_events where order_id = ${id} and kind = ${kind}`.then((r) => r[0].c);
+
+    await test("SLA: tanpa aturan SLA spesifik → stage_deadline_at memakai CADANGAN deadline_at umum (sama dengan yang tampil di layar), bukan null dan bukan angka karangan", async () => {
+      const { id } = await qcOrder("Uji SLA tanpa aturan khusus");
+      const o = await orderOf(id);
+      assert.ok(o.stage_deadline_at, "tidak ada aturan SLA untuk status 'assigned' di data uji → memakai cadangan deadline_at, BUKAN null");
+      assert.equal(o.stage_deadline_at.getTime(), o.deadline_at.getTime(), "deadline yang dipakai worker SAMA PERSIS dengan deadline_at yang ditampilkan ke pengguna");
+    });
+
+    await test("SLA: pengajuan LAMA (dibuat sebelum rekonsiliasi) dengan deadline umum sudah lewat tetap ditutup otomatis lewat cadangan deadline_at", async () => {
+      const { id } = await qcOrder("Uji SLA order lama direkonsiliasi");
+      // Simulasikan order "lama": migrasi SLA belum pernah menyentuhnya (stage_deadline_at null) DAN deadline
+      // umumnya sudah lewat — persis kondisi order lama sebelum fitur ini ada (lihat rekonsiliasi di migrasi).
+      await db`update orders set stage_deadline_at = null, deadline_at = now() - interval '8 days' where id = ${id}`;
+      // Jalankan ULANG langkah rekonsiliasi (idempotent, sama seperti bagian 6 migrasi) alih-alih menunggu
+      // migrasi awal — membuktikan mekanismenya, bukan hanya mempercayai migrasi sudah berjalan sekali di awal.
+      await db`update orders set stage_deadline_at = deadline_at, stage_started_at = coalesce(stage_started_at, created_at)
+                where id = ${id} and stage_deadline_at is null and status not in ('completed', 'cancelled')`;
+      const before = await orderOf(id);
+      assert.ok(before.stage_deadline_at, "rekonsiliasi mengisi stage_deadline_at dari deadline_at");
+      const closed = await slaTick();
+      assert.ok(closed >= 1, "order lama yang direkonsiliasi ikut diperiksa & ditutup worker");
+      const after = await orderOf(id);
+      assert.equal(after.status, before.status, "status pekerjaan tetap tidak berubah");
+      assert.ok(after.sla_closed_at, "order lama berhasil ditutup otomatis lewat deadline cadangan");
+    });
+
+    await test("SLA: pekerjaan belum selesai tapi deadline BELUM lewat → tidak ditutup otomatis walau worker berjalan", async () => {
+      const { id } = await qcOrder("Uji SLA deadline belum lewat");
+      await setStageFuture(id); // deadline 1 jam lagi (belum lewat)
+      await slaTick();
+      const o = await orderOf(id);
+      assert.equal(o.status, "assigned", "status pekerjaan tidak berubah");
+      assert.equal(o.sla_closed_at, null, "belum ditutup karena SLA");
+    });
+
+    await test("SLA: tahapan melewati deadline → sistem menutup OTOMATIS (sla_closed_at terisi), status pekerjaan TIDAK BERUBAH SAMA SEKALI, peristiwa tercatat", async () => {
+      const { id } = await qcOrder("Uji SLA lewat deadline");
+      await setStagePast(id); // deadline sudah lewat 1 detik
+      const closed = await slaTick();
+      assert.ok(closed >= 1, "setidaknya order ini ditutup");
+      const o = await orderOf(id);
+      assert.equal(o.status, "assigned", "status pekerjaan SAMA SEKALI tidak berubah oleh penutupan SLA — dimensi terpisah (lihat src/lib/sla.ts)");
+      assert.ok(o.sla_closed_at, "sla_closed_at terisi");
+      assert.equal(await eventsOf(id, "sla_auto_closed"), 1, "satu peristiwa sla_auto_closed tercatat");
+    });
+
+    await test("SLA: dipanggil berkali-kali untuk order yang sama TIDAK membuat penutupan atau catatan berulang (idempotent)", async () => {
+      const { id } = await qcOrder("Uji SLA idempotent");
+      await setStagePast(id);
+      await slaTick();
+      const firstClosedAt = (await orderOf(id)).sla_closed_at;
+      await slaTick();
+      await slaTick();
+      const o = await orderOf(id);
+      assert.equal(o.sla_closed_at.getTime(), firstClosedAt.getTime(), "sla_closed_at tidak berubah lagi setelah pertama kali terisi");
+      assert.equal(await eventsOf(id, "sla_auto_closed"), 1, "tetap satu peristiwa walau worker jalan berkali-kali");
+    });
+
+    await test("SLA: beberapa pengajuan melewati deadline SECARA BERSAMAAN → semuanya ditutup dalam satu putaran worker", async () => {
+      const a = await qcOrder("Uji SLA bersamaan A");
+      const b = await qcOrder("Uji SLA bersamaan B");
+      const c = await qcOrder("Uji SLA bersamaan C");
+      await Promise.all([a, b, c].map((o) => setStagePast(o.id)));
+      const closed = await slaTick();
+      assert.ok(closed >= 3, `setidaknya 3 order ditutup dalam satu putaran (dapat ${closed})`);
+      for (const o of [a, b, c]) assert.ok((await orderOf(o.id)).sla_closed_at, `${o.orderNumber} ditutup karena SLA`);
+    });
+
+    await test("SLA: order dalam status APA PUN (bukan hanya satu status tertentu) yang melewati deadline tetap ditutup otomatis — kecuali sudah selesai/dibatalkan", async () => {
+      const { id } = await qcOrder("Uji SLA status in_progress");
+      const r = await internal(`/api/internal/orders/${id}/status`, "POST", { status: "in_progress" });
+      assert.equal(r.status, 200, await r.clone().text());
+      await setStagePast(id);
+      await slaTick();
+      const o = await orderOf(id);
+      assert.equal(o.status, "in_progress", "status pekerjaan tetap in_progress, tidak diganggu");
+      assert.ok(o.sla_closed_at, "tetap ditutup otomatis karena SLA walau statusnya bukan 'assigned'");
+    });
+
+    await test("SLA: order yang sudah Selesai/Dibatalkan TIDAK PERNAH ditutup otomatis walau deadline lewat", async () => {
+      const { id } = await qcOrder("Uji SLA order sudah batal");
+      const r = await internal(`/api/internal/orders/${id}/status`, "POST", { status: "cancelled", note: "Dibatalkan untuk uji" });
+      assert.equal(r.status, 200, await r.clone().text());
+      await db`update orders set stage_deadline_at = now() - interval '1 second' where id = ${id}`; // paksa langsung (cancelled biasanya stage_deadline_at null)
+      await slaTick();
+      assert.equal((await orderOf(id)).sla_closed_at, null, "order yang sudah final tidak pernah ditutup karena SLA");
+    });
+
+    await test("SLA: pengajuan berpindah staging mendapat deadline SLA baru (dihitung ulang dari aturan tahapan baru, bukan dipertahankan dari staging sebelumnya)", async () => {
+      // Aturan khusus untuk 'in_progress' supaya deadline tahapan baru BERBEDA dari cadangan deadline_at umum
+      // (tanpa aturan, keduanya sama-sama jatuh ke cadangan deadline_at dan tidak membuktikan apa-apa).
+      const rule = await internal("/api/internal/settings/sla-rules", "POST", { designOrderTypeId: null, status: "in_progress", durationMinutes: 45, isActive: true });
+      assert.equal(rule.status, 201, await rule.clone().text());
+      const { id: ruleId } = await rule.json();
+      try {
+        const { id } = await qcOrder("Uji SLA pindah staging");
+        const before = (await db`select stage_deadline_at, stage_started_at from orders where id = ${id}`)[0];
+        const r = await internal(`/api/internal/orders/${id}/status`, "POST", { status: "in_progress" });
+        assert.equal(r.status, 200, await r.clone().text());
+        const after = (await db`select status, stage_deadline_at, stage_started_at from orders where id = ${id}`)[0];
+        assert.equal(after.status, "in_progress");
+        assert.ok(after.stage_started_at.getTime() > before.stage_started_at.getTime(), "stage_started_at diperbarui saat berpindah tahapan");
+        // Deadline tahapan baru dihitung dari aturan 'in_progress' (45 menit sejak sekarang), BUKAN diwarisi dari tahapan lama.
+        assert.notEqual(after.stage_deadline_at.getTime(), before.stage_deadline_at.getTime());
+        const expected = after.stage_started_at.getTime() + 45 * 60_000;
+        assert.ok(Math.abs(after.stage_deadline_at.getTime() - expected) < 5000, "deadline tahapan baru = stage_started_at + 45 menit (aturan)");
+      } finally {
+        await internal(`/api/internal/settings/sla-rules/${ruleId}`, "DELETE");
+      }
+    });
+
+    await test("SLA: PIC TETAP BISA MELANJUTKAN pekerjaan lewat jalur status biasa setelah ditutup otomatis — tidak pernah terkunci", async () => {
+      const { id } = await qcOrder("Uji SLA tidak mengunci pekerjaan");
+      await setStagePast(id);
+      await slaTick();
+      assert.ok((await orderOf(id)).sla_closed_at, "ditutup otomatis karena SLA");
+      // Transisi status BIASA (assigned → in_progress) tetap berhasil walau order ini sedang closed_sla —
+      // membuktikan status pekerjaan sungguhan tidak pernah dikunci oleh SLA.
+      const staffCookie = await qcStaff();
+      const r = await internal(`/api/internal/orders/${id}/status`, "POST", { status: "in_progress" }, {}, staffCookie);
+      assert.equal(r.status, 200, await r.clone().text());
+      const o = await orderOf(id);
+      assert.equal(o.status, "in_progress", "PIC berhasil melanjutkan pekerjaan seperti biasa");
+      assert.ok(o.sla_closed_at, "penanda sla_closed_at tetap tersimpan (riwayat keterlambatan tidak hilang)");
+    });
+
+    await test("SLA: 'Lanjutkan Pekerjaan' mencatat peristiwa TANPA mengubah status maupun menghapus sla_closed_at; PIC lain ditolak (403)", async () => {
+      const { id } = await qcOrder("Uji SLA lanjutkan pekerjaan");
+      await setStagePast(id);
+      await slaTick();
+      const before = await orderOf(id);
+      const managerCookie = await qcManager();
+      const wrongActor = await internal(`/api/internal/orders/${id}/sla-resume`, "POST", { note: "percobaan" }, {}, managerCookie);
+      assert.equal(wrongActor.status, 403, "Manager bukan PIC order ini & bukan Super Admin → ditolak");
+      const staffCookie = await qcStaff();
+      const r = await internal(`/api/internal/orders/${id}/sla-resume`, "POST", { note: "Lanjut dikerjakan, deadline terlewat karena menunggu aset dari pemohon." }, {}, staffCookie);
+      assert.equal(r.status, 200, await r.clone().text());
+      const after = await orderOf(id);
+      assert.equal(after.status, before.status, "status pekerjaan tidak berubah oleh 'Lanjutkan Pekerjaan'");
+      assert.equal(after.sla_closed_at.getTime(), before.sla_closed_at.getTime(), "sla_closed_at TETAP tersimpan (bukan dihapus)");
+      assert.equal(await eventsOf(id, "sla_resumed"), 1, "satu peristiwa sla_resumed tercatat dengan catatan PIC");
+      const resumeOnOpen = await internal(`/api/internal/orders/${id}/sla-resume`, "POST", {}, {}, staffCookie);
+      assert.equal(resumeOnOpen.status, 200, "boleh dipanggil lagi (tidak ada status 'closed_sla' yang perlu dicegah dobel) — tetap mencatat peristiwa baru");
+    });
+
+    await test("SLA: PIC mengonfirmasi pekerjaan selesai SETELAH ditutup otomatis → status Selesai, sla_closed_at TETAP tersimpan (tidak dihapus/ditimpa)", async () => {
+      const { id } = await qcOrder("Uji SLA konfirmasi PIC");
+      await setStagePast(id);
+      await slaTick();
+      const closedAt = (await orderOf(id)).sla_closed_at;
+      const staffCookie = await qcStaff();
+      const r = await internal(`/api/internal/orders/${id}/sla-confirm`, "POST", {}, {}, staffCookie);
+      assert.equal(r.status, 200, await r.clone().text());
+      const o = await orderOf(id);
+      assert.equal(o.status, "completed");
+      assert.equal(o.sla_closed_at.getTime(), closedAt.getTime(), "sla_closed_at tetap tersimpan sebagai penanda historis, tidak dihapus");
+      assert.equal(await eventsOf(id, "sla_confirmed_complete"), 1);
+    });
+
+    await test("SLA: order yang TIDAK PERNAH ditutup karena SLA ditolak saat dikonfirmasi (409); PIC yang bukan penanggung jawab order ini ditolak (403), order tidak berubah", async () => {
+      const { id } = await qcOrder("Uji SLA konfirmasi ditolak");
+      const staffCookie = await qcStaff();
+      const notYetClosed = await internal(`/api/internal/orders/${id}/sla-confirm`, "POST", {}, {}, staffCookie);
+      assert.equal(notYetClosed.status, 409, "order belum pernah ditutup karena SLA → ditolak");
+
+      await setStagePast(id);
+      await slaTick();
+      const managerCookie = await qcManager();
+      const wrongActor = await internal(`/api/internal/orders/${id}/sla-confirm`, "POST", {}, {}, managerCookie);
+      assert.equal(wrongActor.status, 403, "Manager bukan PIC order ini & bukan Super Admin → ditolak");
+      assert.equal((await orderOf(id)).status, "assigned", "status tidak berubah akibat percobaan yang ditolak");
+    });
+
+    await test("SLA: konfigurasi aturan (Admin) — tambah, ubah, hapus aturan SLA per jenis pengajuan & tahapan; Manager/Staff ditolak", async () => {
+      const managerCookie = await qcManager();
+      const forbidden = await internal("/api/internal/settings/sla-rules", "POST", { designOrderTypeId: null, status: "in_progress", durationMinutes: 60, isActive: true }, {}, managerCookie);
+      assert.equal(forbidden.status, 403, "Manager tidak boleh mengelola aturan SLA");
+      const created = await internal("/api/internal/settings/sla-rules", "POST", { designOrderTypeId: null, status: "in_progress", durationMinutes: 120, isActive: true });
+      assert.equal(created.status, 201, await created.clone().text());
+      const { id: ruleId } = await created.json();
+      const dup = await internal("/api/internal/settings/sla-rules", "POST", { designOrderTypeId: null, status: "in_progress", durationMinutes: 30, isActive: true });
+      assert.equal(dup.status, 409, "aturan default duplikat untuk tahapan yang sama ditolak");
+      const updated = await internal(`/api/internal/settings/sla-rules/${ruleId}`, "PATCH", { designOrderTypeId: null, status: "in_progress", durationMinutes: 180, isActive: false });
+      assert.equal(updated.status, 200, await updated.clone().text());
+      const [row] = await db`select duration_minutes, is_active from sla_rules where id = ${ruleId}`;
+      assert.deepEqual(row, { duration_minutes: 180, is_active: false });
+      const deleted = await internal(`/api/internal/settings/sla-rules/${ruleId}`, "DELETE");
+      assert.equal(deleted.status, 200);
+      assert.equal((await db`select 1 from sla_rules where id = ${ruleId}`).length, 0);
+    });
+  }
+
+  console.log("\nKesepakatan waktu pengerjaan (Pemohon ↔ PIC)");
+  {
+    const STAFFC = await qcStaff();
+    const MGRC = await qcManager();
+    const [staffMember] = await db`select m.id, u.full_name as account_name from app_users u join dtic_members m on m.id = u.member_id where u.email = 'staff@dtic.example'`;
+    // Pengajuan baru SUNGGUHAN lewat form publik; PIC = akun staff uji; BELUM disepakati (beda dari qcOrder).
+    const newOrder = async (title, overrides = {}) => {
+      const r = await submit(orderForm(brand1, { title, deadline: wibDate(3), ...overrides }).fd);
+      assert.equal(r.status, 201, await r.clone().text());
+      const { orderNumber } = await r.json();
+      const [o] = await db`select id from orders where order_number = ${orderNumber}`;
+      await db`insert into order_assignments (order_id, member_id) values (${o.id}, ${staffMember.id}) on conflict do nothing`;
+      return { id: o.id, orderNumber };
+    };
+    const COLS = ["status", "deadline_agreement_status", "requested_deadline", "pic_estimated_deadline", "agreed_deadline", "agreed_at", "deadline_at", "stage_deadline_at", "stage_started_at", "sla_closed_at"];
+    const row = (id) => db`select status, deadline_agreement_status, requested_deadline, pic_estimated_deadline, agreed_deadline, agreed_at,
+                                  deadline_at, stage_deadline_at, stage_started_at, sla_closed_at from orders where id = ${id}`.then((r) => r[0]);
+    const brief = (o, keys = COLS) => Object.fromEntries(keys.map((k) => [k, o[k] instanceof Date ? o[k].toISOString() : o[k]]));
+    const evidence = (tag, data) => console.log(`[BUKTI ${tag}]`, JSON.stringify(data));
+    const agreementApi = (id, body, cookie = STAFFC) => internal(`/api/internal/orders/${id}/deadline-agreement`, "POST", body, {}, cookie);
+    const respond = (orderNumber, decision, reason, extra = {}) =>
+      fetch(`${BASE}/api/public/tracking/deadline`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-forwarded-for": freshIp() },
+        body: JSON.stringify({ orderNumber, decision, reason, ...extra }),
+      });
+    const track = (orderNumber) =>
+      fetch(`${BASE}/api/public/tracking`, { method: "POST", headers: { "Content-Type": "application/json", "x-forwarded-for": freshIp() }, body: JSON.stringify({ orderNumber }) }).then((r) => r.json());
+    const events = (id) =>
+      db`select kind, round, proposed_deadline, previous_deadline, reason, actor_name from order_deadline_events where order_id = ${id} order by created_at, id`;
+    const evBrief = (rows) => rows.map((e) => ({ kind: e.kind, round: e.round, proposed: e.proposed_deadline?.toISOString() ?? null, previous: e.previous_deadline?.toISOString() ?? null, reason: e.reason, actor: e.actor_name }));
+    const inDays = (d) => new Date(Math.round((Date.now() + d * 86_400_000) / 60_000) * 60_000).toISOString();
+    const tick = async () => {
+      const r = await internal("/api/internal/sla/worker/tick", "POST", undefined);
+      assert.equal(r.status, 200, await r.clone().text());
+      return (await r.json()).closed;
+    };
+    // Kolom yang dilindungi trigger (requested_deadline) hanya bisa "dimundurkan" langsung di database, untuk
+    // mensimulasikan permintaan Pemohon yang sudah lewat — tidak ada jalur aplikasi yang bisa mengubahnya.
+    const forcePast = (id) =>
+      pg.transaction(async (tx) => {
+        await tx.query("set local session_replication_role = replica");
+        await tx.query(
+          "update orders set requested_deadline = now() - interval '5 days', deadline_at = now() - interval '5 days', stage_deadline_at = now() - interval '5 days' where id = $1",
+          [id],
+        );
+      });
+    // Riwayat kesepakatan hanya bertambah: jumlah baris tidak pernah turun sepanjang bagian ini.
+    let histMax = 0;
+    const histCheck = async () => {
+      const [{ n }] = await db`select count(*)::int as n from order_deadline_events`;
+      assert.ok(n >= histMax, `riwayat kesepakatan tidak pernah berkurang (${n} < ${histMax})`);
+      histMax = n;
+    };
+
+    await test("Kesepakatan A: Pemohon mengajukan lewat form publik dengan tanggal+jam → requested_deadline persis (WIB), Pemeriksaan PIC, SLA belum berjalan", async () => {
+      const date = wibDate(5);
+      const time = "14:30";
+      const { id, orderNumber } = await newOrder("Kesepakatan A", { deadline: date, deadlineTime: time });
+      const o = await row(id);
+      const expected = new Date(`${date}T${time}:00+07:00`);
+      const view = await track(orderNumber);
+      evidence("A", { input: { date, time, expected: expected.toISOString() }, db: brief(o), publicStatus: view.deadlineAgreement.status });
+      assert.equal(o.requested_deadline.getTime(), expected.getTime(), "requested_deadline = tanggal & jam yang diisi Pemohon (WIB)");
+      assert.equal(o.deadline_agreement_status, "pic_review", "tampil sebagai 'Pemeriksaan PIC'");
+      assert.equal(view.deadlineAgreement.status, "pic_review");
+      assert.equal(o.status, "assigned", "status pekerjaan alur lama tidak berubah");
+      assert.equal(o.agreed_deadline, null);
+      assert.equal(o.stage_deadline_at, null, "SLA tahapan belum dimulai");
+      assert.equal((await db`select count(*)::int as n from orders where id = ${id} and deadline_agreement_status = 'agreed'`)[0].n, 0, "tidak memenuhi syarat worker SLA");
+      await histCheck();
+    });
+
+    await test("Kesepakatan B: PIC (1) menyetujui waktu permintaan → sepakat; (2) mengusulkan waktu baru — tanpa alasan 422, dengan alasan tersimpan; requested_deadline tetap", async () => {
+      const one = await newOrder("Kesepakatan B1", { deadline: wibDate(7) });
+      const acc = await agreementApi(one.id, { action: "accept_requested" });
+      const o1 = await row(one.id);
+      evidence("B1", { status: acc.status, db: brief(o1, ["deadline_agreement_status", "requested_deadline", "agreed_deadline", "agreed_at"]) });
+      assert.equal(acc.status, 200, await acc.clone().text());
+      assert.equal(o1.deadline_agreement_status, "agreed");
+      assert.equal(o1.agreed_deadline.getTime(), o1.requested_deadline.getTime());
+
+      const two = await newOrder("Kesepakatan B2", { deadline: wibDate(1) });
+      const before = await row(two.id);
+      const noReason = await agreementApi(two.id, { action: "propose", deadlineAt: inDays(10) });
+      const mid = await row(two.id);
+      const proposed = inDays(10);
+      const ok = await agreementApi(two.id, { action: "propose", deadlineAt: proposed, reason: "Butuh 3 konsep + revisi ilustrasi." });
+      const after = await row(two.id);
+      evidence("B2", { noReason: noReason.status, withReason: ok.status, before: brief(before, ["requested_deadline", "pic_estimated_deadline"]), after: brief(after, ["deadline_agreement_status", "requested_deadline", "pic_estimated_deadline"]) });
+      assert.equal(noReason.status, 422, "alasan wajib bila berbeda dari permintaan");
+      assert.equal(mid.pic_estimated_deadline, null, "penolakan 422 tidak menyimpan apa pun");
+      assert.equal(ok.status, 200, await ok.clone().text());
+      assert.equal(after.pic_estimated_deadline.toISOString(), proposed, "estimasi PIC tersimpan");
+      assert.equal(after.requested_deadline.getTime(), before.requested_deadline.getTime(), "requested_deadline tidak berubah");
+      assert.equal(after.deadline_agreement_status, "awaiting_requester");
+      await histCheck();
+    });
+
+    await test("Kesepakatan C: Pemohon melihat permintaan + usulan + alasan + nama PIC di Riwayat Request, menyetujui → agreed_deadline = usulan; identitas & waktu persetujuan tercatat", async () => {
+      const { id, orderNumber } = await newOrder("Kesepakatan C", { deadline: wibDate(2) });
+      const proposed = inDays(9);
+      assert.equal((await agreementApi(id, { action: "propose", deadlineAt: proposed, reason: "Volume 12 halaman." })).status, 200);
+      const view = await track(orderNumber);
+      const a = view.deadlineAgreement;
+      const res = await respond(orderNumber, "approve");
+      const o = await row(id);
+      const [appr] = await db`select actor_name, created_at from order_deadline_events where order_id = ${id} and kind = 'requester_approved'`;
+      evidence("C", { publicView: { requested: a.requestedDeadline, pending: a.pending }, response: res.status, db: brief(o, ["deadline_agreement_status", "requested_deadline", "agreed_deadline", "agreed_at"]), approvedBy: appr?.actor_name });
+      assert.ok(a.requestedDeadline, "waktu permintaan tampil");
+      assert.equal(a.pending.deadline, proposed, "usulan PIC tampil");
+      assert.equal(a.pending.reason, "Volume 12 halaman.", "alasan tampil");
+      assert.equal(a.pending.proposedBy, staffMember.account_name, "nama PIC pengusul tampil");
+      assert.equal(res.status, 200, await res.clone().text());
+      assert.equal(o.deadline_agreement_status, "agreed", "Waktu Disepakati");
+      assert.equal(o.agreed_deadline.toISOString(), proposed, "deadline final = usulan PIC");
+      assert.ok(o.agreed_at, "waktu persetujuan tercatat");
+      assert.match(appr.actor_name, /Ani Lestari \(Pemohon\)/, "identitas Pemohon yang menyetujui tercatat");
+      await histCheck();
+    });
+
+    await test("Kesepakatan D: Pemohon Minta Penyesuaian tanpa alasan ditolak; dengan alasan → kembali ke PIC; PIC usulkan lagi; seluruh usulan tetap di riwayat", async () => {
+      const { id, orderNumber } = await newOrder("Kesepakatan D", { deadline: wibDate(1) });
+      const p1 = inDays(10);
+      const p2 = inDays(7);
+      assert.equal((await agreementApi(id, { action: "propose", deadlineAt: p1, reason: "Usulan pertama." })).status, 200);
+      const noReason = await respond(orderNumber, "adjust");
+      const stillWaiting = (await row(id)).deadline_agreement_status;
+      const adj = await respond(orderNumber, "adjust", "Acara tanggal 8, mohon lebih cepat.");
+      const back = (await row(id)).deadline_agreement_status;
+      const again = await agreementApi(id, { action: "propose", deadlineAt: p2, reason: "Konsep dipangkas jadi 2." });
+      const hist = evBrief(await events(id));
+      evidence("D", { noReason: noReason.status, adjust: adj.status, afterAdjust: back, again: again.status, history: hist });
+      assert.equal(noReason.status, 422, "alasan penyesuaian wajib");
+      assert.equal(stillWaiting, "awaiting_requester", "permintaan tanpa alasan tidak mengubah apa pun");
+      assert.equal(adj.status, 200);
+      assert.equal(back, "adjustment_requested", "kembali ke PIC");
+      assert.equal(again.status, 200);
+      assert.deepEqual(hist.map((e) => e.kind), ["pic_proposed", "requester_adjustment_requested", "pic_proposed"]);
+      assert.deepEqual(hist.filter((e) => e.kind === "pic_proposed").map((e) => [e.round, e.proposed]), [[1, p1], [2, p2]], "kedua usulan & nilainya tersimpan");
+      assert.equal(hist[1].reason, "Acara tanggal 8, mohon lebih cepat.");
+      assert.equal((await row(id)).agreed_deadline, null, "tidak ada deadline final sebelum sepakat");
+      await histCheck();
+    });
+
+    await test("Kesepakatan E: usulan tidak dijawab → tetap menunggu; PIC tidak bisa mulai; worker SLA tidak menutup walau permintaan sudah lewat; tidak ada persetujuan otomatis", async () => {
+      const { id } = await newOrder("Kesepakatan E", { deadline: wibDate(2) });
+      assert.equal((await agreementApi(id, { action: "propose", deadlineAt: inDays(8), reason: "Perlu waktu." })).status, 200);
+      const start = await internal(`/api/internal/orders/${id}/status`, "POST", { status: "in_progress" }, {}, STAFFC);
+      await forcePast(id);
+      const closed = await tick();
+      const o = await row(id);
+      evidence("E", { startWork: start.status, tickClosed: closed, db: brief(o, ["status", "deadline_agreement_status", "requested_deadline", "agreed_deadline", "sla_closed_at"]) });
+      assert.equal(start.status, 409, "PIC belum boleh mulai");
+      assert.equal(o.status, "assigned");
+      assert.equal(o.deadline_agreement_status, "awaiting_requester", "diam bukan persetujuan");
+      assert.equal(o.agreed_deadline, null);
+      assert.ok(o.requested_deadline.getTime() < Date.now(), "permintaan awal sudah lewat");
+      assert.equal(o.sla_closed_at, null, "tidak ditutup otomatis sebelum sepakat");
+      await histCheck();
+    });
+
+    await test("Kesepakatan F: setelah sepakat PIC mengusulkan perubahan (alasan wajib) → deadline lama berlaku sampai Pemohon setuju; nilai lama tersimpan di riwayat", async () => {
+      const { id, orderNumber } = await newOrder("Kesepakatan F", { deadline: wibDate(5) });
+      assert.equal((await agreementApi(id, { action: "accept_requested" })).status, 200);
+      const first = await row(id);
+      const noReason = await agreementApi(id, { action: "propose", deadlineAt: inDays(9) });
+      const proposed = inDays(9);
+      const ok = await agreementApi(id, { action: "propose", deadlineAt: proposed, reason: "Bahan baru dari Pemohon." });
+      const pending = await row(id);
+      const res = await respond(orderNumber, "approve");
+      const after = await row(id);
+      const [chg] = await db`select previous_deadline, proposed_deadline from order_deadline_events where order_id = ${id} and kind = 'change_approved'`;
+      evidence("F", { noReason: noReason.status, propose: ok.status, approve: res.status, agreedBefore: first.agreed_deadline.toISOString(), agreedWhilePending: pending.agreed_deadline.toISOString(), agreedAfter: after.agreed_deadline.toISOString(), historyPrevious: chg?.previous_deadline?.toISOString() });
+      assert.equal(noReason.status, 422);
+      assert.equal(ok.status, 200);
+      assert.equal(pending.agreed_deadline.getTime(), first.agreed_deadline.getTime(), "deadline lama berlaku selama menunggu");
+      assert.equal(pending.deadline_agreement_status, "agreed", "SLA tetap berjalan dengan deadline lama");
+      assert.equal(res.status, 200);
+      assert.equal(after.agreed_deadline.toISOString(), proposed, "deadline baru berlaku setelah disetujui");
+      assert.equal(chg.previous_deadline.getTime(), first.agreed_deadline.getTime(), "nilai sebelumnya tersimpan");
+      assert.equal(after.requested_deadline.getTime(), first.requested_deadline.getTime(), "permintaan awal tetap");
+      await histCheck();
+    });
+
+    await test("Kesepakatan SLA: SLA tahapan dari deadline sepakat (atau sla_rules), tidak pernah dari requested_deadline; perubahan kesepakatan tercermin di stage_deadline_at, daftar monitoring & detail", async () => {
+      const a = await newOrder("Kesepakatan SLA tanpa aturan", { deadline: wibDate(4) });
+      const before = await row(a.id);
+      const awaitingList = await page("/dtic/orders");
+      assert.equal((await agreementApi(a.id, { action: "accept_requested" })).status, 200);
+      const agreed = await row(a.id);
+      const detail = await page(`/dtic/orders/${a.id}`);
+      // Perubahan setelah sepakat → SLA mengikuti deadline baru.
+      const newer = inDays(11);
+      assert.equal((await agreementApi(a.id, { action: "propose", deadlineAt: newer, reason: "Tambah format." })).status, 200);
+      assert.equal((await respond(a.orderNumber, "approve")).status, 200);
+      const changed = await row(a.id);
+      // Dengan aturan SLA tahapan: SLA dari aturan, bukan deadline sepakat/permintaan.
+      const rule = await internal("/api/internal/settings/sla-rules", "POST", { designOrderTypeId: null, status: "in_progress", durationMinutes: 90, isActive: true });
+      assert.equal(rule.status, 201, await rule.clone().text());
+      const { id: ruleId } = await rule.json();
+      try {
+        assert.equal((await internal(`/api/internal/orders/${a.id}/status`, "POST", { status: "in_progress" }, {}, STAFFC)).status, 200);
+        const ruled = await row(a.id);
+        evidence("SLA", { beforeAgree: brief(before, ["stage_deadline_at"]), afterAgree: brief(agreed, ["agreed_deadline", "stage_deadline_at"]), afterChange: brief(changed, ["agreed_deadline", "stage_deadline_at"]), withRule: brief(ruled, ["status", "stage_started_at", "stage_deadline_at", "requested_deadline"]) });
+        assert.equal(before.stage_deadline_at, null);
+        assert.equal(agreed.stage_deadline_at.getTime(), agreed.agreed_deadline.getTime(), "tanpa aturan: SLA = deadline sepakat");
+        assert.equal(changed.stage_deadline_at.toISOString(), newer, "perubahan kesepakatan tercermin di SLA");
+        assert.equal(ruled.stage_deadline_at.getTime() - ruled.stage_started_at.getTime(), 90 * 60_000, "dengan aturan: SLA = mulai tahapan + durasi aturan");
+        assert.notEqual(ruled.stage_deadline_at.getTime(), ruled.requested_deadline.getTime(), "tidak memakai requested_deadline");
+      } finally {
+        await internal(`/api/internal/settings/sla-rules/${ruleId}`, "DELETE");
+      }
+      assert.ok(awaitingList.html.includes("Pemeriksaan PIC"), "daftar monitoring menampilkan status kesepakatan yang belum selesai");
+      assert.ok(detail.html.includes("Waktu Disepakati"), "detail menampilkan Waktu Disepakati");
+      await histCheck();
+    });
+
+    await test("Kesepakatan Auto-Closed: belum sepakat dengan permintaan lewat → tidak pernah ditutup; setelah sepakat dengan deadline sepakat lewat → ditutup oleh tick", async () => {
+      const { id } = await newOrder("Kesepakatan Auto-Closed", { deadline: wibDate(2) });
+      await forcePast(id);
+      const closed1 = await tick();
+      const notAgreed = await row(id);
+      assert.equal((await agreementApi(id, { action: "accept_requested" })).status, 200);
+      const agreed = await row(id);
+      const closed2 = await tick();
+      const after = await row(id);
+      evidence("AUTO", { tick1: closed1, notAgreed: brief(notAgreed, ["deadline_agreement_status", "requested_deadline", "sla_closed_at"]), agreed: brief(agreed, ["agreed_deadline", "stage_deadline_at"]), tick2: closed2, after: brief(after, ["status", "sla_closed_at"]) });
+      assert.equal(notAgreed.sla_closed_at, null, "belum sepakat → tidak ditutup");
+      assert.ok(agreed.stage_deadline_at.getTime() < Date.now(), "deadline sepakat sudah lewat");
+      assert.ok(closed2 >= 1);
+      assert.ok(after.sla_closed_at, "setelah sepakat & lewat → Auto-Closed");
+      assert.equal(after.status, "assigned", "status pekerjaan tidak berubah oleh Auto-Closed");
+      await histCheck();
+    });
+
+    await test("Kesepakatan Akses: PIC tidak bisa menyetujui atas nama Pemohon; Pemohon tidak bisa mengubah nilai usulan; tanpa usulan → 409; PIC tidak bisa mengubah deadline sepihak; riwayat hanya bertambah; PIC tak ditugaskan ditolak; Manager memantau & memutuskan", async () => {
+      const { id, orderNumber } = await newOrder("Kesepakatan Akses", { deadline: wibDate(2) });
+      const proposed = inDays(8);
+      assert.equal((await agreementApi(id, { action: "propose", deadlineAt: proposed, reason: "Volume besar." })).status, 200);
+      const picApprove = await agreementApi(id, { action: "approve" });
+      const afterPicApprove = await row(id);
+      const sneaky = await respond(orderNumber, "approve", undefined, { deadlineAt: inDays(60), agreedDeadline: inDays(60), picEstimatedDeadline: inDays(60) });
+      const afterSneaky = await row(id);
+      const again = await respond(orderNumber, "approve");
+      const picDeadlinePut = await internal(`/api/internal/orders/${id}/deadline`, "PUT", { deadlineDate: wibDate(30), reason: "Saya ubah sendiri ya." }, {}, STAFFC);
+      const picPatch = await internal(`/api/internal/orders/${id}`, "PATCH", { title: "x" }, {}, STAFFC);
+      const afterPic = await row(id);
+      const histPut = await internal(`/api/internal/orders/${id}/deadline-agreement`, "PUT", {}, {}, ADMIN);
+      const histDel = await internal(`/api/internal/orders/${id}/deadline-agreement`, "DELETE", undefined, {}, ADMIN);
+      const mgrView = await internal(`/api/internal/orders/${id}/deadline-agreement`, "GET", undefined, {}, MGRC);
+      const other = await newOrder("Kesepakatan Akses tak ditugaskan");
+      await db`delete from order_assignments where order_id = ${other.id} and member_id = ${staffMember.id}`;
+      const notAssigned = await agreementApi(other.id, { action: "accept_requested" });
+      const mgrAsPic = await agreementApi(other.id, { action: "accept_requested" }, MGRC);
+      const mgrResolve = await agreementApi(other.id, { action: "resolve", deadlineAt: inDays(6), reason: "Diputuskan Manager." }, MGRC);
+      evidence("AKSES", {
+        picApprove: picApprove.status, statusAfterPicApprove: afterPicApprove.deadline_agreement_status,
+        sneakyApprove: sneaky.status, agreedAfterSneaky: afterSneaky.agreed_deadline?.toISOString(), proposed,
+        approveWithoutPending: again.status, picDeadlinePut: picDeadlinePut.status, picPatch: picPatch.status,
+        historyPut: histPut.status, historyDelete: histDel.status, managerView: mgrView.status,
+        notAssignedPic: notAssigned.status, managerAsPic: mgrAsPic.status, managerResolve: mgrResolve.status,
+      });
+      assert.equal(picApprove.status, 403, "PIC tidak bisa menyetujui atas nama Pemohon");
+      assert.equal(afterPicApprove.deadline_agreement_status, "awaiting_requester");
+      assert.equal(sneaky.status, 200);
+      assert.equal(afterSneaky.agreed_deadline.toISOString(), proposed, "nilai tambahan dari Pemohon diabaikan — yang disepakati tetap usulan PIC");
+      assert.equal(again.status, 409, "tidak ada usulan yang menunggu");
+      assert.ok([401, 403].includes(picDeadlinePut.status), `PIC tidak bisa Ubah tenggat (${picDeadlinePut.status})`);
+      assert.equal(picPatch.status, 403, "PIC tidak bisa mengedit order");
+      assert.equal(afterPic.agreed_deadline.getTime(), afterSneaky.agreed_deadline.getTime(), "deadline sepakat tidak berubah sepihak");
+      assert.equal(histPut.status, 405, "tidak ada API untuk mengubah riwayat");
+      assert.equal(histDel.status, 405, "tidak ada API untuk menghapus riwayat");
+      assert.equal(mgrView.status, 200, "Manager dapat memantau");
+      assert.equal(notAssigned.status, 404, "PIC tak ditugaskan ditolak (404, kebijakan aplikasi: tidak mengungkap keberadaan order)");
+      assert.equal(mgrAsPic.status, 403, "Manager bukan pemberi estimasi");
+      assert.equal(mgrResolve.status, 200, "Manager dapat menetapkan deadline final pengajuan yang belum sepakat");
+      await histCheck();
+    });
+
+    await test("Kesepakatan Eskalasi: 3 usulan tanpa kesepakatan → eskalasi ke Manager; PIC tidak bisa mengusulkan lagi; Manager memutuskan (alasan wajib)", async () => {
+      const { id, orderNumber } = await newOrder("Kesepakatan Eskalasi", { deadline: wibDate(2) });
+      for (let i = 1; i <= 3; i++) {
+        assert.equal((await agreementApi(id, { action: "propose", deadlineAt: inDays(5 + i), reason: `Usulan ${i}` })).status, 200);
+        assert.equal((await respond(orderNumber, "adjust", `Belum cocok ${i}`)).status, 200);
+      }
+      const escalated = (await row(id)).deadline_agreement_status;
+      const picAgain = await agreementApi(id, { action: "propose", deadlineAt: inDays(9), reason: "Lagi" });
+      const noReason = await agreementApi(id, { action: "resolve", deadlineAt: inDays(6) }, MGRC);
+      const ok = await agreementApi(id, { action: "resolve", deadlineAt: inDays(6), reason: "Jalan tengah sesuai kapasitas tim." }, MGRC);
+      const k = (await events(id)).map((e) => e.kind);
+      evidence("ESKALASI", { escalated, picAgain: picAgain.status, noReason: noReason.status, resolve: ok.status, history: k });
+      assert.equal(escalated, "escalated");
+      assert.equal(picAgain.status, 409);
+      assert.equal(noReason.status, 422);
+      assert.equal(ok.status, 200);
+      assert.equal((await row(id)).deadline_agreement_status, "agreed");
+      assert.equal(k.filter((x) => x === "escalated").length, 1);
+      assert.equal(k.at(-1), "manager_resolved");
+      await histCheck();
+    });
+
+    await test("Kesepakatan Ubah tenggat: Super Admin pada pekerjaan yang sudah sepakat → deadline sepakat & SLA ikut berubah, permintaan awal tetap, tercatat", async () => {
+      const { id } = await newOrder("Kesepakatan Ubah tenggat", { deadline: wibDate(4) });
+      assert.equal((await agreementApi(id, { action: "accept_requested" })).status, 200);
+      const before = await row(id);
+      const r = await internal(`/api/internal/orders/${id}/deadline`, "PUT", { deadlineDate: wibDate(9), reason: "Penyesuaian administratif oleh admin." });
+      const o = await row(id);
+      evidence("UBAH", { status: r.status, before: brief(before, ["requested_deadline", "agreed_deadline"]), after: brief(o, ["requested_deadline", "agreed_deadline", "deadline_at", "stage_deadline_at"]) });
+      assert.equal(r.status, 200, await r.clone().text());
+      assert.equal(o.agreed_deadline.getTime(), o.deadline_at.getTime());
+      assert.ok(o.agreed_deadline.getTime() > before.agreed_deadline.getTime());
+      assert.equal(o.requested_deadline.getTime(), before.requested_deadline.getTime(), "permintaan awal tidak ditimpa");
+      assert.equal(o.stage_deadline_at.getTime(), o.agreed_deadline.getTime(), "SLA mengikuti");
+      assert.equal((await events(id)).at(-1).kind, "admin_changed");
+      await histCheck();
+    });
+
+    await test("Kesepakatan Browser: Pemohon menekan 'Setujui Waktu' di Riwayat Request → halaman detail PIC menampilkan 'Waktu Disepakati'; sebelumnya 'Mulai kerjakan' tidak ditawarkan", async () => {
+      const { id, orderNumber } = await newOrder("Kesepakatan Browser", { deadline: wibDate(2) });
+      assert.equal((await agreementApi(id, { action: "propose", deadlineAt: inDays(8), reason: "Perlu waktu render." })).status, 200);
+      const browser = await (await import("playwright-core")).chromium.launch({ executablePath: process.env.CHROME_PATH ?? "/usr/bin/google-chrome", headless: true });
+      try {
+        const pc = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+        await pc.addInitScript(() => {
+          try { localStorage.setItem("dtic-tutorial-welcome-seen-v1", "1"); } catch {}
+        });
+        const pub = await pc.newPage();
+        await pub.goto(`${BASE}/riwayat?order=${orderNumber}`);
+        const section = pub.getByTestId("public-deadline-agreement");
+        await section.waitFor();
+        const statusBefore = await pub.getByTestId("public-deadline-status").innerText();
+        await section.getByRole("button", { name: "Setujui Waktu" }).click();
+        await pub.getByRole("button", { name: "Ya, Setujui Waktu" }).click();
+        await pub.getByTestId("public-deadline-status").filter({ hasText: "Waktu Disepakati" }).waitFor();
+        await pc.close();
+
+        const ic = await browser.newContext({ viewport: { width: 1366, height: 900 } });
+        const [name, value] = STAFFC.split("=");
+        await ic.addCookies([{ name, value, url: BASE }]);
+        const p = await ic.newPage();
+        await p.goto(`${BASE}/dtic/orders/${id}`);
+        await p.getByTestId("deadline-agreement").waitFor();
+        const picStatus = await p.getByTestId("deadline-agreement-status").innerText();
+        const startButton = await p.getByTestId("next-step").getByRole("button", { name: "Mulai kerjakan" }).count();
+        evidence("BROWSER", { publicBefore: statusBefore, picDetail: picStatus, startButtonVisible: startButton, db: brief(await row(id), ["deadline_agreement_status", "agreed_deadline"]) });
+        assert.equal(statusBefore, "Menunggu Persetujuan Waktu");
+        assert.equal(picStatus, "Waktu Disepakati");
+        assert.equal(startButton, 1, "setelah sepakat, PIC dapat mulai mengerjakan");
+        await ic.close();
+
+        // Sebelum sepakat tombol mulai tidak ditawarkan ke PIC.
+        const pending = await newOrder("Kesepakatan Browser belum sepakat");
+        const ic2 = await browser.newContext({ viewport: { width: 1366, height: 900 } });
+        await ic2.addCookies([{ name, value, url: BASE }]);
+        const p2 = await ic2.newPage();
+        await p2.goto(`${BASE}/dtic/orders/${pending.id}`);
+        await p2.getByTestId("deadline-agreement").waitFor();
+        assert.equal(await p2.getByTestId("deadline-agreement-status").innerText(), "Pemeriksaan PIC");
+        assert.equal(await p2.getByTestId("next-step").getByRole("button", { name: "Mulai kerjakan" }).count(), 0);
+        await ic2.close();
+      } finally {
+        await browser.close();
+      }
+      await histCheck();
+    });
+  }
+
+  console.log("\nReview Center (highlight, komentar, Request Revisi, versi, integrasi QC)");
+  {
+    const STAFFC = await qcStaff();
+    const MGRC = await qcManager();
+    // Pertahanan urutan tes: tes "migrasi idempoten" (QC) menjalankan ulang migrasi lama di tengah suite dan
+    // mengembalikan constraint kind ke daftar lama — pastikan memuat jenis peristiwa SLA & Review Center lagi.
+    await db`alter table order_workflow_events drop constraint if exists order_workflow_events_kind_check`;
+    await db`alter table order_workflow_events add constraint order_workflow_events_kind_check
+      check (kind in ('qc_submitted', 'qc_withdrawn', 'qc_approved', 'qc_revision_requested', 'qc_access_requested',
+                       'delivery_recorded', 'feedback_recorded', 'completed', 'whatsapp_opened',
+                       'sla_auto_closed', 'sla_resumed', 'sla_confirmed_complete',
+                       'review_highlight_added', 'review_comment_added', 'review_clarification_requested', 'review_clarification_answered',
+                       'revision_created', 'revision_started', 'revision_delivered', 'revision_approved', 'revision_resubmitted'))`;
+    const evidence = (tag, data) => console.log(`[BUKTI RC ${tag}]`, JSON.stringify(data));
+
+    // --- PDF multi-halaman dengan teks yang bisa dipilih (dibangun tangan; xref dihitung dari byte offset) ---
+    const buildPdf = (pages) => {
+      const objects = ["<< /Type /Catalog /Pages 2 0 R >>", null, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"];
+      const kids = [];
+      pages.forEach((p, i) => {
+        const pageNo = 4 + i * 2;
+        const stream = [`BT /F1 28 Tf 72 700 Td (${p.title}) Tj ET`, ...p.lines.map((l, j) => `BT /F1 16 Tf 72 ${640 - j * 40} Td (${l}) Tj ET`)].join("\n");
+        objects[pageNo - 1] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents ${pageNo + 1} 0 R /Resources << /Font << /F1 3 0 R >> >> >>`;
+        objects[pageNo] = `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`;
+        kids.push(`${pageNo} 0 R`);
+      });
+      objects[1] = `<< /Type /Pages /Kids [${kids.join(" ")}] /Count ${pages.length} >>`;
+      let out = "%PDF-1.4\n";
+      const offsets = [];
+      objects.forEach((body, i) => {
+        offsets.push(Buffer.byteLength(out));
+        out += `${i + 1} 0 obj\n${body}\nendobj\n`;
+      });
+      const xref = Buffer.byteLength(out);
+      out += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.map((o) => `${String(o).padStart(10, "0")} 00000 n \n`).join("")}`;
+      out += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+      return Buffer.from(out, "latin1");
+    };
+    const pdfV = (label) =>
+      buildPdf([
+        { title: `Judul Review ${label}`, lines: ["Kegiatan seminar nasional", "Tanggal pelaksanaan dua puluh", "Lokasi gedung utama kampus"] },
+        { title: `Halaman Kedua ${label}`, lines: ["Logo penyelenggara dan sponsor", "Warna latar belakang biru"] },
+      ]);
+    // --- PNG valid 160x100 (bisa didekode browser) ---
+    const crcTable = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+    const crc32 = (buf) => { let c = 0xffffffff; for (const b of buf) c = crcTable[(c ^ b) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+    const pngChunk = (type, data) => {
+      const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+      const td = Buffer.concat([Buffer.from(type), data]);
+      const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(td));
+      return Buffer.concat([len, td, crc]);
+    };
+    const { deflateSync } = await import("node:zlib");
+    const validPng = () => {
+      const w = 160, h = 100;
+      const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 2;
+      const raw = Buffer.alloc((w * 3 + 1) * h);
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const o = y * (w * 3 + 1) + 1 + x * 3; raw[o] = 40 + x; raw[o + 1] = 120; raw[o + 2] = 200 - y; }
+      return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), pngChunk("IHDR", ihdr), pngChunk("IDAT", deflateSync(raw)), pngChunk("IEND", Buffer.alloc(0))]);
+    };
+
+    // --- pembantu data & API ---
+    const ordersExtra = [];
+    const upload = async (id, file) => {
+      const r = await uploadResult(id, file, STAFFC);
+      assert.ok(r.status === 200 || r.status === 201, `unggah ${file.name}: ${r.status} ${await r.clone().text()}`);
+      return (await r.json()).file.id;
+    };
+    const deliver = async (id, fileIds) => {
+      const r = await workflow(id, { action: "record_delivery", confirmSent: true, resultFileIds: fileIds }, STAFFC);
+      assert.equal(r.status, 200, await r.clone().text());
+      const [d] = await db`select id from order_workflow_events where order_id = ${id} and kind = 'delivery_recorded' order by created_at desc, id desc limit 1`;
+      return d.id;
+    };
+    /** Pekerjaan yang sudah menyerahkan hasil versi 1 (langsung ke pemohon, Jalur A) dan menunggu keputusan pemohon. */
+    const deliveredOrder = async (title, files) => {
+      const { id, orderNumber } = await qcOrder(title);
+      assert.equal((await setStatusAs(id, "in_progress", STAFFC)).status, 200);
+      const fileIds = [];
+      for (const f of files) fileIds.push(await upload(id, f));
+      const deliveryId = await deliver(id, fileIds);
+      return { id, orderNumber, fileIds, deliveryId };
+    };
+    const rcGet = (orderNumber, headers = {}) => fetch(`${BASE}/api/public/tracking/review?order=${encodeURIComponent(orderNumber)}`, { headers: { "x-forwarded-for": freshIp(), ...headers } });
+    const rcPost = (body) => fetch(`${BASE}/api/public/tracking/review`, { method: "POST", headers: { "Content-Type": "application/json", "x-forwarded-for": freshIp() }, body: JSON.stringify(body) });
+    const rcInternal = (id, body, cookie = STAFFC) => internal(`/api/internal/orders/${id}/review`, "POST", body, {}, cookie);
+    const stateOf = async (orderNumber) => { const r = await rcGet(orderNumber); assert.equal(r.status, 200, await r.clone().text()); return r.json(); };
+    const rectAt = (i) => ({ rects: [{ x: 0.1, y: 0.05 + (i % 8) * 0.1, w: 0.3, h: 0.05 }] });
+    const annotate = (o, n, extra = {}) =>
+      rcPost({ orderNumber: o.orderNumber, action: "annotate", deliveryId: o.deliveryId, attachmentId: o.fileIds[0], kind: "area", page: 1 + (n % 2), geometry: rectAt(n), comment: `Catatan nomor ${n}`, requestKey: randomUUID(), ...extra });
+    const dbAnn = (id) => db`select number, status, version_no, page, kind, delivery_id from review_annotations where order_id = ${id} order by number`;
+    const dbRev = (id) => db`select number, status, reviewed_version_no, delivered_version_no from revision_requests where order_id = ${id} order by number`;
+    const statuses = (rows) => Object.fromEntries(rows.map((r) => [`#${r.number}`, r.status]));
+    const orderRow = (id) => db`select status, qc_status from orders where id = ${id}`.then((r) => r[0]);
+    const histCounts = async () => {
+      const [a] = await db`select count(*)::int as n from review_annotations`;
+      const [c] = await db`select count(*)::int as n from review_comments`;
+      const [r] = await db`select count(*)::int as n from revision_requests`;
+      const [i] = await db`select count(*)::int as n from revision_request_items`;
+      return { annotations: a.n, comments: c.n, revisions: r.n, items: i.n };
+    };
+    let hist = { annotations: 0, comments: 0, revisions: 0, items: 0 };
+    const histNeverShrinks = async () => {
+      const now = await histCounts();
+      for (const k of Object.keys(hist)) assert.ok(now[k] >= hist[k], `riwayat ${k} tidak pernah berkurang (${now[k]} < ${hist[k]})`);
+      hist = now;
+    };
+
+    // ======================================================================== alur utama (Skenario 1–6, satu pekerjaan)
+    const flow = {};
+    const dbRevId = async (n) => (await db`select id from revision_requests where order_id = ${flow.id} and number = ${n}`)[0].id;
+
+    await test("Review Center — Skenario 1: PIC mengunggah PDF → Pemohon membuat 5 highlight, memilih 3, mengajukan REV-001; 2 lainnya tetap belum diajukan", async () => {
+      const pdf1 = pdfV("v1");
+      flow.pdfV1Hash = (await import("node:crypto")).createHash("sha256").update(pdf1).digest("hex");
+      Object.assign(flow, await deliveredOrder("Review Center alur utama", [{ name: "hasil-v1.pdf", data: pdf1, type: "application/pdf" }]));
+      const s0 = await stateOf(flow.orderNumber);
+      assert.equal(s0.versions.length, 1);
+      assert.equal(s0.versions[0].files[0].previewKind, "pdf");
+      assert.equal(s0.permissions.canRequestRevision, true);
+      assert.equal(s0.orderId, null, "id internal order tidak dikirim ke publik");
+      flow.annIds = [];
+      for (let n = 1; n <= 5; n++) {
+        const r = await annotate(flow, n);
+        assert.equal(r.status, 200, await r.clone().text());
+      }
+      const s1 = await stateOf(flow.orderNumber);
+      assert.deepEqual(s1.annotations.map((a) => a.number), [1, 2, 3, 4, 5], "nomor highlight berurutan");
+      assert.ok(s1.annotations.every((a) => a.status === "not_submitted" && a.createdByKind === "requester" && a.comments.length === 1 && a.versionNo === 1));
+      flow.annIds = s1.annotations.map((a) => a.id);
+      const before = await orderRow(flow.id);
+      const selected = flow.annIds.slice(0, 3);
+      const r = await rcPost({ orderNumber: flow.orderNumber, action: "create_revision", annotationIds: selected, note: "Mohon diprioritaskan.", requestKey: randomUUID() });
+      assert.equal(r.status, 200, await r.clone().text());
+      const s2 = await r.json();
+      assert.deepEqual(s2.revisions.map((x) => [x.number, x.status, x.annotationIds.length]), [[1, "waiting_pic", 3]]);
+      assert.deepEqual(statuses(await dbAnn(flow.id)), { "#1": "waiting_pic", "#2": "waiting_pic", "#3": "waiting_pic", "#4": "not_submitted", "#5": "not_submitted" });
+      const after = await orderRow(flow.id);
+      assert.equal(after.status, "internal_revision", "memakai aksi 'Minta Revisi' pemohon yang SUDAH ada (status pekerjaan mengikuti)");
+      const [fb] = await db`select needs_revision, summary, detail from order_workflow_events where order_id = ${flow.id} and kind = 'feedback_recorded' order by created_at desc limit 1`;
+      assert.equal(fb.needs_revision, true);
+      assert.match(fb.summary, /REV-001 — 3 catatan \(#001, #002, #003\)\. Mohon diprioritaskan\./);
+      assert.equal((await db`select count(*)::int as n from order_workflow_events where order_id = ${flow.id} and kind = 'revision_created'`)[0].n, 1);
+      evidence(1, { highlights: 5, selected: 3, revisi: s2.revisions.map((x) => ({ n: x.number, status: x.status })), statusHighlight: statuses(await dbAnn(flow.id)), orderSebelum: before, orderSesudah: after, ringkasanEvent: fb.summary });
+      hist = await histCounts();
+    });
+
+    await test("Review Center — Skenario 2: PIC meminta klarifikasi & membalas; Pemohon menjawab; seluruh percakapan tersimpan", async () => {
+      const [a1, a2] = flow.annIds;
+      let r = await rcInternal(flow.id, { action: "comment", annotationId: a1, body: "Baik, judul akan diperbesar.", kind: "comment", requestKey: randomUUID() });
+      assert.equal(r.status, 200, await r.clone().text());
+      r = await rcInternal(flow.id, { action: "comment", annotationId: a2, body: "Tanggal yang benar tanggal berapa?", kind: "clarification_request", requestKey: randomUUID() });
+      assert.equal(r.status, 200, await r.clone().text());
+      let [row] = await db`select status, status_before_clarification from review_annotations where id = ${a2}`;
+      assert.deepEqual([row.status, row.status_before_clarification], ["waiting_clarification", "waiting_pic"], "status → Menunggu Klarifikasi, status sebelumnya disimpan");
+      r = await rcPost({ orderNumber: flow.orderNumber, action: "comment", annotationId: a2, body: "Tanggal 21 November.", requestKey: randomUUID() });
+      assert.equal(r.status, 200, await r.clone().text());
+      [row] = await db`select status, status_before_clarification from review_annotations where id = ${a2}`;
+      assert.deepEqual([row.status, row.status_before_clarification], ["waiting_pic", null], "jawaban Pemohon mengembalikan status");
+      const thread = await db`select kind, author_kind, body from review_comments where annotation_id = ${a2} order by created_at, id`;
+      assert.deepEqual(thread.map((c) => [c.kind, c.author_kind]), [["comment", "requester"], ["clarification_request", "staff"], ["clarification_answer", "requester"]]);
+      // Pemohon tidak boleh meminta klarifikasi; Manager tidak boleh menulis.
+      assert.equal((await rcPost({ orderNumber: flow.orderNumber, action: "comment", annotationId: a2, body: "x", kind: "clarification_request" })).status, 403);
+      assert.equal((await rcInternal(flow.id, { action: "comment", annotationId: a2, body: "x" }, MGRC)).status, 403, "Manager hanya memantau");
+      assert.equal((await rcInternal(flow.id, { action: "comment", annotationId: a2, body: "", kind: "comment" })).status, 422, "komentar kosong ditolak");
+      const kinds = await db`select kind from order_workflow_events where order_id = ${flow.id} and kind like 'review_%' and kind <> 'review_highlight_added' order by created_at, id`;
+      assert.deepEqual(kinds.map((k) => k.kind), ["review_comment_added", "review_clarification_requested", "review_clarification_answered"], "percakapan masuk Riwayat Request");
+      evidence(2, { percakapanHighlight2: thread.map((c) => `${c.author_kind}/${c.kind}: ${c.body}`), statusSetelahJawaban: row.status });
+      await histNeverShrinks();
+    });
+
+    await test("Review Center — Skenario 3: PIC memperbaiki & mengunggah versi 2 (file lama utuh, highlight lama tetap di v1); Pemohon menyetujui REV-001 sekaligus", async () => {
+      const sRev = await rcInternal(flow.id, { action: "start_revision", revisionId: (await dbRevId(1)) });
+      assert.equal(sRev.status, 200, await sRev.clone().text());
+      assert.deepEqual(statuses(await dbAnn(flow.id)), { "#1": "in_progress", "#2": "in_progress", "#3": "in_progress", "#4": "not_submitted", "#5": "not_submitted" });
+      assert.equal((await rcInternal(flow.id, { action: "start_revision", revisionId: await dbRevId(1) })).status, 409, "tidak bisa dimulai dua kali");
+      assert.equal((await setStatusAs(flow.id, "in_progress", STAFFC)).status, 200, "Perbaiki Hasil");
+      const v2File = await upload(flow.id, { name: "hasil-v2.pdf", data: pdfV("v2"), type: "application/pdf" });
+      flow.fileIdsV2 = [v2File];
+      flow.deliveryV2 = await deliver(flow.id, [v2File]);
+      assert.deepEqual((await dbRev(flow.id)).map((r) => [r.number, r.status, r.reviewed_version_no, r.delivered_version_no]), [[1, "waiting_requester_check", 1, 2]]);
+      assert.deepEqual(statuses(await dbAnn(flow.id)), { "#1": "waiting_check", "#2": "waiting_check", "#3": "waiting_check", "#4": "not_submitted", "#5": "not_submitted" });
+      // File v1 tidak berubah; highlight lama tetap terhubung ke versi asalnya (tidak dipindah otomatis ke v2).
+      const [f1] = await db`select file_name, file_size from order_attachments where id = ${flow.fileIds[0]}`;
+      assert.equal(f1.file_name, "hasil-v1.pdf");
+      const bytesV1 = await (await fetch(`${BASE}/api/internal/attachments/${flow.fileIds[0]}`, { headers: { Cookie: STAFFC } })).arrayBuffer();
+      assert.equal((await import("node:crypto")).createHash("sha256").update(Buffer.from(bytesV1)).digest("hex"), flow.pdfV1Hash, "isi file versi 1 tidak berubah");
+      const anns = await dbAnn(flow.id);
+      assert.ok(anns.every((a) => a.version_no === 1 && a.delivery_id === flow.deliveryId), "semua highlight tetap terikat versi 1");
+      const s = await stateOf(flow.orderNumber);
+      assert.deepEqual(s.versions.map((v) => [v.versionNo, v.isLatest]), [[1, false], [2, true]]);
+      assert.equal(s.permissions.canApproveRevision, true);
+      assert.equal(s.permissions.canFinalApprove, false, "persetujuan akhir ditahan selama REV-001 menunggu pemeriksaan");
+      assert.match(s.permissions.finalApprovalBlockedReason, /REV-001/);
+      // Pemohon menyetujui REV-001 sekaligus (bukan per highlight).
+      const rev = s.revisions[0];
+      const r = await rcPost({ orderNumber: flow.orderNumber, action: "approve_revision", revisionId: rev.id });
+      assert.equal(r.status, 200, await r.clone().text());
+      assert.deepEqual(statuses(await dbAnn(flow.id)), { "#1": "done", "#2": "done", "#3": "done", "#4": "not_submitted", "#5": "not_submitted" });
+      const [rv] = await db`select status, approved_by_name, approved_at from revision_requests where id = ${rev.id}`;
+      assert.equal(rv.status, "approved");
+      assert.match(rv.approved_by_name, /\(Pemohon\)/);
+      assert.ok(rv.approved_at);
+      const o = await orderRow(flow.id);
+      assert.equal(o.status, "awaiting_requester", "menyetujui REV TIDAK menyetujui seluruh pekerjaan (status pekerjaan tetap menunggu keputusan Pemohon)");
+      assert.equal((await rcPost({ orderNumber: flow.orderNumber, action: "approve_revision", revisionId: rev.id })).status, 409, "persetujuan ganda ditolak");
+      evidence(3, { versi: s.versions.map((v) => ({ v: v.versionNo, aktif: v.isLatest })), hashV1SamaDenganAwal: true, highlightTerikatVersi: [...new Set(anns.map((a) => a.version_no))], revisi: await dbRev(flow.id), statusHighlight: statuses(await dbAnn(flow.id)), statusPekerjaan: o.status });
+      await histNeverShrinks();
+    });
+
+
+    await test("Review Center — Skenario 4: REV-002 dari dua highlight tersisa; nomor berurutan; riwayat REV-001 tidak berubah; highlight yang sudah selesai tidak bisa dipilih", async () => {
+      const before001 = await db`select number, status, note, reviewed_version_no, delivered_version_no, approved_by_name, approved_at from revision_requests where order_id = ${flow.id} and number = 1`;
+      const items001 = await db`select annotation_id from revision_request_items where revision_id = ${await dbRevId(1)} order by annotation_id`;
+      // Highlight #001 sudah Selesai (masuk REV-001) → tidak boleh dimasukkan lagi.
+      let r = await rcPost({ orderNumber: flow.orderNumber, action: "create_revision", annotationIds: [flow.annIds[0], flow.annIds[3]], requestKey: randomUUID() });
+      assert.equal(r.status, 422, await r.clone().text());
+      assert.match((await r.json()).error, /#001.*tidak dapat dipilih.*Selesai/);
+      assert.equal((await dbRev(flow.id)).length, 1, "tidak ada REV baru dari percobaan yang ditolak");
+      assert.equal((await orderRow(flow.id)).status, "awaiting_requester", "transaksi dibatalkan utuh: status pekerjaan tidak berubah");
+      r = await rcPost({ orderNumber: flow.orderNumber, action: "create_revision", annotationIds: flow.annIds.slice(3), requestKey: randomUUID() });
+      assert.equal(r.status, 200, await r.clone().text());
+      assert.deepEqual((await dbRev(flow.id)).map((x) => [x.number, x.status]), [[1, "approved"], [2, "waiting_pic"]], "nomor revisi berurutan");
+      assert.deepEqual(statuses(await dbAnn(flow.id)), { "#1": "done", "#2": "done", "#3": "done", "#4": "waiting_pic", "#5": "waiting_pic" });
+      const after001 = await db`select number, status, note, reviewed_version_no, delivered_version_no, approved_by_name, approved_at from revision_requests where order_id = ${flow.id} and number = 1`;
+      assert.deepEqual(after001, before001, "REV-001 tidak berubah");
+      assert.deepEqual(await db`select annotation_id from revision_request_items where revision_id = ${await dbRevId(1)} order by annotation_id`, items001);
+      const [rv2] = await db`select reviewed_version_no from revision_requests where order_id = ${flow.id} and number = 2`;
+      assert.equal(rv2.reviewed_version_no, 2, "REV-002 ditinjau pada versi terbaru (v2), highlight-nya tetap berasal dari v1");
+      evidence(4, { revisi: await dbRev(flow.id), statusHighlight: statuses(await dbAnn(flow.id)), rev001TidakBerubah: true, percobaanHighlightSelesai: 422 });
+      await histNeverShrinks();
+    });
+
+    await test("Review Center — Skenario 5: persetujuan akhir ditahan selama ada REV terbuka; setelah semua disetujui masuk mesin keputusan/QC yang SUDAH ada, tanpa QC ganda", async () => {
+      const qcBefore = await db`select count(*)::int as n from order_workflow_events where order_id = ${flow.id} and kind in ('qc_submitted', 'qc_approved', 'qc_revision_requested')`;
+      assert.equal((await rcInternal(flow.id, { action: "start_revision", revisionId: await dbRevId(2) })).status, 200);
+      assert.equal((await setStatusAs(flow.id, "in_progress", STAFFC)).status, 200);
+      const v3 = await upload(flow.id, { name: "hasil-v3.pdf", data: pdfV("v3"), type: "application/pdf" });
+      flow.deliveryV3 = await deliver(flow.id, [v3]);
+      assert.deepEqual((await dbRev(flow.id)).map((r) => [r.number, r.status, r.delivered_version_no]), [[1, "approved", 2], [2, "waiting_requester_check", 3]]);
+      // Persetujuan akhir ditolak lewat SEMUA jalur selagi REV-002 menunggu pemeriksaan.
+      const viaDecision = await publicDecide(flow.orderNumber, flow.deliveryV3, "approved", "Setuju");
+      assert.equal(viaDecision.status, 409, await viaDecision.clone().text());
+      assert.match((await viaDecision.json()).error, /REV-002/);
+      const viaInternal = await workflow(flow.id, { action: "record_feedback", needsRevision: false, note: "Pemohon setuju (dicatat PIC)" }, STAFFC);
+      assert.equal(viaInternal.status, 409, "jalur 'Catat Masukan Pemohon' internal juga ditahan");
+      const fbBefore = (await db`select count(*)::int as n from order_workflow_events where order_id = ${flow.id} and kind = 'feedback_recorded'`)[0].n;
+      // Setujui REV-002, lalu persetujuan akhir.
+      const s = await stateOf(flow.orderNumber);
+      assert.equal(s.permissions.canFinalApprove, false);
+      assert.equal((await rcPost({ orderNumber: flow.orderNumber, action: "approve_revision", revisionId: s.revisions[1].id })).status, 200);
+      const s2 = await stateOf(flow.orderNumber);
+      assert.equal(s2.permissions.canFinalApprove, true);
+      assert.equal(s2.permissions.finalApprovalBlockedReason, null);
+      const final = await publicDecide(flow.orderNumber, flow.deliveryV3, "approved", "Semua sudah sesuai", randomUUID());
+      assert.equal(final.status, 200, await final.clone().text());
+      const [fb] = await db`select needs_revision, detail from order_workflow_events where order_id = ${flow.id} and kind = 'feedback_recorded' order by created_at desc, id desc limit 1`;
+      assert.equal(fb.needs_revision, false);
+      assert.equal(fb.detail.approvedVersionNo, 3, "versi dokumen yang disetujui tercatat");
+      assert.equal(fb.detail.approvedDeliveryId, flow.deliveryV3);
+      assert.equal((await db`select count(*)::int as n from order_workflow_events where order_id = ${flow.id} and kind = 'feedback_recorded'`)[0].n, fbBefore + 1, "tepat satu catatan persetujuan akhir");
+      assert.equal((await publicDecide(flow.orderNumber, flow.deliveryV3, "approved", "lagi")).status, 409, "persetujuan akhir tidak bisa dicatat dua kali");
+      const qcAfter = await db`select count(*)::int as n from order_workflow_events where order_id = ${flow.id} and kind in ('qc_submitted', 'qc_approved', 'qc_revision_requested')`;
+      assert.deepEqual(qcAfter, qcBefore, "tidak ada peristiwa QC baru/ganda dari Review Center");
+      const o = await orderRow(flow.id);
+      assert.equal(o.status, "awaiting_requester", "persetujuan akhir tidak menutup pekerjaan; PIC masih menyelesaikan lewat aksi yang sudah ada");
+      const done = await workflow(flow.id, { action: "complete", note: "Dikonfirmasi tuntas" }, STAFFC);
+      assert.equal(done.status, 200, await done.clone().text());
+      assert.equal((await orderRow(flow.id)).status, "completed");
+      // Setelah selesai Review Center hanya-baca.
+      const ro = await stateOf(flow.orderNumber);
+      assert.equal(ro.permissions.readOnly, true);
+      assert.equal((await annotate(flow, 9)).status, 409, "pekerjaan selesai: highlight baru ditolak");
+      evidence(5, { revisiSebelumFinal: "REV-002 menunggu → 409", via: { decision: 409, catatMasukanInternal: 409 }, persetujuanAkhir: { approvedVersionNo: fb.detail.approvedVersionNo }, peristiwaQC: { sebelum: qcBefore[0].n, sesudah: qcAfter[0].n }, statusPekerjaan: o.status });
+      await histNeverShrinks();
+    });
+
+    await test("Review Center — Skenario 5b (Jalur B): hasil revisi tetap melewati QC Manager yang SUDAH ada sebelum sampai ke Pemohon; REV mengikuti, QC tidak ganda", async () => {
+      const { id, orderNumber } = await qcOrder("Review Center Jalur B");
+      assert.equal((await setStatusAs(id, "in_progress", STAFFC)).status, 200);
+      const f1 = await upload(id, { name: "b-v1.pdf", data: pdfV("b1"), type: "application/pdf" });
+      // Sebelum diserahkan ke pemohon: tidak ada versi yang bisa direview Pemohon (draf internal tetap tersembunyi).
+      assert.equal((await workflow(id, { action: "submit_qc", method: "in_app", resultFileIds: [f1], note: "Mohon diperiksa" }, STAFFC)).status, 200);
+      let s = await stateOf(orderNumber);
+      assert.equal(s.versions.length, 0, "hasil yang masih di QC Manager belum terlihat oleh Pemohon");
+      assert.equal((await rcPost({ orderNumber, action: "annotate", deliveryId: randomUUID(), attachmentId: f1, kind: "area", page: 1, geometry: rectAt(1), comment: "x" })).status, 404);
+      assert.equal((await workflow(id, { action: "approve_qc", note: "ACC" }, MGRC)).status, 200);
+      const d1 = await deliver(id, [f1]);
+      const o = { orderNumber, deliveryId: d1, fileIds: [f1] };
+      for (let n = 1; n <= 2; n++) assert.equal((await annotate(o, n)).status, 200);
+      s = await stateOf(orderNumber);
+      let r = await rcPost({ orderNumber, action: "create_revision", annotationIds: s.annotations.map((a) => a.id), requestKey: randomUUID() });
+      assert.equal(r.status, 200, await r.clone().text());
+      assert.deepEqual(await orderRow(id), { status: "internal_revision", qc_status: "revision" }, "status pekerjaan/QC mengikuti aturan 'Minta Revisi' yang sudah ada");
+      // PIC memperbaiki lalu mengajukan ULANG ke QC Manager (mekanisme QC yang sama): REV belum berpindah ke Pemohon.
+      assert.equal((await setStatusAs(id, "in_progress", STAFFC)).status, 200);
+      const f2 = await upload(id, { name: "b-v2.pdf", data: pdfV("b2"), type: "application/pdf" });
+      assert.equal((await workflow(id, { action: "submit_qc", method: "in_app", resultFileIds: [f2], note: "Revisi selesai" }, STAFFC)).status, 200);
+      assert.deepEqual((await dbRev(id)).map((x) => [x.number, x.status]), [[1, "waiting_pic"]], "REV menunggu sampai hasil benar-benar diserahkan ke Pemohon");
+      assert.equal((await stateOf(orderNumber)).versions.length, 1, "versi 2 belum tampil ke Pemohon selama di QC Manager");
+      assert.equal((await workflow(id, { action: "approve_qc", note: "ACC revisi" }, MGRC)).status, 200);
+      await deliver(id, [f2]);
+      assert.deepEqual((await dbRev(id)).map((x) => [x.number, x.status, x.delivered_version_no]), [[1, "waiting_requester_check", 2]]);
+      const qc = await db`select kind, count(*)::int as n from order_workflow_events where order_id = ${id} and kind in ('qc_submitted', 'qc_approved') group by kind order by kind`;
+      assert.deepEqual(qc.map((x) => [x.kind, x.n]), [["qc_approved", 2], ["qc_submitted", 2]], "satu putaran QC per penyerahan — tanpa QC ganda");
+      s = await stateOf(orderNumber);
+      assert.equal((await rcPost({ orderNumber, action: "approve_revision", revisionId: s.revisions[0].id })).status, 200);
+      const fin = await publicDecide(orderNumber, (await db`select id from order_workflow_events where order_id = ${id} and kind = 'delivery_recorded' order by created_at desc limit 1`)[0].id, "approved", "OK");
+      assert.equal(fin.status, 200, await fin.clone().text());
+      evidence("5b", { jalur: "B (Manager QC dulu)", qcPerPutaran: qc.map((x) => `${x.kind}=${x.n}`), revisi: await dbRev(id), versiTerlihatPemohonSaatQC: 1, statusAkhir: await orderRow(id) });
+      await histNeverShrinks();
+    });
+
+    await test("Review Center — Skenario 6: penyimpanan — muat ulang & akun berbeda membaca highlight, komentar, versi, persetujuan, dan riwayat yang sama", async () => {
+      const pub = await stateOf(flow.orderNumber);
+      const rI = await internal(`/api/internal/orders/${flow.id}/review`, "GET", undefined, {}, STAFFC);
+      assert.equal(rI.status, 200);
+      const pic = await rI.json();
+      const mgr = await (await internal(`/api/internal/orders/${flow.id}/review`, "GET", undefined, {}, MGRC)).json();
+      const adm = await (await internal(`/api/internal/orders/${flow.id}/review`, "GET")).json();
+      const shape = (s) => ({ ann: s.annotations.map((a) => [a.number, a.status, a.comments.length]), rev: s.revisions.map((r) => [r.number, r.status, r.annotationIds.length]), ver: s.versions.map((v) => v.versionNo) });
+      assert.deepEqual(shape(pic), shape(pub));
+      assert.deepEqual(shape(mgr), shape(pub));
+      assert.deepEqual(shape(adm), shape(pub));
+      assert.equal(pub.annotations.length, 5);
+      assert.equal(pub.revisions.length, 2);
+      assert.equal(pub.versions.length, 3);
+      assert.equal(pub.annotations[1].comments.length, 3, "percakapan highlight #2 utuh");
+      const [{ n: comments }] = await db`select count(*)::int as n from review_comments where order_id = ${flow.id}`;
+      assert.equal(pub.annotations.reduce((n, a) => n + a.comments.length, 0), comments, "API = database");
+      const timeline = await page(`/dtic/orders/${flow.id}`, true);
+      assert.equal(timeline.status, 200, "halaman detail (Riwayat aktivitas) tetap termuat dengan jenis peristiwa baru");
+      for (const t of ["Request Revisi diajukan", "Hasil revisi disetujui pemohon", "Highlight baru di Review Center", "Pemohon menjawab klarifikasi"]) assert.ok(timeline.html.includes(t), `riwayat aktivitas memuat "${t}"`);
+      evidence(6, { highlight: pub.annotations.length, komentar: comments, revisi: pub.revisions.map((r) => `REV-${r.number}:${r.status}`), versi: pub.versions.length, samaUntukPublikPICManagerAdmin: true });
+    });
+
+    // ======================================================================== Skenario 7 (hak akses, validasi, keamanan data)
+    await test("Review Center — Skenario 7: hak akses — Pemohon order lain, anonim, PIC tidak ditugaskan, Manager, Super Admin; validasi masukan", async () => {
+      const other = await deliveredOrder("Review Center order lain", [{ name: "lain.pdf", data: pdfV("lain"), type: "application/pdf" }]);
+      const a = await annotate(other, 1);
+      assert.equal(a.status, 200);
+      const otherState = await stateOf(other.orderNumber);
+      const myAnn = (await stateOf(flow.orderNumber)).annotations[0].id;
+      // Pemohon order lain tidak bisa menyentuh highlight/revisi order ini (nomor order = pembatas).
+      assert.equal((await rcPost({ orderNumber: other.orderNumber, action: "comment", annotationId: myAnn, body: "mengintip" })).status, 404);
+      assert.equal((await rcPost({ orderNumber: other.orderNumber, action: "create_revision", annotationIds: [myAnn] })).status, 422);
+      assert.ok(!JSON.stringify(otherState).includes(myAnn), "state order lain tidak memuat highlight order ini");
+      assert.equal((await rcGet("DTIC-2026-99999")).status, 404);
+      assert.equal((await rcGet("bukan-nomor")).status, 422);
+      assert.equal((await rcPost({ orderNumber: other.orderNumber, action: "tidak-ada" })).status, 422);
+      // Anonim ke endpoint internal; PIC yang tidak ditugaskan; Manager; Super Admin.
+      assert.equal((await fetch(`${BASE}/api/internal/orders/${flow.id}/review`)).status, 401);
+      const unassigned = await submit(orderForm(brand1, { title: "Review Center tanpa PIC uji" }).fd);
+      const [uo] = await db`select id from orders where order_number = ${(await unassigned.json()).orderNumber}`;
+      assert.equal((await internal(`/api/internal/orders/${uo.id}/review`, "GET", undefined, {}, STAFFC)).status, 404, "Staff yang tidak ditugaskan: 404 (tidak mengungkap keberadaan order)");
+      assert.equal((await rcInternal(uo.id, { action: "comment", annotationId: myAnn, body: "x" }, STAFFC)).status, 404);
+      assert.equal((await internal(`/api/internal/orders/${other.id}/review`, "GET", undefined, {}, MGRC)).status, 200, "Manager membaca (koordinator memantau)");
+      assert.equal((await rcInternal(other.id, { action: "annotate", deliveryId: other.deliveryId, attachmentId: other.fileIds[0], kind: "area", page: 1, geometry: rectAt(4), comment: "x" }, MGRC)).status, 403, "Manager tidak menulis");
+      const admin = await rcInternal(other.id, { action: "annotate", deliveryId: other.deliveryId, attachmentId: other.fileIds[0], kind: "area", page: 1, geometry: rectAt(5), comment: "Dari Super Admin", requestKey: randomUUID() }, ADMIN);
+      assert.equal(admin.status, 200, await admin.clone().text());
+      assert.equal((await rcInternal(other.id, { action: "start_revision", revisionId: randomUUID() }, STAFFC)).status, 404);
+      assert.equal((await rcPost({ orderNumber: other.orderNumber, action: "start_revision", revisionId: randomUUID() })).status, 403, "Pemohon tidak bisa memulai pengerjaan revisi");
+      assert.equal((await rcInternal(other.id, { action: "create_revision", annotationIds: [] }, STAFFC)).status, 403, "PIC tidak membuat Request Revisi");
+      assert.equal((await rcInternal(other.id, { action: "approve_revision", revisionId: randomUUID() }, STAFFC)).status, 403, "PIC tidak menyetujui atas nama Pemohon");
+      // Tidak ada PUT/PATCH/DELETE: riwayat hanya bertambah.
+      for (const method of ["PUT", "PATCH", "DELETE"]) {
+        assert.equal((await internal(`/api/internal/orders/${other.id}/review`, method, {}, {}, ADMIN)).status, 405, `internal ${method}`);
+        assert.equal((await fetch(`${BASE}/api/public/tracking/review`, { method, headers: { "Content-Type": "application/json" }, body: "{}" })).status, 405, `publik ${method}`);
+      }
+      // Validasi masukan: server tidak mempercayai klien.
+      const bad = async (extra, expect, label) => assert.equal((await annotate(other, 2, extra)).status, expect, label);
+      await bad({ geometry: { rects: [{ x: 0.9, y: 0.1, w: 0.3, h: 0.1 }] } }, 422, "geometri di luar halaman");
+      await bad({ geometry: null }, 422, "geometri kosong");
+      await bad({ page: 0 }, 422, "halaman 0");
+      await bad({ comment: "   " }, 422, "komentar kosong");
+      await bad({ kind: "text", quote: "" }, 422, "teks kosong");
+      await bad({ kind: "manual", reference: "" }, 422, "referensi kosong");
+      await bad({ kind: "bukan" }, 422, "jenis tidak dikenal");
+      await bad({ attachmentId: other.fileIds[0], linkId: randomUUID() }, 422, "dokumen DAN tautan sekaligus");
+      await bad({ attachmentId: flow.fileIds[0] }, 404, "dokumen milik order lain");
+      await bad({ deliveryId: flow.deliveryId }, 404, "versi milik order lain");
+      await bad({ deliveryId: randomUUID() }, 404, "versi tidak ada");
+      assert.equal((await annotate(other, 3, { kind: "manual", reference: "Halaman 2, kalimat kedua", geometry: undefined, page: 2 })).status, 200, "referensi manual valid");
+      // Pengaman riwayat di database: hapus/ubah langsung ditolak; ubah status diizinkan; hapus order tetap berantai.
+      const [ann] = await db`select id from review_annotations where order_id = ${other.id} order by number limit 1`;
+      const [com] = await db`select id from review_comments where order_id = ${other.id} limit 1`;
+      const expectDenied = async (fn, label) => { let denied = false; try { await fn(); } catch (e) { denied = /tidak boleh|tetap|permission|42501/i.test(String(e.message ?? e)); } assert.ok(denied, label); };
+      await expectDenied(() => db`delete from review_comments where id = ${com.id}`, "hapus komentar ditolak");
+      await expectDenied(() => db`update review_comments set body = 'diubah' where id = ${com.id}`, "ubah komentar ditolak");
+      await expectDenied(() => db`delete from review_annotations where id = ${ann.id}`, "hapus highlight ditolak");
+      await expectDenied(() => db`update review_annotations set geometry = '{"rects":[]}' where id = ${ann.id}`, "ubah posisi highlight ditolak");
+      await expectDenied(() => db`update review_annotations set quote = 'x' where id = ${ann.id}`, "ubah kutipan ditolak");
+      await expectDenied(() => db`delete from revision_requests where order_id = ${flow.id}`, "hapus REV ditolak");
+      await expectDenied(() => db`update revision_requests set number = 99 where order_id = ${flow.id}`, "ubah nomor REV ditolak");
+      const rev1Id = await dbRevId(1);
+      await expectDenied(() => db`delete from revision_request_items where revision_id = ${rev1Id}`, "hapus item REV ditolak");
+      await db`update review_annotations set status = 'not_submitted' where id = ${ann.id}`;
+      evidence(7, { pemohonOrderLain: 404, anonimInternal: 401, picTidakDitugaskan: 404, managerBaca: 200, managerTulis: 403, superAdminTulis: 200, metodeTerlarang: 405, riwayatImmutable: "hapus/ubah → ditolak trigger" });
+      const del = await internal(`/api/internal/orders/${other.id}`, "DELETE", undefined, {}, ADMIN);
+      assert.ok(del.status === 200 || del.status === 204, `hapus order berantai: ${del.status} ${await del.clone().text()}`);
+      assert.equal((await db`select count(*)::int as n from review_annotations where order_id = ${other.id}`)[0].n, 0, "hapus order menghapus berantai highlight & komentar");
+    });
+
+    await test("Review Center — Skenario 7b: konkurensi & idempotensi — nomor highlight unik berurutan saat serentak; requestKey sama tidak menggandakan; REV serentak hanya satu", async () => {
+      const o = await deliveredOrder("Review Center konkurensi", [{ name: "k.pdf", data: pdfV("k"), type: "application/pdf" }]);
+      const rs = await Promise.all(Array.from({ length: 8 }, (_, i) => annotate(o, i + 1)));
+      assert.ok(rs.every((r) => r.status === 200), `semua 200: ${rs.map((r) => r.status)}`);
+      const nums = (await dbAnn(o.id)).map((a) => a.number);
+      assert.deepEqual(nums, [1, 2, 3, 4, 5, 6, 7, 8], "nomor unik & berurutan walau serentak");
+      const key = randomUUID();
+      const a1 = await annotate(o, 9, { requestKey: key });
+      const a2 = await annotate(o, 9, { requestKey: key });
+      assert.deepEqual([a1.status, a2.status], [200, 200]);
+      assert.equal((await dbAnn(o.id)).length, 9, "requestKey sama → satu highlight");
+      const ids = (await stateOf(o.orderNumber)).annotations.map((a) => a.id);
+      const rk = randomUUID();
+      const revs = await Promise.all([
+        rcPost({ orderNumber: o.orderNumber, action: "create_revision", annotationIds: ids.slice(0, 2), requestKey: randomUUID() }),
+        rcPost({ orderNumber: o.orderNumber, action: "create_revision", annotationIds: ids.slice(2, 4), requestKey: randomUUID() }),
+        rcPost({ orderNumber: o.orderNumber, action: "create_revision", annotationIds: ids.slice(4, 6), requestKey: rk }),
+      ]);
+      const codes = revs.map((r) => r.status).sort();
+      assert.equal(codes.filter((c) => c === 200).length, 1, `tepat satu REV berhasil: ${codes}`);
+      assert.ok(codes.every((c) => c === 200 || c === 409 || c === 422), `sisanya ditolak rapi: ${codes}`);
+      assert.deepEqual((await dbRev(o.id)).map((r) => r.number), [1], "satu nomor REV");
+      assert.equal((await db`select count(*)::int as n from order_workflow_events where order_id = ${o.id} and kind = 'feedback_recorded'`)[0].n, 1, "satu 'Minta Revisi' saja");
+      const winner = revs.findIndex((r) => r.status === 200);
+      const key2 = winner === 2 ? rk : null;
+      if (key2) {
+        const again = await rcPost({ orderNumber: o.orderNumber, action: "create_revision", annotationIds: ids.slice(4, 6), requestKey: key2 });
+        assert.equal(again.status, 200, "requestKey yang sama → hasil yang sama (bukan REV kedua)");
+        assert.equal((await dbRev(o.id)).length, 1);
+      }
+      evidence("7b", { nomorHighlightSerentak: nums, kodeREVSerentak: codes, jumlahREV: 1 });
+    });
+
+    await test("Review Center — Pratinjau PowerPoint: berkas rusak → pesan jelas (bukan pratinjau palsu); LibreOffice nyata mengonversi PPTX → PDF bila tersedia", async () => {
+      const zip = Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.alloc(300, 7)]);
+      const o = await deliveredOrder("Review Center pptx", [{ name: "rusak.pptx", data: zip, type: "application/vnd.openxmlformats-officedocument.presentationml.presentation" }]);
+      const st = await stateOf(o.orderNumber);
+      assert.equal(st.versions[0].files[0].previewKind, "presentation");
+      const bad = await fetch(`${BASE}/api/public/tracking/preview/${o.fileIds[0]}?order=${o.orderNumber}`, { headers: { "x-forwarded-for": freshIp() } });
+      assert.ok([422, 501].includes(bad.status), `berkas rusak → ${bad.status}`);
+      assert.match((await bad.json()).error, /konversi|LibreOffice|dipratinjau/i);
+      assert.equal((await fetch(`${BASE}/api/public/tracking/preview/${o.fileIds[0]}?order=DTIC-2026-99999`)).status, 404, "nomor order salah: 404");
+      assert.equal((await fetch(`${BASE}/api/public/tracking/preview/${o.fileIds[0]}`)).status, 404, "tanpa nomor order: 404");
+      assert.equal((await fetch(`${BASE}/api/internal/attachments/${o.fileIds[0]}/preview`)).status, 401);
+      // Konversi sungguhan (butuh LibreOffice di mesin uji): buat PPTX asli lewat soffice dari ODP datar.
+      const { spawn: sp } = await import("node:child_process");
+      const { mkdtemp, writeFile: wf, readFile: rf, rm: rmDir } = await import("node:fs/promises");
+      const os2 = await import("node:os");
+      const dir = await mkdtemp(path.join(os2.tmpdir(), "dtic-rc-pptx-"));
+      const run = (args) => new Promise((resolve) => { const c = sp("soffice", args, { stdio: "ignore" }); const t = setTimeout(() => c.kill("SIGKILL"), 120000); c.on("error", () => resolve(-1)); c.on("close", (code) => { clearTimeout(t); resolve(code); }); });
+      const fodp = `<?xml version="1.0" encoding="UTF-8"?><office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" office:version="1.2" office:mimetype="application/vnd.oasis.opendocument.presentation"><office:body><office:presentation><draw:page draw:name="S1"><draw:frame svg:x="2cm" svg:y="2cm" svg:width="20cm" svg:height="3cm"><draw:text-box><text:p>Judul Slide Satu</text:p></draw:text-box></draw:frame></draw:page><draw:page draw:name="S2"><draw:frame svg:x="2cm" svg:y="2cm" svg:width="20cm" svg:height="3cm"><draw:text-box><text:p>Isi Slide Dua</text:p></draw:text-box></draw:frame></draw:page></office:presentation></office:body></office:document>`;
+      await wf(path.join(dir, "deck.fodp"), fodp);
+      const code = await run([`-env:UserInstallation=file://${dir}/profile`, "--headless", "--norestore", "--convert-to", "pptx", "--outdir", dir, path.join(dir, "deck.fodp")]);
+      let pptx = null;
+      try { pptx = await rf(path.join(dir, "deck.pptx")); } catch {}
+      await rmDir(dir, { recursive: true, force: true }).catch(() => {});
+      if (code !== 0 || !pptx) {
+        console.log("[BUKTI RC pptx]", JSON.stringify({ libreOffice: "tidak tersedia di mesin uji ini — konversi nyata BELUM DAPAT DIUJI", kodeKeluar: code }));
+        return;
+      }
+      const good = await deliveredOrder("Review Center pptx nyata", [{ name: "deck.pptx", data: pptx, type: "application/vnd.openxmlformats-officedocument.presentationml.presentation" }]);
+      const pub = await fetch(`${BASE}/api/public/tracking/preview/${good.fileIds[0]}?order=${good.orderNumber}`, { headers: { "x-forwarded-for": freshIp() } });
+      assert.equal(pub.status, 200, await pub.clone().text());
+      const bytes = Buffer.from(await pub.arrayBuffer());
+      assert.equal(bytes.subarray(0, 5).toString("latin1"), "%PDF-", "hasil konversi adalah PDF");
+      assert.ok((bytes.toString("latin1").match(/\/Type\s*\/Page[^s]/g) ?? []).length >= 2, "dua slide → dua halaman PDF");
+      const inner = await fetch(`${BASE}/api/internal/attachments/${good.fileIds[0]}/preview`, { headers: { Cookie: STAFFC } });
+      assert.equal(inner.status, 200);
+      assert.equal(inner.headers.get("content-type"), "application/pdf");
+      evidence("pptx", { rusak: bad.status, konversiNyata: pub.status, ukuranPdf: bytes.length, halaman: (bytes.toString("latin1").match(/\/Type\s*\/Page[^s]/g) ?? []).length });
+    });
+
+    // ======================================================================== browser
+    await test("Review Center — Browser (PDF): Pemohon membuat highlight area & teks, menyimpan komentar; zoom menjaga posisi; muat ulang tetap ada; PIC & Manager melihat hasil yang sama", async () => {
+      const o = await deliveredOrder("Review Center browser pdf", [{ name: "b.pdf", data: pdfV("browser"), type: "application/pdf" }]);
+      const browser = await (await import("playwright-core")).chromium.launch({ executablePath: process.env.CHROME_PATH ?? "/usr/bin/google-chrome", headless: true });
+      const errors = [];
+      try {
+        const pc = await browser.newContext({ viewport: { width: 1280, height: 1100 } });
+        await pc.addInitScript(() => { try { localStorage.setItem("dtic-tutorial-welcome-seen-v1", "1"); } catch {} });
+        const p = await pc.newPage();
+        p.on("pageerror", (e) => errors.push(e.message));
+        await p.goto(`${BASE}/riwayat?order=${o.orderNumber}`);
+        const rc = p.getByTestId("review-center");
+        await rc.waitFor({ timeout: 30000 });
+        await p.waitForFunction(() => document.querySelector('[data-testid="review-text-1"]')?.dataset.rendered === "1", null, { timeout: 30000 });
+        assert.ok((await p.locator('[data-testid="review-text-1"] span').count()) > 0, "lapisan teks PDF dirender (teks bisa dipilih)");
+        // Highlight AREA: seret pada halaman 1.
+        await p.getByTestId("rc-mode-toggle").click();
+        await p.getByTestId("rc-tool-area").click();
+        const pageBox = await p.getByTestId("review-page-1").boundingBox();
+        await p.mouse.move(pageBox.x + pageBox.width * 0.2, pageBox.y + pageBox.height * 0.2);
+        await p.mouse.down();
+        await p.mouse.move(pageBox.x + pageBox.width * 0.55, pageBox.y + pageBox.height * 0.27, { steps: 6 });
+        await p.mouse.up();
+        await p.getByTestId("rc-draft").waitFor();
+        assert.match(await p.getByTestId("rc-draft-info").innerText(), /Area pada halaman 1/);
+        assert.equal(await p.getByTestId("rc-draft-save").isDisabled(), true, "komentar wajib sebelum menyimpan");
+        await p.getByTestId("rc-draft-comment").fill("Judul kurang besar");
+        await p.getByTestId("rc-draft-save").click();
+        await p.getByTestId("review-hl-1").first().waitFor();
+        const [a1] = await db`select kind, page, geometry, status from review_annotations where order_id = ${o.id} and number = 1`;
+        assert.deepEqual([a1.kind, a1.page, a1.status], ["area", 1, "not_submitted"]);
+        const g = a1.geometry.rects[0];
+        assert.ok(g.x > 0.18 && g.x < 0.22 && g.w > 0.3 && g.w < 0.4 && g.y > 0.18 && g.y < 0.22, `koordinat ternormalisasi (0–1): ${JSON.stringify(g)}`);
+        // Zoom: koordinat tersimpan tidak berubah dan overlay tetap sejajar dengan halaman.
+        const place = async () => {
+          const pb = await p.getByTestId("review-page-1").boundingBox();
+          const hb = await p.getByTestId("review-hl-1").first().boundingBox();
+          return { pw: pb.width, rx: (hb.x - pb.x) / pb.width, ry: (hb.y - pb.y) / pb.height, rw: hb.width / pb.width };
+        };
+        const z100 = await place();
+        await p.getByTestId("rc-zoom-in").click();
+        await p.getByTestId("rc-zoom-in").click();
+        await p.waitForFunction((w) => document.querySelector('[data-testid="review-page-1"]').getBoundingClientRect().width > w * 1.4, z100.pw, { timeout: 15000 });
+        assert.equal(await p.getByTestId("rc-zoom-label").innerText(), "150%");
+        const z150 = await place();
+        for (const k of ["rx", "ry", "rw"]) assert.ok(Math.abs(z100[k] - z150[k]) < 0.01, `posisi relatif ${k} sama saat zoom (${z100[k]} vs ${z150[k]})`);
+        assert.ok(Math.abs(z150.rx - g.x) < 0.01 && Math.abs(z150.rw - g.w) < 0.01, "overlay sejajar dengan koordinat tersimpan");
+        evidence("browser-zoom", { disimpan: g, relatifZoom100: z100, relatifZoom150: z150, lebarHalaman: [Math.round(z100.pw), Math.round(z150.pw)] });
+        await p.getByTestId("rc-zoom-out").click();
+        await p.getByTestId("rc-zoom-out").click();
+        // Highlight TEKS: klik-ganda pada kata di lapisan teks (alat "Pilih teks").
+        await p.getByTestId("rc-tool-text").click();
+        await p.waitForFunction(() => document.querySelector('[data-testid="review-text-1"]')?.dataset.rendered === "1", null, { timeout: 15000 });
+        const word = p.locator('[data-testid="review-text-1"] span', { hasText: "seminar" }).first();
+        await word.dblclick();
+        await p.getByTestId("rc-draft").waitFor();
+        assert.match(await p.getByTestId("rc-draft-info").innerText(), /Teks pada halaman 1/);
+        await p.getByTestId("rc-draft-comment").fill("Istilah ini diganti 'konferensi'");
+        await p.getByTestId("rc-draft-save").click();
+        await p.getByTestId("review-hl-2").first().waitFor();
+        const [a2] = await db`select kind, quote, geometry from review_annotations where order_id = ${o.id} and number = 2`;
+        assert.equal(a2.kind, "text");
+        assert.ok(a2.quote.length > 0 && a2.geometry.rects.length >= 1);
+        // Muat ulang: highlight & komentar tetap ada.
+        await p.reload();
+        await p.getByTestId("review-center").waitFor({ timeout: 30000 });
+        await p.getByTestId("review-hl-1").first().waitFor({ timeout: 30000 });
+        assert.equal(await p.locator('[data-testid^="review-hl-"][data-annotation-id]').evaluateAll((els) => new Set(els.map((e) => e.dataset.annotationId)).size), 2);
+        await p.getByTestId("rc-ann-item-1").getByRole("button").click();
+        assert.match(await p.getByTestId("rc-comment").first().innerText(), /Judul kurang besar/);
+        // Pilih & ajukan Request Revisi lewat UI.
+        await p.getByTestId("rc-ann-check-1").check();
+        await p.getByTestId("rc-create-revision").click();
+        await p.getByTestId("rc-revision-note").fill("Tolong cek keduanya");
+        await p.getByTestId("rc-revision-confirm").click();
+        await p.getByTestId("rc-rev-1").waitFor();
+        assert.match(await p.getByTestId("rc-rev-1").innerText(), /Menunggu PIC/);
+        assert.deepEqual(statuses(await dbAnn(o.id)), { "#1": "waiting_pic", "#2": "not_submitted" }, "hanya highlight terpilih yang masuk REV-001");
+        assert.deepEqual(errors, [], "tidak ada error konsol/JS pada sisi Pemohon");
+        await pc.close();
+
+        // PIC (internal): melihat highlight yang sama di halaman detail, membalas, dan memulai revisi; Manager hanya-baca.
+        const [name, value] = STAFFC.split("=");
+        const ic = await browser.newContext({ viewport: { width: 1366, height: 1100 } });
+        await ic.addCookies([{ name, value, url: BASE }]);
+        await ic.addInitScript(() => { try { localStorage.setItem("dtic-tutorial-welcome-seen-v1", "1"); } catch {} });
+        const q = await ic.newPage();
+        q.on("pageerror", (e) => errors.push(e.message));
+        await q.goto(`${BASE}/dtic/orders/${o.id}`);
+        await q.getByTestId("review-center").waitFor({ timeout: 30000 });
+        await q.getByTestId("rc-ann-item-1").getByRole("button").click();
+        await q.getByTestId("rc-reply-body").fill("Siap, judul diperbesar.");
+        await q.getByTestId("rc-reply-send").click();
+        await q.getByTestId("rc-comment").nth(1).waitFor();
+        assert.equal((await db`select count(*)::int as n from review_comments where order_id = ${o.id}`)[0].n, 3);
+        await q.getByTestId("rc-tab-revisions").click();
+        await q.getByTestId("rc-rev-start-1").click();
+        await q.getByTestId("rc-rev-1").filter({ hasText: "Sedang Dikerjakan" }).waitFor();
+        assert.equal((await dbRev(o.id))[0].status, "in_progress");
+        assert.equal(await q.getByTestId("rc-create-revision").count(), 0, "PIC tidak melihat tombol Ajukan Request Revisi");
+        assert.equal(await q.getByTestId("rc-final-approve").count(), 0, "PIC tidak melihat persetujuan akhir Pemohon");
+        await ic.close();
+        const [mn, mv] = MGRC.split("=");
+        const mc = await browser.newContext({ viewport: { width: 1366, height: 1000 } });
+        await mc.addCookies([{ name: mn, value: mv, url: BASE }]);
+        await mc.addInitScript(() => { try { localStorage.setItem("dtic-tutorial-welcome-seen-v1", "1"); } catch {} });
+        const m = await mc.newPage();
+        await m.goto(`${BASE}/dtic/orders/${o.id}`);
+        await m.getByTestId("review-center").waitFor({ timeout: 30000 });
+        assert.equal(await m.getByTestId("rc-mode-toggle").count(), 0, "Manager hanya memantau (tanpa Mode Review)");
+        assert.equal(await m.getByTestId("rc-ann-item-1").count(), 1, "Manager melihat highlight yang sama");
+        await mc.close();
+        assert.deepEqual(errors, [], "tidak ada error konsol/JS pada sisi PIC/Manager");
+        evidence("browser-pdf", { highlightArea: g, highlightTeks: a2.quote, setelahMuatUlang: "ada", revisi: await dbRev(o.id), komentar: 3 });
+      } finally {
+        await browser.close();
+      }
+      await histNeverShrinks();
+    });
+
+    await test("Review Center — Browser (gambar): highlight area pada gambar, tersimpan ternormalisasi, tetap sejajar saat zoom dan setelah muat ulang", async () => {
+      const o = await deliveredOrder("Review Center browser gambar", [{ name: "poster.png", data: validPng(), type: "image/png" }]);
+      const browser = await (await import("playwright-core")).chromium.launch({ executablePath: process.env.CHROME_PATH ?? "/usr/bin/google-chrome", headless: true });
+      try {
+        const pc = await browser.newContext({ viewport: { width: 1280, height: 1000 } });
+        await pc.addInitScript(() => { try { localStorage.setItem("dtic-tutorial-welcome-seen-v1", "1"); } catch {} });
+        const p = await pc.newPage();
+        await p.goto(`${BASE}/riwayat?order=${o.orderNumber}`);
+        await p.getByTestId("review-center").waitFor({ timeout: 30000 });
+        await p.getByTestId("image-box").waitFor();
+        await p.waitForFunction(() => { const i = document.querySelector('[data-testid="image-box"] img'); return i && i.complete && i.naturalWidth > 0; }, null, { timeout: 15000 });
+        await p.getByTestId("rc-mode-toggle").click();
+        const box = await p.getByTestId("image-box").boundingBox();
+        await p.mouse.move(box.x + box.width * 0.25, box.y + box.height * 0.3);
+        await p.mouse.down();
+        await p.mouse.move(box.x + box.width * 0.6, box.y + box.height * 0.65, { steps: 5 });
+        await p.mouse.up();
+        await p.getByTestId("rc-draft").waitFor();
+        assert.match(await p.getByTestId("rc-draft-info").innerText(), /Area pada gambar/);
+        await p.getByTestId("rc-draft-comment").fill("Warna logo terlalu gelap");
+        await p.getByTestId("rc-draft-save").click();
+        await p.getByTestId("review-hl-1").first().waitFor();
+        const [a] = await db`select kind, page, geometry from review_annotations where order_id = ${o.id}`;
+        assert.deepEqual([a.kind, a.page], ["area", 1]);
+        const g = a.geometry.rects[0];
+        assert.ok(Math.abs(g.x - 0.25) < 0.03 && Math.abs(g.y - 0.3) < 0.03 && Math.abs(g.w - 0.35) < 0.04 && Math.abs(g.h - 0.35) < 0.04, `koordinat: ${JSON.stringify(g)}`);
+        const rel = async () => { const b = await p.getByTestId("image-box").boundingBox(); const h = await p.getByTestId("review-hl-1").first().boundingBox(); return { w: b.width, x: (h.x - b.x) / b.width, y: (h.y - b.y) / b.height }; };
+        const r1 = await rel();
+        await p.getByTestId("rc-zoom-out").click();
+        await p.getByTestId("rc-zoom-out").click();
+        await p.waitForFunction((w) => document.querySelector('[data-testid="image-box"]').getBoundingClientRect().width < w * 0.8, r1.w, { timeout: 10000 });
+        const r2 = await rel();
+        assert.ok(Math.abs(r1.x - r2.x) < 0.01 && Math.abs(r1.y - r2.y) < 0.01, "posisi relatif tetap saat zoom");
+        await p.reload();
+        await p.getByTestId("review-hl-1").first().waitFor({ timeout: 30000 });
+        evidence("browser-gambar", { disimpan: g, relatif: [r1, r2] });
+        await pc.close();
+      } finally {
+        await browser.close();
+      }
+      await histNeverShrinks();
+    });
+  }
 
   console.log("\nKegagalan database");
   await test("database mati → pengajuan 500 dengan pesan jelas, tidak mengklaim berhasil", async () => {

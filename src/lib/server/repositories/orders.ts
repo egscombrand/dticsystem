@@ -5,7 +5,7 @@ import { addDaysToKey, dateKeyToUtcStart, formatDeadline, toDateKey } from "@/li
 import { sql } from "@/lib/server/db";
 import { AppError, NotFoundError } from "@/lib/server/errors";
 import type { QcStatus } from "@/lib/qc";
-import { ACTION_NEEDED_STATUSES, ACTIVE_STATUSES, FINISHED_STATUSES, type HistoryStatus, type OrderStatus } from "@/lib/status";
+import { ACTION_NEEDED_STATUSES, ACTIVE_STATUSES, FINISHED_STATUSES, statusLabel, type HistoryStatus, type OrderStatus } from "@/lib/status";
 import { checkTransition } from "@/lib/workflow";
 import type { Role } from "@/lib/auth/permissions";
 import { DEFAULT_PRIORITY_CODE } from "@/lib/server/config";
@@ -14,6 +14,8 @@ import { resultCollectionStatus, type ResultCollectionStatus } from "@/lib/resul
 import { type OrderSubmissionInput, type OrderUpdateInput } from "@/lib/validation/order";
 import { enqueueOrderNotification } from "@/lib/server/repositories/notifications";
 import { eventTypeForStatus } from "@/lib/telegram-routing";
+import { recordAdminDeadlineChange } from "@/lib/server/repositories/deadline-agreement";
+import type { DeadlineAgreementStatus } from "@/lib/deadline-agreement";
 
 const FINISHED = FINISHED_STATUSES as unknown as string[];
 /** Order yang sedang menunggu keputusan QC Manager — satu-satunya status order saat qc_status = 'pending'. */
@@ -36,6 +38,10 @@ export type OrderRow = {
   status: OrderStatus;
   qc_status: QcStatus;
   created_at: Date;
+  stage_started_at: Date | null;
+  stage_deadline_at: Date | null;
+  sla_closed_at: Date | null;
+  deadline_agreement_status: DeadlineAgreementStatus;
   team_id: string | null;
   team_name: string | null;
   assignees: Assignee[];
@@ -59,6 +65,10 @@ export function mapListItem(r: OrderRow): OrderListItem {
     status: r.status,
     qcStatus: r.qc_status,
     createdAt: r.created_at.toISOString(),
+    stageStartedAt: r.stage_started_at?.toISOString() ?? null,
+    stageDeadlineAt: r.stage_deadline_at?.toISOString() ?? null,
+    slaClosedAt: r.sla_closed_at?.toISOString() ?? null,
+    deadlineAgreementStatus: r.deadline_agreement_status ?? "agreed",
     teamId: r.team_id ?? null,
     teamName: r.team_name ?? null,
     assignees: Array.isArray(r.assignees) ? r.assignees : [],
@@ -68,7 +78,7 @@ export function mapListItem(r: OrderRow): OrderListItem {
 export function listColumns(db: postgres.Sql) {
   return db`o.id, o.order_number, o.requester_name, o.company, o.department, o.title, o.design_type,
             o.brand_id, b.name as brand_name, o.deadline_at, o.priority, p.name as priority_name,
-            p.tone as priority_tone, o.status, o.qc_status, o.created_at,
+            p.tone as priority_tone, o.status, o.qc_status, o.created_at, o.stage_started_at, o.stage_deadline_at, o.sla_closed_at, o.deadline_agreement_status,
             coalesce(o.team_id, (select dot.team_id from design_order_types dot where dot.id = o.design_order_type_id)) as team_id,
             (select t.name from dtic_teams t where t.id = coalesce(o.team_id, (select dot.team_id from design_order_types dot where dot.id = o.design_order_type_id))) as team_name,
             coalesce((
@@ -803,7 +813,10 @@ export async function changeOrderDeadline(
     }
     const previousDeadline = o.deadline_at.toISOString();
     if (o.deadline_at.getTime() === deadlineAt.getTime()) return { changed: false, previousDeadline, newDeadline: previousDeadline };
+    // Order yang sudah sepakat: trigger database menyamakan agreed_deadline (dan SLA tahapan) dengan nilai baru.
+    // requested_deadline (permintaan awal Pemohon) TIDAK pernah berubah. Riwayat kesepakatan ikut dicatat.
     await tx`update orders set deadline_at = ${deadlineAt} where id = ${orderId}`;
+    await recordAdminDeadlineChange(tx, orderId, o.deadline_at, deadlineAt, reason, actor);
     await tx`insert into auth_audit_log (actor_user_id, action, detail)
       values (${actor.userId}, 'order_deadline_changed', ${tx.json({
         orderId,
@@ -836,7 +849,8 @@ export async function changeOrderStatus(
   isPublicNote = false,
 ): Promise<{ changed: false } | { changed: true; previousStatus: OrderStatus; outboxId: string | null }> {
   return sql().begin(async (tx) => {
-    const [current] = await tx<{ status: OrderStatus }[]>`select status from orders where id = ${id} for update`;
+    const [current] = await tx<{ status: OrderStatus; deadline_agreement_status: string }[]>`
+      select status, deadline_agreement_status from orders where id = ${id} for update`;
     if (!current) throw new NotFoundError("Order tidak ditemukan.");
     if (current.status === to) return { changed: false as const };
     const assignees = (await tx<{ member_id: string }[]>`select member_id from order_assignments where order_id = ${id}`).map((r) => r.member_id);
@@ -846,6 +860,7 @@ export async function changeOrderStatus(
       actor: { role: actor.role, isAssignee: !!actor.memberId && assignees.includes(actor.memberId) },
       note,
       hasAssignee: assignees.length > 0,
+      deadlineAgreed: current.deadline_agreement_status === "agreed",
     });
     if (!check.ok) throw new AppError(check.message, check.status, check.field ? { note: check.message } : undefined);
 
@@ -866,6 +881,89 @@ export async function changeOrderStatus(
       });
     }
     return { changed: true as const, previousStatus: current.status, outboxId };
+  });
+}
+
+/**
+ * Menutup SATU order karena tahapannya melewati SLA (dipanggil worker — src/lib/server/services/sla-worker.ts).
+ * SENGAJA TIDAK mengubah `orders.status` sama sekali — status SLA adalah dimensi TERPISAH dari status
+ * pekerjaan (lihat src/lib/sla.ts): PIC tetap memegang status pekerjaan apa adanya dan tetap bisa
+ * melanjutkannya lewat jalur status biasa, tidak terkunci hanya karena SLA sudah lewat. Baris order dikunci
+ * lalu syarat diperiksa ULANG di dalam transaksi (idempotent: dipanggil berkali-kali untuk order yang sama
+ * aman — sla_closed_at hanya diisi SEKALI, baris berikutnya langsung berhenti) — pemanggil (worker) hanya
+ * perlu query kandidat secara longgar, ketepatan akhir ada di sini.
+ */
+export async function closeOrderBySla(id: string): Promise<{ closed: boolean }> {
+  return sql().begin(async (tx) => {
+    const [current] = await tx<{ status: OrderStatus; stage_deadline_at: Date | null; sla_closed_at: Date | null; deadline_agreement_status: string }[]>`
+      select status, stage_deadline_at, sla_closed_at, deadline_agreement_status from orders where id = ${id} for update`;
+    if (!current) return { closed: false };
+    if (current.sla_closed_at) return { closed: false }; // sudah pernah ditutup karena SLA — idempotent
+    if (current.deadline_agreement_status !== "agreed") return { closed: false }; // belum ada kesepakatan waktu — SLA pengerjaan belum berjalan
+    if (FINISHED_STATUSES.includes(current.status)) return { closed: false }; // sudah selesai/dibatalkan — tidak relevan lagi
+    if (!current.stage_deadline_at || current.stage_deadline_at.getTime() > Date.now()) return { closed: false }; // belum (atau tidak lagi) lewat SLA
+
+    const [row] = await tx<{ sla_closed_at: Date }[]>`update orders set sla_closed_at = now() where id = ${id} returning sla_closed_at`;
+    const summary = `Pengajuan otomatis ditutup oleh sistem karena telah melewati batas SLA. Status pekerjaan sebelumnya adalah ${statusLabel(current.status)}. PIC tetap dapat melanjutkan pekerjaan dan memperbarui status sesuai kondisi sebenarnya.`;
+    const lateMinutes = Math.max(0, Math.round((row.sla_closed_at.getTime() - current.stage_deadline_at.getTime()) / 60_000));
+    await tx`insert into order_workflow_events (order_id, kind, actor_name, summary, detail)
+             values (${id}, 'sla_auto_closed', 'Sistem', ${summary}, ${tx.json({
+               closureType: "AUTO_CLOSED_SLA",
+               statusAtClosure: current.status,
+               slaDeadlineAt: current.stage_deadline_at.toISOString(),
+               slaClosedAt: row.sla_closed_at.toISOString(),
+               lateMinutes,
+             })})`;
+    return { closed: true };
+  });
+}
+
+/**
+ * "Lanjutkan Pekerjaan" — PIC (atau Super Admin) mengakui penutupan SLA dan melanjutkan. TIDAK mengubah
+ * status pekerjaan (tidak pernah terkunci) dan TIDAK menghapus sla_closed_at (riwayat keterlambatan tetap
+ * tersimpan apa adanya) — hanya menambah catatan peristiwa agar jelas KAPAN & SIAPA yang melanjutkannya.
+ */
+export async function resumeSlaOrder(id: string, actor: StatusActor, note: string | null): Promise<{ resumed: boolean }> {
+  return sql().begin(async (tx) => {
+    const [current] = await tx<{ sla_closed_at: Date | null }[]>`select sla_closed_at from orders where id = ${id} for update`;
+    if (!current) throw new NotFoundError("Order tidak ditemukan.");
+    if (!current.sla_closed_at) throw new AppError("Order ini tidak sedang dalam status ditutup otomatis karena SLA.", 409);
+    if (actor.role !== "super_admin") {
+      const assignees = (await tx<{ member_id: string }[]>`select member_id from order_assignments where order_id = ${id}`).map((r) => r.member_id);
+      if (!actor.memberId || !assignees.includes(actor.memberId)) throw new AppError("Hanya PIC order ini atau Super Admin yang dapat melanjutkan.", 403);
+    }
+    await tx`insert into order_workflow_events (order_id, kind, actor_user_id, actor_name, detail)
+             select ${id}, 'sla_resumed', ${actor.userId}, u.full_name, ${tx.json({ note: note?.trim() || null })}
+             from app_users u where u.id = ${actor.userId}`;
+    return { resumed: true };
+  });
+}
+
+/**
+ * Konfirmasi PIC: pekerjaan yang ditutup otomatis karena SLA sebenarnya sudah selesai. sla_closed_at TIDAK
+ * dihapus (penanda historis permanen) — ini hanya mengubah status pekerjaan ke completed lewat jalur status
+ * biasa (trigger order_status_history mencatatnya sendiri, sama seperti transisi status lain).
+ */
+export async function confirmSlaClosedComplete(id: string, actor: StatusActor): Promise<{ confirmed: boolean }> {
+  return sql().begin(async (tx) => {
+    const [current] = await tx<{ status: OrderStatus; sla_closed_at: Date | null }[]>`select status, sla_closed_at from orders where id = ${id} for update`;
+    if (!current) throw new NotFoundError("Order tidak ditemukan.");
+    if (!current.sla_closed_at) throw new AppError("Order ini tidak pernah ditutup otomatis karena SLA.", 409);
+    if (FINISHED_STATUSES.includes(current.status)) throw new AppError("Pekerjaan ini sudah selesai/dibatalkan.", 409);
+    if (actor.role !== "super_admin") {
+      const assignees = (await tx<{ member_id: string }[]>`select member_id from order_assignments where order_id = ${id}`).map((r) => r.member_id);
+      if (!actor.memberId || !assignees.includes(actor.memberId)) throw new AppError("Hanya PIC order ini atau Super Admin yang dapat mengonfirmasi.", 403);
+    }
+
+    await tx`select set_config('dtic.status_note', 'Pekerjaan sebenarnya telah selesai, dikonfirmasi setelah ditutup otomatis karena SLA.', true)`;
+    await tx`select set_config('dtic.status_note_public', 'false', true)`;
+    await tx`select set_config('dtic.actor_id', ${actor.userId}, true)`;
+    await tx`update orders set status = 'completed' where id = ${id}`;
+
+    await tx`insert into order_workflow_events (order_id, kind, actor_user_id, actor_name, detail)
+             select ${id}, 'sla_confirmed_complete', ${actor.userId}, u.full_name, '{}'::jsonb
+             from app_users u where u.id = ${actor.userId}`;
+    return { confirmed: true };
   });
 }
 
@@ -929,9 +1027,10 @@ export async function findOrderForTracking(orderNumber: string) {
   const rows = await db<{
     id: string; order_number: string; created_at: Date; brand_name: string; design_type: string; title: string;
     deadline_at: Date; status: OrderStatus; qc_status: QcStatus; requester_message: string | null; result_url: string | null;
+    requester_name: string;
   }[]>`
     select o.id, o.order_number, o.created_at, b.name as brand_name, o.design_type, o.title, o.deadline_at, o.status,
-           o.qc_status, o.requester_message, o.result_url
+           o.qc_status, o.requester_message, o.result_url, o.requester_name
     from orders o join brands b on b.id = o.brand_id
     where o.order_number = ${orderNumber}`;
   return rows[0] ?? null;

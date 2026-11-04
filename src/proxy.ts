@@ -28,5 +28,7 @@ export function proxy(request: NextRequest) {
 
 export const config = {
   // /api/public dikecualikan: body upload tidak dibuffer oleh proxy (batas proxyClientMaxBodySize).
-  matcher: ["/((?!_next/static|_next/image|favicon.ico|robots.txt|api/public/).*)"],
+  // help-center/ dikecualikan: aset statis publik (avatar tombol Pusat Bantuan) di folder public/, bukan halaman —
+  // tanpa ini permintaan gambar diperlakukan sama seperti halaman terproteksi dan dialihkan ke /dtic/login.
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|robots.txt|api/public/|help-center/).*)"],
 };

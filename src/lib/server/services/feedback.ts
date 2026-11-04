@@ -126,8 +126,8 @@ export async function submitFeedbackTicket(request: Request, form: FormData): Pr
   }
 
   const reporter: FeedbackReporter = session
-    ? { userId: session.userId, name: session.name, contact: session.email }
-    : { userId: null, name: input.reporterName ?? "Pemohon", contact: input.reporterContact };
+    ? { userId: session.userId, name: session.name, contact: session.email, role: session.role }
+    : { userId: null, name: input.reporterName ?? "Pemohon", contact: input.reporterContact, role: null };
   if (!session && !input.reporterName) throw new AppError("Nama pelapor wajib diisi.", 422, { reporterName: "Nama pelapor wajib diisi." });
 
   const prepared = await prepareAttachments(form.getAll("attachments"));

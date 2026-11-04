@@ -1,8 +1,10 @@
-import { AlertTriangle, BellOff, ChevronRight, ListChecks } from "lucide-react";
+import { AlertTriangle, BellOff, CalendarClock, ChevronRight, ListChecks } from "lucide-react";
 import { OrderRowActions } from "@/components/orders/order-row-actions";
 import Link from "next/link";
 import { AssigneeList } from "@/components/assignments/assignee-list";
 import { DeadlineText } from "@/components/orders/deadline-text";
+import { SlaBadge } from "@/components/orders/sla-badge";
+import { DEADLINE_AGREEMENT_META } from "@/lib/deadline-agreement";
 import { Badge, OverdueBadge, PriorityBadge, QcBadge, StatusBadge } from "@/components/ui/badge";
 import { TableScroll } from "@/components/ui/table-scroll";
 import { formatDate, formatDateTime } from "@/lib/dates";
@@ -67,10 +69,16 @@ export function OrderTable({ orders, now, superAdmin = false }: { orders: OrderL
                   <td className="px-4 py-3.5">
                     <div className="flex flex-col items-start gap-1">
                       <StatusBadge status={o.status} />
+                      <SlaBadge stageStartedAt={o.stageStartedAt} stageDeadlineAt={o.stageDeadlineAt} slaClosedAt={o.slaClosedAt} />
+                      {o.deadlineAgreementStatus !== "agreed" && (
+                        <Badge tone={DEADLINE_AGREEMENT_META[o.deadlineAgreementStatus].tone}>
+                          <CalendarClock className="size-3 shrink-0" aria-hidden="true" /> {DEADLINE_AGREEMENT_META[o.deadlineAgreementStatus].label}
+                        </Badge>
+                      )}
                       {o.qcStatus !== "none" && <QcBadge status={o.qcStatus} />}
                       {isAssignmentStale(o.assignedAt, o.status, now) && (
                         <span className="inline-flex items-center gap-1 text-[11px] text-bad" title={`Sudah ditugaskan lebih dari ${ASSIGNMENT_SLA_HOURS} jam, belum mulai dikerjakan.`}>
-                          <AlertTriangle className="size-3" aria-hidden="true" /> Lewat SLA penugasan
+                          <AlertTriangle className="size-3" aria-hidden="true" /> Lama Belum Dikerjakan
                         </span>
                       )}
                       {o.needsPicClosure && (
@@ -130,7 +138,7 @@ export function OrderTable({ orders, now, superAdmin = false }: { orders: OrderL
                   )}
                   {isAssignmentStale(o.assignedAt, o.status, now) && (
                     <span className="mt-1 inline-flex items-center gap-1 text-[11px] text-bad" title={`Sudah ditugaskan lebih dari ${ASSIGNMENT_SLA_HOURS} jam, belum mulai dikerjakan.`}>
-                      <AlertTriangle className="size-3" aria-hidden="true" /> Lewat SLA penugasan
+                      <AlertTriangle className="size-3" aria-hidden="true" /> Lama Belum Dikerjakan
                     </span>
                   )}
                   {o.needsPicClosure && (
@@ -141,6 +149,12 @@ export function OrderTable({ orders, now, superAdmin = false }: { orders: OrderL
                 </div>
                 <div className="flex shrink-0 flex-col items-end gap-1">
                   <StatusBadge status={o.status} />
+                  <SlaBadge stageStartedAt={o.stageStartedAt} stageDeadlineAt={o.stageDeadlineAt} slaClosedAt={o.slaClosedAt} />
+                  {o.deadlineAgreementStatus !== "agreed" && (
+                    <Badge tone={DEADLINE_AGREEMENT_META[o.deadlineAgreementStatus].tone}>
+                      <CalendarClock className="size-3 shrink-0" aria-hidden="true" /> {DEADLINE_AGREEMENT_META[o.deadlineAgreementStatus].label}
+                    </Badge>
+                  )}
                   {o.qcStatus !== "none" && <QcBadge status={o.qcStatus} />}
                 </div>
               </div>

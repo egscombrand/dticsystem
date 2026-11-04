@@ -40,6 +40,16 @@ export const FEEDBACK_STATUS_LABEL: Record<FeedbackStatus, string> = {
   wont_fix: "Tidak Ditindaklanjuti",
 };
 
+/** Dipakai bersama oleh daftar tiket Super Admin dan "Tiket Saya" (Pusat Bantuan & /dtic/bantuan). */
+export const FEEDBACK_STATUS_TONE: Record<FeedbackStatus, "neutral" | "info" | "warning" | "success" | "danger" | "violet"> = {
+  new: "info",
+  reviewed: "violet",
+  in_progress: "warning",
+  need_info: "warning",
+  done: "success",
+  wont_fix: "neutral",
+};
+
 export const FEEDBACK_PRIORITIES = ["low", "normal", "high", "urgent"] as const;
 export type FeedbackPriority = (typeof FEEDBACK_PRIORITIES)[number];
 export const FEEDBACK_PRIORITY_LABEL: Record<FeedbackPriority, string> = {

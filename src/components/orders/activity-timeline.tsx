@@ -1,4 +1,4 @@
-import { ArrowRight, CalendarClock, KeyRound, MessageCircle, CheckCircle2, ClipboardCheck, MessageSquareReply, Send, ShieldCheck, Undo2, Users, type LucideIcon } from "lucide-react";
+import { AlarmClock, ArrowRight, BadgeCheck, CalendarClock, ClipboardList, Highlighter, KeyRound, MessageCircle, MessageCircleQuestion, MessageSquare, CheckCircle2, ClipboardCheck, MessageSquareReply, PackageCheck, PlayCircle, RotateCcw, Send, ShieldCheck, Undo2, Users, type LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { StatusBadge } from "@/components/ui/badge";
 import { cn } from "@/components/ui/cn";
@@ -18,7 +18,22 @@ const EVENT: Record<WorkflowEventKind, { label: string; icon: LucideIcon; tone: 
   feedback_recorded: { label: "Masukan pemohon dicatat", icon: MessageSquareReply, tone: "bg-warn-soft text-warn" },
   completed: { label: "Pekerjaan diselesaikan", icon: CheckCircle2, tone: "bg-ok-soft text-ok" },
   whatsapp_opened: { label: "WhatsApp pemohon dibuka dengan pesan yang disiapkan", icon: MessageCircle, tone: "bg-subtle text-ink-2" },
+  sla_auto_closed: { label: "Ditutup otomatis oleh sistem (melewati SLA)", icon: AlarmClock, tone: "bg-bad-soft text-bad" },
+  sla_resumed: { label: "PIC melanjutkan pekerjaan setelah penutupan SLA", icon: PlayCircle, tone: "bg-warn-soft text-warn" },
+  sla_confirmed_complete: { label: "PIC mengonfirmasi pekerjaan selesai setelah penutupan SLA", icon: CheckCircle2, tone: "bg-ok-soft text-ok" },
+  review_highlight_added: { label: "Highlight baru di Review Center", icon: Highlighter, tone: "bg-warn-soft text-warn" },
+  review_comment_added: { label: "Komentar di Review Center", icon: MessageSquare, tone: "bg-subtle text-ink-2" },
+  review_clarification_requested: { label: "PIC meminta klarifikasi", icon: MessageCircleQuestion, tone: "bg-brand-sky text-brand-blue" },
+  review_clarification_answered: { label: "Pemohon menjawab klarifikasi", icon: MessageSquareReply, tone: "bg-brand-sky text-brand-blue" },
+  revision_created: { label: "Request Revisi diajukan", icon: ClipboardList, tone: "bg-bad-soft text-bad" },
+  revision_started: { label: "Revisi mulai dikerjakan", icon: PlayCircle, tone: "bg-brand-violet-soft text-[#5b21b6]" },
+  revision_delivered: { label: "Hasil revisi diserahkan", icon: PackageCheck, tone: "bg-brand-sky text-brand-blue" },
+  revision_approved: { label: "Hasil revisi disetujui pemohon", icon: BadgeCheck, tone: "bg-ok-soft text-ok" },
+  revision_resubmitted: { label: "Revisi diajukan kembali", icon: RotateCcw, tone: "bg-bad-soft text-bad" },
 };
+
+/** Jenis peristiwa yang belum dikenal UI tidak boleh membuat halaman gagal dimuat — tampil generik. */
+const EVENT_FALLBACK = { label: "Aktivitas tercatat", icon: ArrowRight, tone: "bg-subtle text-ink-2" };
 
 type Item =
   | { key: string; at: string; type: "status"; h: StatusHistoryEntry }
@@ -56,7 +71,7 @@ export function ActivityTimeline({ history, events, audit, fileNames = {} }: { h
           actor = it.h.actor;
           if (it.h.notes) body = <p className="whitespace-pre-wrap">{it.h.notes}</p>;
         } else if (it.type === "event") {
-          const m = EVENT[it.e.kind];
+          const m = EVENT[it.e.kind] ?? EVENT_FALLBACK;
           icon = m.icon;
           tone = m.tone;
           const extras = [
@@ -72,6 +87,9 @@ export function ActivityTimeline({ history, events, audit, fileNames = {} }: { h
             it.e.kind === "completed" && it.e.detail.deliveryRecorded !== true ? "tanpa pengiriman tercatat di aplikasi" : null,
             it.e.kind === "whatsapp_opened" && typeof it.e.detail.templateLabel === "string" ? it.e.detail.templateLabel : null,
             it.e.kind === "whatsapp_opened" ? "belum tentu terkirim" : null,
+            typeof it.e.detail.revisionNumber === "number" ? `REV-${String(it.e.detail.revisionNumber).padStart(3, "0")}` : null,
+            typeof it.e.detail.versionNo === "number" ? `versi ${it.e.detail.versionNo}` : null,
+            typeof it.e.detail.approvedVersionNo === "number" ? `versi ${it.e.detail.approvedVersionNo} disetujui` : null,
           ].filter(Boolean);
           title = <span className="font-medium text-ink">{m.label}{extras.length ? <span className="font-normal text-ink-2"> · {extras.join(" · ")}</span> : null}</span>;
           actor = it.e.actorName;

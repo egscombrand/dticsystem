@@ -24,21 +24,14 @@ import {
   FEEDBACK_KINDS,
   FEEDBACK_PRIORITY_LABEL,
   FEEDBACK_STATUS_LABEL,
+  FEEDBACK_STATUS_TONE,
   FEEDBACK_STATUSES,
 } from "@/lib/validation/feedback";
 
 export const metadata: Metadata = { title: "Bantuan & Masukan" };
 
 const PAGE_SIZE = 20;
-
-const STATUS_TONE: Record<string, "neutral" | "info" | "warning" | "success" | "danger" | "violet"> = {
-  new: "info",
-  reviewed: "violet",
-  in_progress: "warning",
-  need_info: "warning",
-  done: "success",
-  wont_fix: "neutral",
-};
+const STATUS_TONE = FEEDBACK_STATUS_TONE;
 
 export default function FeedbackPage({ searchParams }: PageProps<"/dtic/settings/feedback">) {
   return (

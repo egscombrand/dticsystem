@@ -41,7 +41,21 @@ export type WorkflowEventKind =
   | "delivery_recorded"
   | "feedback_recorded"
   | "completed"
-  | "whatsapp_opened";
+  | "whatsapp_opened"
+  // SLA (lihat migrasi 20261104000000) — sebelumnya tidak ada di tipe ini padahal sudah ada di database.
+  | "sla_auto_closed"
+  | "sla_resumed"
+  | "sla_confirmed_complete"
+  // Review Center (lihat migrasi 20261106000000): highlight, komentar, klarifikasi, dan Request Revisi.
+  | "review_highlight_added"
+  | "review_comment_added"
+  | "review_clarification_requested"
+  | "review_clarification_answered"
+  | "revision_created"
+  | "revision_started"
+  | "revision_delivered"
+  | "revision_approved"
+  | "revision_resubmitted";
 
 export type WorkflowAction = "submit_qc" | "withdraw_qc" | "approve_qc" | "request_revision" | "request_access" | "record_delivery" | "record_feedback" | "complete";
 

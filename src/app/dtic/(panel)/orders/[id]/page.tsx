@@ -1,6 +1,6 @@
 import { canAccessOrder, requireSession } from "@/lib/server/auth";
 import { can } from "@/lib/auth/permissions";
-import { BellOff, CalendarClock, ExternalLink, FileCheck2, KeyRound, FileText, ListChecks, Paperclip, Pencil, Send, ShieldCheck, Undo2, Users } from "lucide-react";
+import { AlarmClock, BellOff, CalendarClock, ExternalLink, FileCheck2, Highlighter, KeyRound, FileText, ListChecks, Paperclip, Pencil, Send, ShieldCheck, Undo2, Users } from "lucide-react";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { connection } from "next/server";
@@ -16,6 +16,7 @@ import { QcFlowActions } from "@/components/orders/qc-flow-actions";
 import { WhatsappMessageButton } from "@/components/orders/whatsapp-message";
 import type { WaContext } from "@/lib/smart-whatsapp";
 import { ResultFiles, type ResultFileView } from "@/components/orders/result-files";
+import { ReviewCenter } from "@/components/review/review-center";
 import { awaitingPicClosure, latestResultIds, latestResultLinkIds, resultFileHistory, resultLinksUsed, RESULT_STAGE_LABEL, type ResultStage } from "@/lib/result-status";
 import { listResultFiles, listResultLinks } from "@/lib/server/repositories/results";
 import { ResultLinks, type ResultLinkView } from "@/components/orders/result-links";
@@ -25,6 +26,11 @@ import { DriveArchiveStatus, type DriveArchiveLogView } from "@/components/order
 import { WorkStepper } from "@/components/orders/work-stepper";
 import { deriveWorkStage } from "@/lib/work-stage";
 import { resultMaxFileBytes } from "@/lib/server/config";
+import { SlaBadge } from "@/components/orders/sla-badge";
+import { SlaConfirmButton } from "@/components/orders/sla-confirm-button";
+import { DeadlineAgreementPanel } from "@/components/orders/deadline-agreement-panel";
+import { getDeadlineAgreement } from "@/lib/server/repositories/deadline-agreement";
+import { SlaResumeButton } from "@/components/orders/sla-resume-button";
 import { StatusChanger } from "@/components/orders/status-changer";
 import { RichTextView } from "@/components/rich-text/rich-text-view";
 import { Badge, OverdueBadge, PriorityBadge, StatusBadge } from "@/components/ui/badge";
@@ -122,7 +128,7 @@ async function OrderDetailContent({ params }: { params: PageProps<"/dtic/orders/
   // (dilewati diam-diam bila < 2 menit lalu), jadi membuka halaman berulang tidak memicu panggilan Drive
   // berulang. Dijalankan SEBELUM listResultFiles di bawah agar file yang baru ditemukan langsung tampil.
   await syncOrderDriveMetadata(id, { triggeredBy: "page_view" });
-  const [members, workloads, qcStatus, events, audit, managerNames, results, contacted, resultLinks, driveSyncState, driveLog] = await Promise.all([
+  const [members, workloads, qcStatus, events, audit, managerNames, results, contacted, resultLinks, driveSyncState, driveLog, agreement] = await Promise.all([
     listTeamMemberOptions(order.teamId),
     canAssign && order.teamId ? getMemberWorkloads(order.teamId) : Promise.resolve([]),
     getQcStatus(order.id),
@@ -135,14 +141,18 @@ async function OrderDetailContent({ params }: { params: PageProps<"/dtic/orders/
     listResultLinks(id),
     canDiagnoseDrive ? getOrderDriveSyncState(id) : Promise.resolve(null),
     canDiagnoseDrive ? listDriveReconcileLog(id) : Promise.resolve([]),
+    getDeadlineAgreement(id),
   ]);
-  if (!qcStatus) notFound();
+  if (!qcStatus || !agreement) notFound();
 
   const now = new Date();
   const late = isOverdue(order.deadlineAt, order.status, now);
   const finished = isFinishedStatus(order.status);
   const isAssignee = !!session.memberId && order.assignees.some((a) => a.id === session.memberId);
-  const statusActions = allowedTransitions(order.status, { role: session.role, isAssignee });
+  // Tombol "Mulai kerjakan" tidak ditawarkan ke PIC sebelum waktu disepakati (server tetap menolaknya, lihat checkTransition).
+  const statusActions = allowedTransitions(order.status, { role: session.role, isAssignee }).filter(
+    (t) => !(t.from === "assigned" && t.to === "in_progress" && agreement.status !== "agreed" && session.role !== "super_admin"),
+  );
   const requesterDecision = deriveRequesterDecision(events.map((e) => ({ kind: e.kind, at: e.at, needsRevision: e.needsRevision })));
   const ctx = { status: order.status, qcStatus, requesterDecision };
   const actions = availableWorkflowActions(ctx, { role: session.role, isAssignee });
@@ -305,7 +315,33 @@ async function OrderDetailContent({ params }: { params: PageProps<"/dtic/orders/
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_22rem] xl:grid-rows-[auto_1fr]">
         <aside className="flex min-w-0 flex-col gap-6 xl:col-start-2 xl:row-start-1">
           <SideCard title="Langkah berikutnya" testId="next-step" className="border-accent/30">
-            <p className="text-[15px] leading-relaxed text-ink" data-testid="next-step-text">{nextStepText(order.status, requesterDecision)}</p>
+            <p className="text-[15px] leading-relaxed text-ink" data-testid="next-step-text">
+              {order.status === "assigned" && agreement.status !== "agreed"
+                ? "Pelajari brief dan bahan referensi, lalu sepakati waktu pengerjaan dengan Pemohon (panel Waktu pengerjaan) sebelum mulai mengerjakan."
+                : nextStepText(order.status, requesterDecision)}
+            </p>
+            {(order.stageDeadlineAt || order.slaClosedAt) && (
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <SlaBadge stageStartedAt={order.stageStartedAt} stageDeadlineAt={order.stageDeadlineAt} slaClosedAt={order.slaClosedAt} />
+                {!order.slaClosedAt && order.stageDeadlineAt && (
+                  <span className="text-[13px] text-ink-3" data-testid="sla-deadline-text">
+                    Batas SLA tahapan ini: {formatDeadline(order.stageDeadlineAt)} ({describeDeadline(order.stageDeadlineAt)})
+                  </span>
+                )}
+              </div>
+            )}
+            {order.slaClosedAt && (
+              <div className="mt-3 flex items-center gap-2 rounded-xl bg-bad-soft px-3 py-2 text-sm text-bad" data-testid="sla-closed-notice" role="status">
+                <AlarmClock className="size-4 shrink-0" aria-hidden="true" />
+                <span>Case ditutup otomatis oleh sistem karena telah melewati batas SLA ({formatDateTime(order.slaClosedAt)}). Status pekerjaan ({STATUS_META[order.status].label}) tidak berubah — PIC dapat melakukan konfirmasi apabila pekerjaan sebenarnya telah diselesaikan tetapi status belum diperbarui.</span>
+              </div>
+            )}
+            {order.slaClosedAt && !finished && (isAssignee || session.role === "super_admin") && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                <SlaResumeButton orderId={order.id} />
+                <SlaConfirmButton orderId={order.id} />
+              </div>
+            )}
             {completion && (
               <div className="mt-3 rounded-xl bg-ok-soft p-3 text-sm text-ink">
                 <p>Diselesaikan {formatDateTime(completion.at)}{completion.actorName ? ` oleh ${completion.actorName}` : ""}.</p>
@@ -344,6 +380,20 @@ async function OrderDetailContent({ params }: { params: PageProps<"/dtic/orders/
                 )}
               </div>
             )}
+          </SideCard>
+
+          <SideCard title="Waktu pengerjaan" testId="deadline-agreement-card">
+            <DeadlineAgreementPanel
+              orderId={order.id}
+              status={agreement.status}
+              requestedDeadline={agreement.requestedDeadline}
+              picEstimatedDeadline={agreement.picEstimatedDeadline}
+              agreedDeadline={agreement.agreedDeadline}
+              events={agreement.events}
+              canActAsPic={isAssignee || session.role === "super_admin"}
+              canResolve={session.role === "manager" || session.role === "super_admin"}
+              finished={finished}
+            />
           </SideCard>
 
           <SideCard title="Ringkasan kerja" testId="work-summary">
@@ -459,6 +509,13 @@ async function OrderDetailContent({ params }: { params: PageProps<"/dtic/orders/
                 <DriveArchiveStatus orderId={order.id} state={driveArchiveView} />
               </div>
             )}
+          </Section>
+
+          <Section title="Review Center" icon={<Highlighter className="size-5 text-accent" aria-hidden="true" />} id="review" testId="review-center-section">
+            <p className="-mt-2 mb-4 text-sm text-ink-2">
+              Hasil yang sudah diserahkan kepada pemohon, beserta highlight, percakapan, Request Revisi (REV), dan versi. Ini bukan tahap QC: pemeriksaan QC tetap lewat panel di bawah.
+            </p>
+            <ReviewCenter mode="internal" orderRef={order.id} />
           </Section>
 
           <Section title="Penyerahan hasil & QC" icon={<Send className="size-5 text-accent" aria-hidden="true" />} id="penyerahan" testId="qc-panel">

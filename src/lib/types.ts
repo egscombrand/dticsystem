@@ -44,6 +44,16 @@ export type OrderListItem = {
   priorityTone: string;
   status: OrderStatus;
   createdAt: string;
+  /** Kapan status SAAT INI mulai berlaku (dihitung ulang setiap perubahan status, lihat migrasi SLA). */
+  stageStartedAt: string | null;
+  /** Deadline SLA tahapan SAAT INI; null bila tidak ada aturan SLA yang cocok untuk tahapan ini. */
+  stageDeadlineAt: string | null;
+  /** Penanda permanen: order PERNAH ditutup otomatis karena SLA. TIDAK PERNAH dihapus (termasuk setelah
+   *  "Lanjutkan Pekerjaan"/konfirmasi selesai) — riwayat keterlambatan tetap terlihat. TERPISAH dari status
+   *  pekerjaan (status), lihat src/lib/sla.ts. */
+  slaClosedAt: string | null;
+  /** Kesepakatan waktu pengerjaan (src/lib/deadline-agreement.ts) — TERPISAH dari status pekerjaan. */
+  deadlineAgreementStatus: import("@/lib/deadline-agreement").DeadlineAgreementStatus;
   /** Kategori pekerjaan (tim); null untuk order lama tanpa tim. */
   teamId: string | null;
   teamName: string | null;

@@ -3,6 +3,8 @@ import { AppError } from "@/lib/server/errors";
 import { clientIp, rateLimit } from "@/lib/server/rate-limit";
 import { findOrderForTracking, getPublicDeliveries, getPublicHistory, getPublicQcEvents, isPublicDeliveryEvent, listPicNames, type PublicDelivery } from "@/lib/server/repositories/orders";
 import { applyWorkflowAction } from "@/lib/server/repositories/qc";
+import { getDeadlineAgreement, requesterRespond, type DeadlineAgreementView } from "@/lib/server/repositories/deadline-agreement";
+import { pendingChange } from "@/lib/deadline-agreement";
 import { awaitingPicClosure, hasSubmittedToRequester } from "@/lib/result-status";
 import { isFinishedStatus, toCurrentStatus, type OrderStatus } from "@/lib/status";
 
@@ -41,6 +43,13 @@ export type TrackingView = {
   /** Hasil yang BENAR-BENAR sudah diajukan ke pemohon (delivery_recorded) — urut waktu, satu entri per
    *  pengajuan/versi. Draf internal PIC yang belum diajukan TIDAK PERNAH muncul di sini. */
   deliveries: PublicDelivery[];
+  /** Kesepakatan waktu pengerjaan. Nama pelaku di riwayat hanya nama (PIC/Manager/Pemohon), tanpa kontak. */
+  deadlineAgreement: DeadlineAgreementView & {
+    /** Ada usulan (awal atau perubahan) yang menunggu jawaban Pemohon. */
+    awaitingRequester: boolean;
+    /** Usulan yang sedang menunggu jawaban (deadline, alasan, pengusul). */
+    pending: { deadline: string; reason: string | null; proposedBy: string | null; isChange: boolean } | null;
+  };
 };
 
 /**
@@ -57,11 +66,12 @@ export async function trackOrder(request: Request, rawOrderNumber: string): Prom
   const order = await findOrderForTracking(orderNumber);
   if (!order) throw new AppError("Nomor order tidak ditemukan. Periksa kembali nomor yang Anda terima saat pengajuan.", 404);
 
-  const [rawHistory, picNames, qcEvents, deliveries] = await Promise.all([
+  const [rawHistory, picNames, qcEvents, deliveries, agreement] = await Promise.all([
     getPublicHistory(order.id),
     listPicNames(order.id),
     getPublicQcEvents(order.id),
     getPublicDeliveries(order.id),
+    getDeadlineAgreement(order.id),
   ]);
   const history = rawHistory.flatMap((h) => {
     const status = toCurrentStatus(h.status);
@@ -86,7 +96,44 @@ export async function trackOrder(request: Request, rawOrderNumber: string): Prom
     // itu TIDAK membuktikan pemohon sudah menerima apa pun untuk diperiksa.
     awaitingSubmissionToRequester: !closed && order.status === "awaiting_requester" && order.qc_status === "approved" && !submitted,
     deliveries,
+    deadlineAgreement: publicAgreement(agreement!, closed),
   };
+}
+
+function publicAgreement(a: DeadlineAgreementView, closed: boolean): TrackingView["deadlineAgreement"] {
+  const change = a.status === "agreed" ? pendingChange(a.events) : null;
+  const initial = a.status === "awaiting_requester" && a.picEstimatedDeadline
+    ? [...a.events].reverse().find((e) => e.kind === "pic_proposed") ?? null
+    : null;
+  const pending = closed
+    ? null
+    : change
+      ? { deadline: change.proposedDeadline!, reason: change.reason, proposedBy: change.actorName, isChange: true }
+      : initial
+        ? { deadline: a.picEstimatedDeadline!, reason: initial.reason, proposedBy: initial.actorName, isChange: false }
+        : null;
+  return { ...a, awaitingRequester: pending !== null, pending };
+}
+
+const DEADLINE_DECIDE_IP_LIMIT = 20;
+
+/**
+ * Pemohon menyetujui atau meminta penyesuaian waktu pengerjaan dari Riwayat Request publik — model kepercayaan
+ * SAMA dengan Setujui Hasil/Minta Revisi di atas (nomor order sebagai identifier, dibatasi per IP). Yang
+ * dijawab (usulan awal atau usulan perubahan) ditentukan server dari data, bukan dari klien.
+ */
+export async function submitDeadlineDecision(
+  request: Request,
+  input: { orderNumber: string; decision: "approve" | "adjust"; reason?: string },
+): Promise<TrackingView> {
+  const orderNumber = normalizeOrderNumber(input.orderNumber);
+  if (!ORDER_NUMBER_RE.test(orderNumber)) throw new AppError("Format nomor order tidak valid, contoh: DTIC-2026-00012.", 422);
+  const ip = rateLimit(`track-deadline-ip:${clientIp(request)}`, DEADLINE_DECIDE_IP_LIMIT, WINDOW_MS);
+  if (!ip.ok) throw new AppError(`Terlalu banyak percobaan. Coba lagi dalam ${Math.ceil(ip.retryAfterSeconds / 60)} menit.`, 429);
+  const order = await findOrderForTracking(orderNumber);
+  if (!order) throw new AppError("Nomor order tidak ditemukan. Periksa kembali nomor yang Anda terima saat pengajuan.", 404);
+  await requesterRespond(order.id, input.decision, input.reason ?? null, order.requester_name);
+  return trackOrder(request, orderNumber);
 }
 
 /** Mutasi lebih ketat daripada pencarian read-only (track-ip) — keputusan pemohon berdampak nyata ke status pekerjaan. */

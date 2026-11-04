@@ -1,18 +1,20 @@
 "use client";
 
-import { BookOpen, ClipboardPlus, History, MessageCircleQuestion, type LucideIcon } from "lucide-react";
+import { BookOpen, ClipboardPlus, History, type LucideIcon } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/components/ui/cn";
 import { ConnectBrand } from "@/components/layout/connect-brand";
+import { FloatingHelpCenter } from "@/components/help-center/floating-help-center";
 import { TutorialProvider } from "@/components/tutorial/tutorial-context";
 import { ProductTour } from "@/components/tutorial/product-tour";
 import { OnboardingPrompt } from "@/components/tutorial/onboarding-prompt";
 
+// Menu "Bantuan & Masukan" sebelumnya di sini DIUBAH menjadi tombol Pusat Bantuan mengambang
+// (lihat FloatingHelpCenter) — bukan dihapus, hanya dipindah titik masuknya sesuai spesifikasi.
 const NAV_ITEMS: { href: string; tour?: string; icon: LucideIcon; short: string; full: string; match: (pathname: string) => boolean }[] = [
   { href: "/", tour: "nav-ajukan", icon: ClipboardPlus, short: "Ajukan", full: "Ajukan Request", match: (p) => p === "/" },
   { href: "/riwayat", tour: "nav-riwayat", icon: History, short: "Riwayat", full: "Riwayat Request", match: (p) => p === "/riwayat" || p.startsWith("/riwayat/") },
-  { href: "/bantuan", tour: "nav-bantuan", icon: MessageCircleQuestion, short: "Bantuan", full: "Bantuan & Masukan", match: (p) => p === "/bantuan" || p.startsWith("/bantuan/") },
   { href: "/panduan", icon: BookOpen, short: "Panduan", full: "Panduan Penggunaan", match: (p) => p === "/panduan" || p.startsWith("/panduan/") },
 ];
 
@@ -53,6 +55,7 @@ export default function PublicLayout({ children }: { children: React.ReactNode }
       </div>
       <ProductTour />
       <OnboardingPrompt />
+      <FloatingHelpCenter />
     </TutorialProvider>
   );
 }

@@ -16,6 +16,13 @@
  *   - Super Admin: semua transisi di atas + batalkan dan "submitted → assigned" (data lama setelah PIC ditetapkan).
  *   - Manager: tidak mengubah status lewat tabel ini; keputusan QC & kebijakan lewat alur QC.
  * completed & cancelled adalah status akhir; membuka kembali belum didukung.
+ *
+ * closed_sla (Ditutup Otomatis karena SLA) SENGAJA TIDAK ada di tabel transisi ini: status ini hanya dicapai
+ * lewat worker SLA (src/lib/server/services/sla-worker.ts → closeOrderBySla di repositories/orders.ts),
+ * bukan permintaan pengguna lewat endpoint status — tidak ada Role manusia yang "melakukan"-nya, jadi
+ * memaksakannya ke sistem Actor/Role berbasis peran di bawah ini hanya menambah kasus semu. Jalan keluarnya:
+ * PIC (atau Super Admin) mengonfirmasi lewat endpoint terpisah (confirmSlaClosedComplete), yang memindahkan
+ * closed_sla → completed sambil tetap menyimpan riwayat closed_sla apa adanya.
  */
 import type { Role } from "@/lib/auth/permissions";
 import type { OrderStatus } from "@/lib/status";
@@ -75,7 +82,15 @@ export type TransitionCheck =
   | { ok: false; status: 403 | 409 | 422; message: string; field?: "note" };
 
 /** Validasi lengkap satu permintaan perubahan status. */
-export function checkTransition(input: { from: OrderStatus; to: OrderStatus; actor: Actor; note: string | null; hasAssignee: boolean }): TransitionCheck {
+export function checkTransition(input: {
+  from: OrderStatus;
+  to: OrderStatus;
+  actor: Actor;
+  note: string | null;
+  hasAssignee: boolean;
+  /** false = waktu pengerjaan belum disepakati (src/lib/deadline-agreement.ts); undefined = tidak diperiksa. */
+  deadlineAgreed?: boolean;
+}): TransitionCheck {
   const t = findTransition(input.from, input.to);
   if (!t && (QC_ONLY_TARGETS.includes(input.to) || input.from === "pending_confirmation" || input.to === "completed")) {
     return { ok: false, status: 409, message: "Perubahan ini dilakukan lewat alur QC & komunikasi (Ajukan QC, Setujui QC, Kirim ke Pemohon, Selesaikan Pekerjaan), bukan lewat tombol status." };
@@ -90,5 +105,10 @@ export function checkTransition(input: { from: OrderStatus; to: OrderStatus; act
   }
   if (t.note.required && !input.note?.trim()) return { ok: false, status: 422, message: `${t.note.label} wajib diisi.`, field: "note" };
   if (t.requiresAssignee && !input.hasAssignee) return { ok: false, status: 422, message: "Tetapkan PIC terlebih dahulu." };
+  // PIC belum boleh mulai mengerjakan sebelum waktu pengerjaan disepakati dengan Pemohon. Super Admin tetap
+  // dapat melakukannya sebagai tindakan administratif (konsisten dengan kewenangan Super Admin di tabel ini).
+  if (input.from === "assigned" && input.to === "in_progress" && input.deadlineAgreed === false && input.actor.role !== "super_admin") {
+    return { ok: false, status: 409, message: "Waktu pengerjaan belum disepakati dengan Pemohon. Berikan estimasi waktu terlebih dahulu dan tunggu persetujuan Pemohon." };
+  }
   return { ok: true, transition: t };
 }

@@ -8,6 +8,7 @@ import { enqueueOrderNotification } from "@/lib/server/repositories/notification
 import type { OrderStatus } from "@/lib/status";
 import { eventTypeForStatus } from "@/lib/telegram-routing";
 import { assertResultFiles, assertResultLinks, moveResultFilesToCategory } from "@/lib/server/repositories/results";
+import { approvedVersionInfo, assertNoOpenRevisions, reviewOnDelivery, reviewOnRevisionDecision } from "@/lib/server/repositories/review";
 import type { ResultCategory } from "@/lib/drive";
 import type { WorkflowActionInput } from "@/lib/validation/workflow";
 
@@ -101,6 +102,17 @@ export function deliveryStatusOf(events: WorkflowEvent[]): DeliveryStatus {
 
 export type WorkflowResult = { changed: boolean; duplicate: boolean; status: OrderStatus; outboxId: string | null; notification?: "enqueue_failed" };
 
+/**
+ * Kait OPSIONAL dalam transaksi yang SAMA dengan aksi (order sudah terkunci, aturan sudah lolos). Dipakai Review
+ * Center untuk membuat Request Revisi bersamaan dengan "Minta Revisi" pemohon tanpa keadaan setengah jadi:
+ *  - before : boleh menolak (throw) dan/atau memberi catatan & detail tambahan untuk peristiwa yang akan dicatat.
+ *  - after  : dipanggil setelah peristiwa & perubahan status tersimpan (eventId = peristiwa yang baru dicatat).
+ */
+export type WorkflowHooks = {
+  before?: (tx: postgres.TransactionSql, ctx: { status: OrderStatus; qcStatus: QcStatus }) => Promise<{ note?: string; detail?: Record<string, unknown> } | void>;
+  after?: (tx: postgres.TransactionSql, ctx: { eventId: string; status: OrderStatus }) => Promise<void>;
+};
+
 const SENT_AT_FUTURE_MS = 5 * 60_000;
 
 /**
@@ -108,7 +120,7 @@ const SENT_AT_FUTURE_MS = 5 * 60_000;
  * status sudah berubah (tidak ada persetujuan/penyelesaian ganda). Permintaan ulang dengan requestKey yang sama
  * (klik ganda, retry setelah timeout) mengembalikan hasil tanpa membuat peristiwa atau notifikasi baru.
  */
-export async function applyWorkflowAction(orderId: string, input: WorkflowActionInput, actor: QcActorInfo): Promise<WorkflowResult> {
+export async function applyWorkflowAction(orderId: string, input: WorkflowActionInput, actor: QcActorInfo, hooks?: WorkflowHooks): Promise<WorkflowResult> {
   // Dipindahkan ke kategori folder Drive yang sesuai SETELAH transaksi berhasil (tidak menahan transaksi
   // database untuk memanggil Drive — pola yang sama dengan sinkronisasi unggah hasil). Kegagalan Drive di
   // sini tidak pernah membatalkan aksi QC yang sudah sah tersimpan (lihat moveResultFilesToCategory).
@@ -134,9 +146,14 @@ export async function applyWorkflowAction(orderId: string, input: WorkflowAction
       where order_id = ${orderId} and kind in ('delivery_recorded', 'feedback_recorded')`;
     const requesterDecision = deriveRequesterDecision(decisionEvents.map((e) => ({ kind: e.kind, at: e.created_at.toISOString(), needsRevision: e.needs_revision })));
     const ctx: QcContext = { status: o.status, qcStatus: o.qc_status, requesterDecision };
-    const note = input.note ?? null;
+    let note = input.note ?? null;
     const check = checkWorkflowAction({ action: input.action, ctx, actor: { role: actor.role, isAssignee, isPublicRequester: actor.isPublicRequester }, note, confirmSent: input.action === "record_delivery" ? input.confirmSent : undefined });
     if (!check.ok) throw new AppError(check.message, check.status, check.field ? { [check.field]: check.message } : undefined);
+    // Review Center: persetujuan AKHIR hasil (pemohon tidak minta revisi) ditolak selama masih ada Request Revisi
+    // yang belum selesai — berlaku untuk SEMUA jalur (Riwayat Request publik, "Catat Masukan Pemohon" internal).
+    if (input.action === "record_feedback" && !input.needsRevision) await assertNoOpenRevisions(tx, orderId);
+    const extra = await hooks?.before?.(tx, { status: o.status, qcStatus: o.qc_status });
+    if (extra?.note) note = extra.note;
     if (input.action === "record_delivery" && input.sentAt && new Date(input.sentAt).getTime() > Date.now() + SENT_AT_FUTURE_MS) {
       throw new AppError("Waktu pengiriman tidak boleh di masa depan.", 422, { sentAt: "Waktu pengiriman tidak boleh di masa depan." });
     }
@@ -228,6 +245,11 @@ export async function applyWorkflowAction(orderId: string, input: WorkflowAction
         // sendiri lewat aksi "complete" terpisah. Status TETAP apa adanya di sini — hanya "sudah
         // disetujui pemohon" yang dicatat (dibaca dari peristiwa ini, bukan dari status).
         kind = "feedback_recorded"; ev = { needsRevision: input.needsRevision };
+        // Persetujuan akhir mencatat VERSI dokumen yang disetujui (Review Center) — hanya info tambahan di detail.
+        if (!input.needsRevision) {
+          const v = await approvedVersionInfo(tx, orderId);
+          if (v) ev.detail = { approvedDeliveryId: v.deliveryId, approvedVersionNo: v.versionNo };
+        }
         if (input.needsRevision) { to = "internal_revision"; qc = "revision"; }
         break;
       case "complete":
@@ -248,10 +270,15 @@ export async function applyWorkflowAction(orderId: string, input: WorkflowAction
       await tx`select set_config('dtic.actor_id', ${actor.userId}, true)`;
       await tx`update orders set status = ${to} where id = ${orderId}`;
     }
-    await tx`
+    const [inserted] = await tx<{ id: string }[]>`
       insert into order_workflow_events (order_id, kind, actor_user_id, actor_name, stage, link, summary, needs_revision, detail, request_key)
       values (${orderId}, ${kind}, ${actor.userId}, ${actor.name}, ${ev.stage ?? null}, ${ev.link ?? null}, ${note},
-              ${ev.needsRevision ?? null}, ${tx.json((ev.detail ?? {}) as postgres.JSONValue)}, ${input.requestKey ?? null})`;
+              ${ev.needsRevision ?? null}, ${tx.json({ ...(ev.detail ?? {}), ...(extra?.detail ?? {}) } as postgres.JSONValue)}, ${input.requestKey ?? null})
+      returning id`;
+    // Review Center: sinkronkan Request Revisi dengan peristiwa ini (transaksi & kunci order yang sama).
+    if (input.action === "record_delivery") await reviewOnDelivery(tx, orderId, inserted.id);
+    if (input.action === "record_feedback" && input.needsRevision) await reviewOnRevisionDecision(tx, orderId, actor.name);
+    await hooks?.after?.(tx, { eventId: inserted.id, status: to });
 
     let outboxId: string | null = null;
     let notification: "enqueue_failed" | undefined;

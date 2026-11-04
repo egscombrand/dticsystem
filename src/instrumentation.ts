@@ -8,6 +8,8 @@ export async function register() {
     startTelegramWorker();
     const { startDriveReconcileWorker } = await import("@/lib/server/services/drive-reconcile-worker");
     startDriveReconcileWorker();
+    const { startSlaWorker } = await import("@/lib/server/services/sla-worker");
+    startSlaWorker();
   }
 }
 

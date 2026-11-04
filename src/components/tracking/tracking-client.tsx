@@ -2,6 +2,7 @@
 
 import { AlertCircle, CheckCircle2, Clock3, Download, Eye, Search, Undo2 } from "lucide-react";
 import { useEffect, useState } from "react";
+import { ReviewCenter } from "@/components/review/review-center";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
@@ -12,6 +13,7 @@ import { formatDateTime, formatLongDate } from "@/lib/dates";
 import { PREVIEWABLE_MIME } from "@/lib/files";
 import type { OrderStatus } from "@/lib/status";
 import { clientStatusLabel, trackingStages } from "@/lib/tracking-labels";
+import { DEADLINE_AGREEMENT_META } from "@/lib/deadline-agreement";
 import type { TrackingView } from "@/lib/server/services/tracking";
 import type { PublicDelivery } from "@/lib/server/repositories/orders";
 
@@ -86,6 +88,91 @@ const DECISION_BADGE: Record<PublicDelivery["decision"], { label: string; classN
  * menunggu (decision "awaiting") — pengajuan lama tetap tampil sebagai riwayat, tidak pernah bisa
  * diputuskan ulang, sama seperti aturan backend (deriveRequesterDecision di qc.ts).
  */
+/**
+ * Kesepakatan waktu pengerjaan — Pemohon melihat waktu yang diminta, estimasi PIC, dan deadline final,
+ * lalu menyetujui atau meminta penyesuaian (alasan wajib). Tidak ada percakapan; hanya alasan singkat.
+ */
+function DeadlineAgreementSection({ view, onDecided }: { view: TrackingView; onDecided: (next: TrackingView) => void }) {
+  const a = view.deadlineAgreement;
+  const [mode, setMode] = useState<"approve" | "adjust" | null>(null);
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const meta = DEADLINE_AGREEMENT_META[a.status];
+
+  async function confirm() {
+    if (!mode) return;
+    if (mode === "adjust" && !reason.trim()) {
+      setErr("Alasan penyesuaian wajib diisi.");
+      return;
+    }
+    setBusy(true);
+    setErr(null);
+    try {
+      const next = await internalRequest<TrackingView>("/api/public/tracking/deadline", "POST", {
+        orderNumber: view.orderNumber,
+        decision: mode,
+        reason: reason.trim() || undefined,
+      });
+      setMode(null);
+      setReason("");
+      onDecided(next);
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : "Jawaban belum tersimpan. Coba lagi.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="rounded-2xl border border-line bg-surface p-5 shadow-card sm:p-6" aria-labelledby="agreement-title" data-testid="public-deadline-agreement">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 id="agreement-title" className="text-[15px] font-semibold text-navy">Waktu Pengerjaan</h2>
+        <span className="rounded-full bg-teal/10 px-3 py-1 text-xs font-semibold text-teal" data-testid="public-deadline-status">{meta.label}</span>
+      </div>
+      <dl className="mt-3 grid gap-x-6 gap-y-2 text-[13px] sm:grid-cols-3">
+        <div><dt className="text-ink-3">Waktu yang Anda minta</dt><dd className="font-medium text-ink">{formatDateTime(a.requestedDeadline)}</dd></div>
+        <div><dt className="text-ink-3">Estimasi PIC</dt><dd className="font-medium text-ink">{a.picEstimatedDeadline ? formatDateTime(a.picEstimatedDeadline) : "Belum ada"}</dd></div>
+        <div><dt className="text-ink-3">Deadline final disepakati</dt><dd className="font-medium text-ink">{a.agreedDeadline ? formatDateTime(a.agreedDeadline) : "Belum disepakati"}</dd></div>
+      </dl>
+      {a.pending && (
+        <div className="mt-4 rounded-xl bg-warn-soft p-4 text-sm text-ink" data-testid="public-deadline-pending">
+          <p className="font-medium">
+            {a.pending.isChange ? "PIC mengusulkan perubahan deadline" : "PIC mengusulkan waktu pengerjaan"}: {formatDateTime(a.pending.deadline)}
+            {a.pending.proposedBy ? ` (${a.pending.proposedBy})` : ""}
+          </p>
+          {a.pending.reason && <p className="mt-1 whitespace-pre-wrap text-ink-2">Alasan: {a.pending.reason}</p>}
+          {a.pending.isChange && a.agreedDeadline && <p className="mt-1 text-ink-2">Deadline sepakat saat ini ({formatDateTime(a.agreedDeadline)}) tetap berlaku sampai Anda menyetujui.</p>}
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button size="sm" onClick={() => { setMode("approve"); setErr(null); }} icon={<CheckCircle2 className="size-4" aria-hidden="true" />}>Setujui Waktu</Button>
+            <Button size="sm" variant="secondary" onClick={() => { setMode("adjust"); setErr(null); }} icon={<Undo2 className="size-4" aria-hidden="true" />}>Minta Penyesuaian</Button>
+          </div>
+        </div>
+      )}
+      {!a.pending && a.status !== "agreed" && !view.isClosed && (
+        <p className="mt-3 text-[13px] text-ink-3">{meta.description}</p>
+      )}
+      <Modal
+        open={mode !== null}
+        onClose={() => !busy && setMode(null)}
+        title={mode === "approve" ? "Setujui waktu pengerjaan?" : "Minta penyesuaian waktu"}
+        description={mode === "approve" ? "Deadline yang diusulkan PIC akan menjadi deadline final pekerjaan ini." : "Jelaskan singkat waktu yang Anda butuhkan. PIC akan meninjau dan memberikan usulan baru."}
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setMode(null)} disabled={busy}>Batal</Button>
+            <Button onClick={confirm} loading={busy}>{mode === "approve" ? "Ya, Setujui Waktu" : "Kirim Permintaan"}</Button>
+          </>
+        }
+      >
+        <Field label={mode === "adjust" ? "Alasan penyesuaian" : "Catatan (opsional)"} htmlFor="agreement-reason" required={mode === "adjust"}>
+          <Textarea id="agreement-reason" value={reason} onChange={(e) => setReason(e.target.value)} maxLength={1000} disabled={busy} />
+        </Field>
+        {err && <p role="alert" className="mt-2 text-[12.5px] text-bad">{err}</p>}
+      </Modal>
+    </section>
+  );
+}
+
 function DeliveriesSection({ view, onDecided }: { view: TrackingView; onDecided: (next: TrackingView) => void }) {
   const [preview, setPreview] = useState<PreviewFile | null>(null);
   const [decisionDialog, setDecisionDialog] = useState<{ delivery: PublicDelivery; mode: "approve" | "revision" } | null>(null);
@@ -362,7 +449,19 @@ export function TrackingClient({ initialOrderNumber }: { initialOrderNumber?: st
           <Alert kind="info">Anda sudah menyetujui hasil ini — tim DTIC sedang menyelesaikan proses penutupan pekerjaan.</Alert>
         )}
 
+        <DeadlineAgreementSection view={view} onDecided={setView} />
+
         <DeliveriesSection view={view} onDecided={setView} />
+
+        {view.deliveries.length > 0 && (
+          <section data-testid="review-section" data-tour="riwayat-review" className="rounded-2xl border border-line bg-surface p-5 shadow-card sm:p-7" aria-labelledby="review-title">
+            <h2 id="review-title" className="text-[15px] font-semibold text-navy">Review Center</h2>
+            <p className="mt-1 mb-4 text-[13px] text-ink-2">
+              Buka hasil di sini, beri highlight dan komentar pada bagian yang perlu diperbaiki, lalu ajukan sebagai Request Revisi. Anda juga dapat berdiskusi dengan PIC pada setiap highlight.
+            </p>
+            <ReviewCenter key={view.deliveries.some((d) => d.decision === "approved") ? "approved" : "open"} mode="requester" orderRef={view.orderNumber} onOrderChanged={() => void lookup(view.orderNumber)} />
+          </section>
+        )}
 
         {view.requesterMessage && (
           <section className="rounded-2xl border border-teal/25 bg-teal/5 p-5 sm:p-6" aria-labelledby="msg-title">

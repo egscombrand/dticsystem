@@ -3,9 +3,10 @@ import type postgres from "postgres";
 import { sql } from "@/lib/server/db";
 import { AppError, NotFoundError } from "@/lib/server/errors";
 import { enqueueFeedbackNotification } from "@/lib/server/repositories/feedback-telegram";
+import type { Role } from "@/lib/auth/permissions";
 import type { FeedbackImpact, FeedbackKind, FeedbackPage, FeedbackPriority, FeedbackStatus } from "@/lib/validation/feedback";
 
-export type FeedbackReporter = { userId: string | null; name: string; contact: string | null };
+export type FeedbackReporter = { userId: string | null; name: string; contact: string | null; role: Role | null };
 
 export type NewFeedbackAttachment = { fileName: string; storagePath: string; mimeType: string; fileSize: number };
 
@@ -29,8 +30,8 @@ export type FeedbackActor = { userId: string; name: string };
 export async function insertFeedbackTicket(ticketId: string, input: FeedbackTicketInput, reporter: FeedbackReporter, attachments: NewFeedbackAttachment[]): Promise<{ id: string; ticketNumber: string }> {
   return sql().begin(async (tx) => {
     const [row] = await tx<{ id: string; ticket_number: string }[]>`
-      insert into feedback_tickets (id, kind, title, related_page, detail, impact, related_order_id, reporter_user_id, reporter_name, reporter_contact)
-      values (${ticketId}, ${input.kind}, ${input.title}, ${input.relatedPage}, ${input.detail}, ${input.impact}, ${input.relatedOrderId}, ${reporter.userId}, ${reporter.name}, ${reporter.contact})
+      insert into feedback_tickets (id, kind, title, related_page, detail, impact, related_order_id, reporter_user_id, reporter_name, reporter_contact, reporter_role)
+      values (${ticketId}, ${input.kind}, ${input.title}, ${input.relatedPage}, ${input.detail}, ${input.impact}, ${input.relatedOrderId}, ${reporter.userId}, ${reporter.name}, ${reporter.contact}, ${reporter.role})
       returning id, ticket_number`;
     for (const a of attachments) {
       await tx`insert into feedback_attachments (ticket_id, file_name, storage_path, mime_type, file_size) values (${row.id}, ${a.fileName}, ${a.storagePath}, ${a.mimeType}, ${a.fileSize})`;
@@ -57,6 +58,7 @@ export type FeedbackTicketRow = {
   reporterUserId: string | null;
   reporterName: string;
   reporterContact: string | null;
+  reporterRole: Role | null;
   status: FeedbackStatus;
   priority: FeedbackPriority | null;
   assigneeUserId: string | null;
@@ -70,7 +72,7 @@ export type FeedbackTicketRow = {
 type TicketSelectRow = {
   id: string; ticket_number: string; kind: FeedbackKind; title: string; related_page: FeedbackPage; detail: string;
   impact: FeedbackImpact | null; related_order_id: string | null; related_order_number: string | null;
-  reporter_user_id: string | null; reporter_name: string; reporter_contact: string | null;
+  reporter_user_id: string | null; reporter_name: string; reporter_contact: string | null; reporter_role: Role | null;
   status: FeedbackStatus; priority: FeedbackPriority | null; assignee_user_id: string | null; assignee_name: string | null;
   resolution_summary: string | null; close_reason: string | null; created_at: Date; updated_at: Date;
 };
@@ -89,6 +91,7 @@ function toTicketRow(r: TicketSelectRow): FeedbackTicketRow {
     reporterUserId: r.reporter_user_id,
     reporterName: r.reporter_name,
     reporterContact: r.reporter_contact,
+    reporterRole: r.reporter_role,
     status: r.status,
     priority: r.priority,
     assigneeUserId: r.assignee_user_id,
@@ -102,7 +105,7 @@ function toTicketRow(r: TicketSelectRow): FeedbackTicketRow {
 
 const ticketColumns = (db: ReturnType<typeof sql>) => db`
   t.id, t.ticket_number, t.kind, t.title, t.related_page, t.detail, t.impact, t.related_order_id,
-  o.order_number as related_order_number, t.reporter_user_id, t.reporter_name, t.reporter_contact,
+  o.order_number as related_order_number, t.reporter_user_id, t.reporter_name, t.reporter_contact, t.reporter_role,
   t.status, t.priority, t.assignee_user_id, au.full_name as assignee_name,
   t.resolution_summary, t.close_reason, t.created_at, t.updated_at`;
 const ticketFrom = (db: ReturnType<typeof sql>) => db`

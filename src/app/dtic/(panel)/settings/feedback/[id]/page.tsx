@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { PageHeader } from "@/components/ui/page-header";
 import { OrderDetailSkeleton } from "@/components/ui/skeletons";
-import { can } from "@/lib/auth/permissions";
+import { can, ROLE_LABEL } from "@/lib/auth/permissions";
 import { formatDateTime } from "@/lib/dates";
 import { UUID_RE } from "@/lib/server/http";
 import { requireSession } from "@/lib/server/auth";
@@ -74,7 +74,7 @@ async function DetailContent({ params }: { params: PageProps<"/dtic/settings/fee
             <Badge tone="info">{FEEDBACK_KIND_LABEL[ticket.kind]}</Badge>
           </div>
           <dl className="mt-4 grid grid-cols-2 gap-x-6 gap-y-3 text-[13px] sm:grid-cols-3">
-            <div><dt className="text-ink-3">Pelapor</dt><dd className="font-medium text-ink">{ticket.reporterName}{ticket.reporterUserId ? " (internal)" : ""}</dd></div>
+            <div><dt className="text-ink-3">Pelapor</dt><dd className="font-medium text-ink">{ticket.reporterName}{ticket.reporterRole ? ` (${ROLE_LABEL[ticket.reporterRole]})` : ticket.reporterUserId ? " (internal)" : ""}</dd></div>
             <div><dt className="text-ink-3">Kontak</dt><dd className="font-medium text-ink">{ticket.reporterContact ?? "—"}</dd></div>
             <div><dt className="text-ink-3">Halaman terkait</dt><dd className="font-medium text-ink">{FEEDBACK_PAGE_LABEL[ticket.relatedPage]}</dd></div>
             <div><dt className="text-ink-3">Dampak dilaporkan</dt><dd className="font-medium text-ink">{ticket.impact ? FEEDBACK_IMPACT_LABEL[ticket.impact] : "—"}</dd></div>

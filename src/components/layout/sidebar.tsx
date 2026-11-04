@@ -32,6 +32,7 @@ import { ROLE_LABEL, type Role } from "@/lib/auth/permissions";
 import { internalRequest } from "@/lib/client/api";
 import type { MenuIcon, MenuNode } from "@/lib/menu";
 import { TutorialProvider } from "@/components/tutorial/tutorial-context";
+import { FloatingHelpCenter } from "@/components/help-center/floating-help-center";
 import { ProductTour } from "@/components/tutorial/product-tour";
 import { OnboardingPrompt } from "@/components/tutorial/onboarding-prompt";
 
@@ -429,6 +430,7 @@ export function AppFrame({ role, name, menu, systemName, tagline, defaultCollaps
           dismissLabel="Masuk ke Dashboard"
         />
       )}
+      <FloatingHelpCenter knownRole={role} />
     </div>
     </TutorialProvider>
   );

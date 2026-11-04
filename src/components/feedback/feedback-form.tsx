@@ -28,9 +28,29 @@ const DETAIL_HINT: Record<FeedbackKind, string> = {
   question: "Tulis pertanyaan Anda sejelas mungkin.",
 };
 
-export function FeedbackForm({ initialOrderNumber = "" }: { initialOrderNumber?: string }) {
+export function FeedbackForm({
+  initialOrderNumber = "",
+  defaultKind = "bug",
+  compact = false,
+  hasSession = false,
+  idPrefix = "",
+}: {
+  initialOrderNumber?: string;
+  /** Jenis awal — dipakai Pusat Bantuan mengambang untuk membedakan "Laporkan Kendala" (bug) dari "Kirim Masukan" (suggestion). */
+  defaultKind?: FeedbackKind;
+  /** Tampilan ringkas tanpa kartu/bayangan sendiri — dipakai di dalam panel Pusat Bantuan (kartu panel sudah membungkusnya). */
+  compact?: boolean;
+  /** Sesi internal aktif → field Nama/Kontak disembunyikan (server mengabaikannya dan memakai identitas sesi, lihat submitFeedbackTicket). */
+  hasSession?: boolean;
+  /** Awalan id elemen (BUKAN `name` — form tetap dikirim dengan nama field asli) — wajib diisi saat form
+   *  dirender berdampingan dengan form lain yang memakai id sama di halaman yang sama (mis. Pusat Bantuan
+   *  mengambang di atas form pengajuan order publik, keduanya memakai komponen ini), supaya `id`/`htmlFor`
+   *  tidak bentrok (bentrok id membuat <label> salah sasaran & elemen "tidak terlihat" bagi uji otomatis). */
+  idPrefix?: string;
+}) {
+  const id = (name: string) => `${idPrefix}${name}`;
   const formRef = useRef<HTMLFormElement>(null);
-  const [kind, setKind] = useState<FeedbackKind>("bug");
+  const [kind, setKind] = useState<FeedbackKind>(defaultKind);
   const [relatedOrderNumber, setRelatedOrderNumber] = useState(initialOrderNumber);
   const [files, setFiles] = useState<File[]>([]);
   const [fileError, setFileError] = useState<string | null>(null);
@@ -85,16 +105,18 @@ export function FeedbackForm({ initialOrderNumber = "" }: { initialOrderNumber?:
 
   if (ticketNumber) {
     return (
-      <div className="mx-auto max-w-xl rounded-2xl border border-line bg-surface p-6 text-center shadow-card sm:p-8">
+      <div className={compact ? "text-center" : "mx-auto max-w-xl rounded-2xl border border-line bg-surface p-6 text-center shadow-card sm:p-8"}>
         <CheckCircle2 className="mx-auto size-10 text-teal" aria-hidden="true" />
         <h2 className="mt-4 text-lg font-semibold text-navy">Laporan terkirim</h2>
         <p className="mt-2 text-sm text-ink-3">Nomor tiket Anda:</p>
         <p className="mt-1 font-mono text-xl font-semibold text-navy">{ticketNumber}</p>
         <p className="mt-3 text-[13px] text-ink-3">Simpan nomor ini untuk melacak status laporan Anda.</p>
         <div className="mt-6 flex flex-wrap justify-center gap-2">
-          <Link href={`/bantuan/riwayat?ticket=${encodeURIComponent(ticketNumber)}`} className="inline-flex items-center justify-center rounded-lg bg-navy px-4 py-2.5 text-sm font-medium text-white hover:bg-navy/90">
-            Lihat Status Tiket
-          </Link>
+          {!hasSession && (
+            <Link href={`/bantuan/riwayat?ticket=${encodeURIComponent(ticketNumber)}`} className="inline-flex items-center justify-center rounded-lg bg-navy px-4 py-2.5 text-sm font-medium text-white hover:bg-navy/90">
+              Lihat Status Tiket
+            </Link>
+          )}
           <Button variant="ghost" onClick={() => setTicketNumber(null)}>Buat Laporan Lain</Button>
         </div>
       </div>
@@ -102,48 +124,52 @@ export function FeedbackForm({ initialOrderNumber = "" }: { initialOrderNumber?:
   }
 
   return (
-    <form ref={formRef} onSubmit={onSubmit} className="mx-auto max-w-2xl rounded-2xl border border-line bg-surface p-5 shadow-card sm:p-7" noValidate>
+    <form ref={formRef} onSubmit={onSubmit} className={compact ? "flex flex-col gap-4" : "mx-auto max-w-2xl rounded-2xl border border-line bg-surface p-5 shadow-card sm:p-7"} noValidate>
       <div className="flex flex-col gap-4">
-        <Field label="Jenis Laporan" htmlFor="kind" required error={fieldErrors.kind}>
-          <Select data-tour="bantuan-jenis" id="kind" name="kind" value={kind} onChange={(e) => setKind(e.target.value as FeedbackKind)} disabled={busy}>
+        <Field label="Jenis Laporan" htmlFor={id("kind")} required error={fieldErrors.kind}>
+          <Select data-tour="bantuan-jenis" id={id("kind")} name="kind" value={kind} onChange={(e) => setKind(e.target.value as FeedbackKind)} disabled={busy}>
             {FEEDBACK_KINDS.map((k) => <option key={k} value={k}>{FEEDBACK_KIND_LABEL[k]}</option>)}
           </Select>
         </Field>
 
-        <Field label="Judul Laporan" htmlFor="title" required error={fieldErrors.title} hint='Contoh: "Tombol persetujuan tidak berfungsi."'>
-          <Input id="title" name="title" maxLength={160} disabled={busy} invalid={!!fieldErrors.title} />
+        <Field label="Judul Laporan" htmlFor={id("title")} required error={fieldErrors.title} hint='Contoh: "Tombol persetujuan tidak berfungsi."'>
+          <Input id={id("title")} name="title" maxLength={160} disabled={busy} invalid={!!fieldErrors.title} />
         </Field>
 
-        <Field label="Halaman atau Fitur Terkait" htmlFor="relatedPage" required error={fieldErrors.relatedPage}>
-          <Select id="relatedPage" name="relatedPage" defaultValue="home" disabled={busy}>
+        <Field label="Halaman atau Fitur Terkait" htmlFor={id("relatedPage")} required error={fieldErrors.relatedPage}>
+          <Select id={id("relatedPage")} name="relatedPage" defaultValue="home" disabled={busy}>
             {FEEDBACK_PAGES.map((p: FeedbackPage) => <option key={p} value={p}>{FEEDBACK_PAGE_LABEL[p]}</option>)}
           </Select>
         </Field>
 
-        <Field label="Detail Laporan" htmlFor="detail" required error={fieldErrors.detail} hint={DETAIL_HINT[kind]}>
-          <Textarea data-tour="bantuan-detail" id="detail" name="detail" maxLength={5000} className="min-h-32" disabled={busy} invalid={!!fieldErrors.detail} />
+        <Field label="Detail Laporan" htmlFor={id("detail")} required error={fieldErrors.detail} hint={DETAIL_HINT[kind]}>
+          <Textarea data-tour="bantuan-detail" id={id("detail")} name="detail" maxLength={5000} className="min-h-32" disabled={busy} invalid={!!fieldErrors.detail} />
         </Field>
 
         {kind === "bug" && (
-          <Field label="Tingkat Dampak" htmlFor="impact" required error={fieldErrors.impact} hint="Tingkat dampak yang Anda rasakan — bukan prioritas final yang ditetapkan tim DTIC.">
-            <Select id="impact" name="impact" defaultValue="" disabled={busy}>
+          <Field label="Tingkat Dampak" htmlFor={id("impact")} required error={fieldErrors.impact} hint="Tingkat dampak yang Anda rasakan — bukan prioritas final yang ditetapkan tim DTIC.">
+            <Select id={id("impact")} name="impact" defaultValue="" disabled={busy}>
               <option value="" disabled>Pilih tingkat dampak</option>
               {FEEDBACK_IMPACTS.map((i: FeedbackImpact) => <option key={i} value={i}>{FEEDBACK_IMPACT_LABEL[i]}</option>)}
             </Select>
           </Field>
         )}
 
-        <Field label="Nomor Request Terkait" htmlFor="relatedOrderNumber" error={fieldErrors.relatedOrderNumber} hint="Opsional. Contoh: DTIC-2026-00008.">
-          <Input id="relatedOrderNumber" name="relatedOrderNumber" className="font-mono" placeholder="DTIC-2026-00012" value={relatedOrderNumber} onChange={(e) => setRelatedOrderNumber(e.target.value)} disabled={busy} invalid={!!fieldErrors.relatedOrderNumber} />
+        <Field label="Nomor Request Terkait" htmlFor={id("relatedOrderNumber")} error={fieldErrors.relatedOrderNumber} hint="Opsional. Contoh: DTIC-2026-00008.">
+          <Input id={id("relatedOrderNumber")} name="relatedOrderNumber" className="font-mono" placeholder="DTIC-2026-00012" value={relatedOrderNumber} onChange={(e) => setRelatedOrderNumber(e.target.value)} disabled={busy} invalid={!!fieldErrors.relatedOrderNumber} />
         </Field>
 
-        <Field label="Nama Anda" htmlFor="reporterName" required error={fieldErrors.reporterName} hint="Dipakai tim DTIC untuk menghubungi Anda bila diperlukan.">
-          <Input id="reporterName" name="reporterName" maxLength={120} disabled={busy} invalid={!!fieldErrors.reporterName} />
-        </Field>
+        {!hasSession && (
+          <>
+            <Field label="Nama Anda" htmlFor={id("reporterName")} required error={fieldErrors.reporterName} hint="Dipakai tim DTIC untuk menghubungi Anda bila diperlukan.">
+              <Input id={id("reporterName")} name="reporterName" maxLength={120} disabled={busy} invalid={!!fieldErrors.reporterName} />
+            </Field>
 
-        <Field label="Kontak (WhatsApp/Email)" htmlFor="reporterContact" error={fieldErrors.reporterContact} hint="Opsional.">
-          <Input id="reporterContact" name="reporterContact" maxLength={160} disabled={busy} invalid={!!fieldErrors.reporterContact} />
-        </Field>
+            <Field label="Kontak (WhatsApp/Email)" htmlFor={id("reporterContact")} error={fieldErrors.reporterContact} hint="Opsional.">
+              <Input id={id("reporterContact")} name="reporterContact" maxLength={160} disabled={busy} invalid={!!fieldErrors.reporterContact} />
+            </Field>
+          </>
+        )}
 
         <div>
           <span className="mb-1.5 block text-sm font-medium text-ink">Lampiran (opsional)</span>
