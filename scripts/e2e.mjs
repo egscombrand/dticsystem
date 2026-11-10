@@ -1553,6 +1553,90 @@ try {
         await p.close();
       });
 
+      // Kunci pengajuan (submissionKey) dari badan multipart sebuah permintaan POST /api/public/orders.
+      const keyOf = (req) => /name="submissionKey"\r\n\r\n([0-9a-f-]{36})/.exec(req.postDataBuffer()?.toString("latin1") ?? "")?.[1] ?? null;
+      const ATTEMPT_KEY = "dtic-submission-attempt-v1";
+
+      await test("kirim macet: peringatan lambat muncul; 'Batalkan & periksa status' tidak membuat order ganda; kirim ulang memakai kunci yang sama", async () => {
+        const p = await ctx.newPage();
+        await fillMinimalForm(p, "Macet Uji");
+        const keys = [];
+        p.on("request", (req) => {
+          if (req.method() === "POST" && req.url().endsWith("/api/public/orders")) keys.push(keyOf(req));
+        });
+        // Kiriman sengaja tidak pernah dijawab (macet) — tidak sampai ke server.
+        await p.route("**/api/public/orders", () => {});
+        await submitBtn(p).click();
+        await p.getByRole("dialog", { name: "Konfirmasi Pengajuan" }).waitFor({ state: "visible" });
+        await confirmBtn(p).click();
+        assert.equal(await p.getByTestId("submit-slow").count(), 0, "belum ada peringatan tepat setelah mulai mengirim");
+        await p.getByTestId("submit-slow").waitFor({ timeout: 45000 });
+        assert.ok((await p.evaluate((k) => localStorage.getItem(k), ATTEMPT_KEY)) !== null, "upaya kirim tercatat di browser selama belum jelas");
+        await p.getByRole("button", { name: "Batalkan & periksa status", exact: true }).click();
+        await p.getByText("Pengajuan belum ditemukan").waitFor({ timeout: 20000 });
+        assert.equal(await ordersNamed("Macet Uji"), 0, "tidak ada order tersimpan setelah dibatalkan");
+        assert.equal(await p.inputValue("#requesterName"), "Macet Uji", "isian tidak hilang");
+        await p.unroute("**/api/public/orders");
+        await submitBtn(p).click();
+        await p.getByRole("dialog", { name: "Konfirmasi Pengajuan" }).waitFor({ state: "visible" });
+        await confirmBtn(p).click();
+        await p.getByText("Request berhasil diajukan").waitFor({ timeout: 30000 });
+        assert.equal(await ordersNamed("Macet Uji"), 1, "kirim ulang menghasilkan tepat satu order");
+        assert.equal(keys.length, 2);
+        assert.ok(keys[0] && keys[0] === keys[1], "kirim ulang memakai kunci pengajuan yang sama");
+        assert.equal(await p.evaluate((k) => localStorage.getItem(k), ATTEMPT_KEY), null, "catatan upaya dibersihkan setelah tersimpan");
+        console.log("[BUKTI MACET]", JSON.stringify({ keys, orderSetelahBatal: 0, orderAkhir: 1 }));
+        await p.close();
+      });
+
+      await test("muat ulang setelah jawaban server hilang: pengajuan yang SUDAH masuk langsung ditampilkan (bukan form kosong), tidak ada order ganda", async () => {
+        const p = await ctx.newPage();
+        await fillMinimalForm(p, "Muat Ulang Uji");
+        // Permintaan SUNGGUHAN sampai ke server dan tersimpan, tetapi jawabannya hilang di jalan.
+        await p.route("**/api/public/orders", async (route) => {
+          await route.fetch();
+          await route.abort();
+        });
+        await submitBtn(p).click();
+        await p.getByRole("dialog", { name: "Konfirmasi Pengajuan" }).waitFor({ state: "visible" });
+        await confirmBtn(p).click();
+        await p.getByText("Status pengajuan belum dapat dipastikan").waitFor({ timeout: 30000 });
+        assert.equal(await ordersNamed("Muat Ulang Uji"), 1, "server sudah menyimpan");
+        await p.unroute("**/api/public/orders");
+        await p.reload(); // pemohon memuat ulang halaman
+        await p.getByText("Request berhasil diajukan").waitFor({ timeout: 30000 });
+        assert.equal(await ordersNamed("Muat Ulang Uji"), 1, "tidak ada order ganda");
+        assert.equal(await p.evaluate((k) => localStorage.getItem(k), ATTEMPT_KEY), null, "catatan upaya dibersihkan setelah ditemukan");
+        console.log("[BUKTI MUAT ULANG]", JSON.stringify({ orderSebelumReload: 1, orderSesudahReload: await ordersNamed("Muat Ulang Uji"), kwitansiTampil: true }));
+        await p.close();
+      });
+
+      await test("muat ulang saat kiriman belum masuk: peringatan 'belum terkonfirmasi'; isi ulang & kirim memakai kunci LAMA → tepat satu order", async () => {
+        const p = await ctx.newPage();
+        const keys = [];
+        p.on("request", (req) => {
+          if (req.method() === "POST" && req.url().endsWith("/api/public/orders")) keys.push(keyOf(req));
+        });
+        await fillMinimalForm(p, "Belum Masuk Uji");
+        await p.route("**/api/public/orders", (route) => route.abort()); // tidak pernah sampai ke server
+        await submitBtn(p).click();
+        await p.getByRole("dialog", { name: "Konfirmasi Pengajuan" }).waitFor({ state: "visible" });
+        await confirmBtn(p).click();
+        await p.getByText("Status pengajuan belum dapat dipastikan").waitFor({ timeout: 30000 });
+        await p.unroute("**/api/public/orders");
+        await fillMinimalForm(p, "Belum Masuk Uji"); // goto("/") = muat ulang halaman, lalu isi ulang dengan isian yang SAMA
+        assert.equal(await p.getByText("Pengiriman sebelumnya belum terkonfirmasi tersimpan").count(), 1, "peringatan setelah muat ulang tampil");
+        await submitBtn(p).click();
+        await p.getByRole("dialog", { name: "Konfirmasi Pengajuan" }).waitFor({ state: "visible" });
+        await confirmBtn(p).click();
+        await p.getByText("Request berhasil diajukan").waitFor({ timeout: 30000 });
+        assert.equal(await ordersNamed("Belum Masuk Uji"), 1, "tepat satu order");
+        assert.equal(keys.length, 2);
+        assert.ok(keys[0] && keys[0] === keys[1], "setelah muat ulang, isian yang sama memakai kunci pengajuan yang sama");
+        console.log("[BUKTI KUNCI SAMA]", JSON.stringify({ keys, orderAkhir: 1 }));
+        await p.close();
+      });
+
       await test("order dibuka kembali: daftar tetap tampil sebagai daftar (detail & editor edit)", async () => {
         const p = await ctx.newPage();
         await p.goto(`${BASE}/orders/${browserOrder.id}`);

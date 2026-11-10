@@ -11,7 +11,23 @@ const CLOSE_MS = 160;
  * Konfirmasi sebelum pengajuan dikirim. Memakai <dialog> native: fokus terkunci, Esc, dan keyboard bawaan.
  * Tidak mengirim apa pun sendiri; tombol "Ya" hanya memanggil onConfirm. Selama `busy`, dialog tidak bisa ditutup.
  */
-export function SubmitConfirmDialog({ open, busy, onCancel, onConfirm }: { open: boolean; busy: boolean; onCancel: () => void; onConfirm: () => void }) {
+export function SubmitConfirmDialog({
+  open,
+  busy,
+  slow = false,
+  onCancel,
+  onConfirm,
+  onAbort,
+}: {
+  open: boolean;
+  busy: boolean;
+  /** Pengiriman berjalan tetapi tidak ada kemajuan cukup lama — tampilkan jalan keluar. */
+  slow?: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+  /** Batalkan permintaan yang sedang berjalan lalu periksa apakah pengajuan sudah tersimpan. */
+  onAbort?: () => void;
+}) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   const descId = useId();
@@ -58,6 +74,17 @@ export function SubmitConfirmDialog({ open, busy, onCancel, onConfirm }: { open:
             </p>
           </div>
         </div>
+        {busy && slow && onAbort && (
+          <div role="status" className="rounded-xl border border-warn/30 bg-warn-soft p-3.5 text-[13px] leading-relaxed text-ink-2" data-testid="submit-slow">
+            <p className="font-medium text-ink">Pengiriman lebih lama dari biasanya.</p>
+            <p className="mt-1">Jangan menutup atau memuat ulang halaman. Jika masih macet lebih dari satu menit, batalkan lalu periksa status — pengajuan tidak akan tercatat dua kali.</p>
+            <div className="mt-2.5">
+              <Button size="sm" variant="secondary" onClick={onAbort}>
+                Batalkan &amp; periksa status
+              </Button>
+            </div>
+          </div>
+        )}
         <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
           <Button variant="secondary" onClick={onCancel} disabled={busy} autoFocus>
             Belum, Kembali Edit

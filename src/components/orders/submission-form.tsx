@@ -14,6 +14,7 @@ import { UPLOAD_LIMITS } from "@/lib/config/app";
 import { DESIGN_SIZE_PRESETS } from "@/lib/config/order-options";
 import { formatDate, formatDateTime, formatLongDate, toDateKey } from "@/lib/dates";
 import { ACCEPT_ATTRIBUTE, ALLOWED_EXTENSIONS_LABEL, checkFileBasics, formatFileSize } from "@/lib/files";
+import { adoptAttempt, ATTEMPT_UNCERTAIN_MS, clearAttempt, fingerprintOf, loadAttempt } from "@/lib/client/submission-attempt";
 import { toFieldErrors, type FieldErrors } from "@/lib/validation/common";
 import { orderSubmissionSchema } from "@/lib/validation/order";
 import type { OrderTypeOption, PriorityOption, TeamOption } from "@/lib/types";
@@ -38,9 +39,9 @@ type NotificationState = "sent" | "pending" | "failed" | "no_destination";
 type Phase =
   | { kind: "idle" }
   | { kind: "sending"; progress: number }
-  | { kind: "error"; message: string; title?: string }
+  | { kind: "error"; message: string; title?: string; canCheck?: boolean }
   /** Koneksi putus setelah pengiriman: pengajuan mungkin sudah tersimpan. Harus diperiksa sebelum kirim ulang. */
-  | { kind: "unknown" }
+  | { kind: "unknown"; reloaded?: boolean }
   | {
       kind: "success";
       orderNumber: string;
@@ -222,7 +223,7 @@ export function SubmissionReceipt({
   );
 }
 
-function send(form: FormData, onProgress: (p: number) => void): Promise<{ status: number; body: Record<string, unknown> }> {
+function send(form: FormData, onProgress: (p: number) => void, signal?: AbortSignal): Promise<{ status: number; body: Record<string, unknown> }> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", "/api/public/orders");
@@ -231,10 +232,20 @@ function send(form: FormData, onProgress: (p: number) => void): Promise<{ status
     xhr.onload = () => resolve({ status: xhr.status, body: (xhr.response as Record<string, unknown>) ?? {} });
     xhr.onerror = () => reject(new Error("network"));
     xhr.ontimeout = () => reject(new Error("timeout"));
+    xhr.onabort = () => reject(new Error("aborted"));
     xhr.timeout = 120_000;
+    signal?.addEventListener("abort", () => xhr.abort(), { once: true });
     xhr.send(form);
   });
 }
+
+/** Catat waktu kemajuan terakhir (di luar komponen: pembacaan jam bukan bagian dari render). */
+function markProgress(ref: { current: number }) {
+  ref.current = Date.now();
+}
+
+/** Tanpa kemajuan sebanyak ini (ms) selama mengirim → tampilkan peringatan lambat + tombol batalkan & periksa status. */
+const STALL_MS = 15_000;
 
 /** Warna per kategori (aksen harmonis). Kelas ditulis lengkap agar terdeteksi Tailwind. */
 const TEAM_TONE: Record<string, { card: string; hover: string; iconOn: string; iconOff: string; text: string }> = {
@@ -302,6 +313,9 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
   const [demoBriefText, setDemoBriefText] = useState<string | null>(null); // diteruskan ke RichTextEditor.demoText
   const [demoCursor, setDemoCursor] = useState<{ x: number; y: number; clicking: boolean } | null>(null); // kursor simulasi murni visual (fixed, pointer-events-none)
   const inFlight = useRef(false); // guard sinkron: klik berulang tidak memulai pengiriman kedua
+  const abortRef = useRef<AbortController | null>(null); // membatalkan permintaan yang macet (tombol "Batalkan & periksa status")
+  const progressAt = useRef(0); // kapan terakhir ada kemajuan unggah (deteksi macet)
+  const [slow, setSlow] = useState(false); // pengiriman tanpa kemajuan > STALL_MS
   // Kategori = tim. Jenis pekerjaan & tim penanggung jawab mengikuti kategori; server menetapkan seluruh anggota tim.
   const team = teams.find((t) => t.id === teamId) ?? null;
   const typesForTeam = orderTypes.filter((t) => t.teamId === teamId);
@@ -328,6 +342,25 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
   const [minDeadline, setMinDeadline] = useState<string | undefined>(undefined);
 
   const sending = phase.kind === "sending";
+
+  // Deteksi macet: selama mengirim, bila tidak ada kemajuan > STALL_MS tampilkan jalan keluar di dialog.
+  useEffect(() => {
+    if (!sending) return;
+    const id = window.setInterval(() => setSlow(Date.now() - progressAt.current > STALL_MS), 2000);
+    return () => window.clearInterval(id);
+  }, [sending]);
+
+  // Mencegah pemohon menutup/memuat ulang halaman saat pengiriman berjalan (pemicu utama order ganda).
+  useEffect(() => {
+    if (!sending) return;
+    const onBeforeUnload = (ev: BeforeUnloadEvent) => {
+      ev.preventDefault();
+      ev.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [sending]);
+
   const STEP_LABELS = ["Kategori", "Detail pekerjaan", "Tim & deadline", "Tinjau"];
 
   function buildSummary(): ReviewSummary {
@@ -584,12 +617,34 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
         form.scrollIntoView({ behavior: "smooth", block: "start" });
         return;
       }
+      // Catat upaya ini SEBELUM mengirim: bila halaman dimuat ulang saat kiriman macet, isian yang sama memakai
+      // kunci yang sama lagi (server menjawab "sudah ada" bila kiriman pertama sempat masuk) — bukan order ganda.
+      const attempt = adoptAttempt(
+        fingerprintOf(data.raw, picIds, files),
+        data.raw.submissionKey,
+      );
+      if (attempt.key !== data.raw.submissionKey) {
+        data.body.set("submissionKey", attempt.key);
+        submissionKey.current = attempt.key;
+      }
       setErrors({});
+      setSlow(false);
+      markProgress(progressAt);
+      const abort = new AbortController();
+      abortRef.current = abort;
       setPhase({ kind: "sending", progress: 0 });
-      const res = await send(data.body, (p) => setPhase({ kind: "sending", progress: p }));
+      const res = await send(
+        data.body,
+        (p) => {
+          markProgress(progressAt);
+          setPhase({ kind: "sending", progress: p });
+        },
+        abort.signal,
+      );
       setConfirmOpen(false);
       // 201 (baru) atau 200 (pengiriman ulang yang sama): pengajuan TERSIMPAN. Status Telegram dibaca terpisah.
       if ((res.status === 200 || res.status === 201) && typeof res.body.orderNumber === "string") {
+        clearAttempt();
         const note = res.body.notification as { state?: NotificationState } | undefined;
         setPhase({
           kind: "success",
@@ -605,19 +660,29 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
         return;
       }
       if (res.body.fieldErrors && typeof res.body.fieldErrors === "object") setErrors(res.body.fieldErrors as FieldErrors);
-      // Pengajuan belum tersimpan (validasi, batas, atau kegagalan database): tidak ada nomor pengajuan.
+      // 4xx (validasi, batas): pasti BELUM tersimpan — catatan upaya dibuang. 5xx (termasuk batas waktu platform
+      // 502/503/504) bisa terjadi SETELAH data masuk: catatan dipertahankan dan pemohon diminta memeriksa status.
+      const uncertain = res.status >= 500;
+      if (!uncertain) clearAttempt();
       setPhase({
         kind: "error",
-        message: typeof res.body.error === "string" ? res.body.error : `Pengajuan gagal (HTTP ${res.status}).`,
+        title: uncertain ? "Pengajuan belum dapat dipastikan tersimpan" : undefined,
+        message:
+          (typeof res.body.error === "string" ? res.body.error : `Pengajuan gagal (HTTP ${res.status}).`) +
+          (uncertain ? " Periksa status sebelum mengirim ulang agar tidak tercatat dua kali." : ""),
+        canCheck: uncertain,
       });
       form.scrollIntoView({ behavior: "smooth", block: "start" });
-    } catch {
-      // Koneksi terputus atau waktu habis: commit mungkin sudah terjadi. Jangan klaim "belum tersimpan".
+    } catch (error) {
+      // Koneksi terputus, waktu habis, atau dibatalkan pemohon: commit mungkin sudah terjadi. Jangan klaim "belum tersimpan".
       setConfirmOpen(false);
       setPhase({ kind: "unknown" });
       formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      if (error instanceof Error && error.message === "aborted") void checkSubmissionStatus();
     } finally {
       inFlight.current = false;
+      abortRef.current = null;
+      setSlow(false);
     }
   }
 
@@ -629,6 +694,7 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
       const res = await fetch(`/api/public/orders/status?key=${encodeURIComponent(key)}`, { cache: "no-store" });
       const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
       if (res.ok && body.found === true) {
+        clearAttempt();
         setPhase({
           kind: "success",
           orderNumber: String(body.orderNumber),
@@ -642,7 +708,12 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
       }
       // 404 berarti "tidak ditemukan" (bukan kegagalan pemeriksaan).
       if (body.found === false) {
-        setPhase({ kind: "error", title: "Pengajuan belum ditemukan", message: "Pengajuan belum tersimpan. Anda dapat mengirim ulang; isian form dipertahankan." });
+        setPhase({
+          kind: "error",
+          title: "Pengajuan belum ditemukan",
+          message: "Pengajuan belum tersimpan, atau server masih memprosesnya. Tunggu sebentar lalu periksa lagi. Anda juga boleh mengirim ulang — sistem memakai kunci yang sama sehingga tidak tercatat dua kali. Isian form dipertahankan.",
+          canCheck: true,
+        });
         return;
       }
       setPhase({ kind: "error", title: "Status belum dapat diperiksa", message: "Pemeriksaan status gagal sementara. Coba lagi beberapa saat, atau hubungi tim DTIC." });
@@ -653,6 +724,7 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
 
   function reset() {
     formRef.current?.reset();
+    clearAttempt();
     submissionKey.current = null;
     setFiles([]);
     setErrors({});
@@ -665,6 +737,44 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
     setPhase({ kind: "idle" });
     window.scrollTo({ top: 0 });
   }
+
+  // Rekonsiliasi saat halaman dibuka: bila ada upaya kirim yang belum jelas (halaman dimuat ulang / keluar-masuk
+  // saat macet), periksa ke server. Sudah tersimpan → langsung tampilkan nomor pengajuannya, BUKAN form kosong
+  // yang mengundang kirim ulang.
+  useEffect(() => {
+    const run = async () => {
+      const attempt = loadAttempt();
+      if (!attempt) return;
+      try {
+        const res = await fetch(`/api/public/orders/status?key=${encodeURIComponent(attempt.key)}`, { cache: "no-store" });
+        const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+        if (res.ok && body.found === true) {
+          clearAttempt();
+          setPhase((cur) =>
+            cur.kind === "idle" || cur.kind === "unknown"
+              ? {
+                  kind: "success",
+                  orderNumber: String(body.orderNumber),
+                  createdAt: String(body.createdAt),
+                  deadlineAt: String(body.deadlineAt),
+                  brandName: String(body.brandName ?? ""),
+                  designType: String(body.designType ?? ""),
+                  attachmentCount: Number(body.attachmentCount ?? 0),
+                }
+              : cur,
+          );
+          return;
+        }
+        if (body.found === false) {
+          if (Date.now() - attempt.startedAt > ATTEMPT_UNCERTAIN_MS) clearAttempt();
+          else setPhase((cur) => (cur.kind === "idle" ? { kind: "unknown", reloaded: true } : cur));
+        }
+      } catch {
+        // pemeriksaan gagal (offline) — diamkan; catatan tetap ada untuk percobaan berikutnya
+      }
+    };
+    void run();
+  }, []);
 
   if (phase.kind === "success") {
     return <SubmissionReceipt receipt={phase} onReset={reset} />;
@@ -759,10 +869,23 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
         </div>
       )}
       <div className="flex min-w-0 flex-col gap-6">
-        {phase.kind === "error" && <Alert kind="error" title={phase.title ?? "Pengajuan belum tersimpan"}>{phase.message}</Alert>}
+        {phase.kind === "error" && (
+          <Alert kind="error" title={phase.title ?? "Pengajuan belum tersimpan"}>
+            <p>{phase.message}</p>
+            {phase.canCheck && (
+              <div className="mt-3">
+                <Button size="sm" variant="secondary" onClick={checkSubmissionStatus}>Periksa status pengajuan</Button>
+              </div>
+            )}
+          </Alert>
+        )}
         {phase.kind === "unknown" && (
           <Alert kind="info" title="Status pengajuan belum dapat dipastikan">
-            <p>Koneksi terputus saat pengajuan dikirim, sehingga pengajuan mungkin sudah tersimpan. Periksa statusnya sebelum mengirim ulang agar tidak tercatat dua kali. Isian form tetap dipertahankan.</p>
+            <p>
+              {phase.reloaded
+                ? "Pengiriman sebelumnya belum terkonfirmasi tersimpan. Isian tidak terbawa setelah halaman dimuat ulang. Periksa statusnya dulu; jika belum ada, isi ulang dan kirim — sistem akan memakai kunci yang sama sehingga tidak tercatat dua kali."
+                : "Koneksi terputus saat pengajuan dikirim, sehingga pengajuan mungkin sudah tersimpan. Periksa statusnya sebelum mengirim ulang agar tidak tercatat dua kali. Isian form tetap dipertahankan."}
+            </p>
             <div className="mt-3">
               <Button size="sm" variant="secondary" onClick={checkSubmissionStatus}>Periksa status pengajuan</Button>
             </div>
@@ -1265,7 +1388,7 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
         </div>
       </aside>
 
-      <SubmitConfirmDialog open={confirmOpen} busy={sending} onCancel={() => setConfirmOpen(false)} onConfirm={confirmSubmit} />
+      <SubmitConfirmDialog open={confirmOpen} busy={sending} slow={slow} onCancel={() => setConfirmOpen(false)} onConfirm={confirmSubmit} onAbort={() => abortRef.current?.abort()} />
     </form>
   );
 }
