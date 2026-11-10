@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import { cn } from "@/components/ui/cn";
 import { ConnectBrand } from "@/components/layout/connect-brand";
 import { FloatingHelpCenter } from "@/components/help-center/floating-help-center";
+import { NavigationProgress } from "@/components/ui/navigation-progress";
 import { TutorialProvider } from "@/components/tutorial/tutorial-context";
 import { ProductTour } from "@/components/tutorial/product-tour";
 import { OnboardingPrompt } from "@/components/tutorial/onboarding-prompt";
@@ -53,6 +54,7 @@ export default function PublicLayout({ children }: { children: React.ReactNode }
         </header>
         <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10">{children}</main>
       </div>
+      <NavigationProgress />
       <ProductTour />
       <OnboardingPrompt />
       <FloatingHelpCenter />

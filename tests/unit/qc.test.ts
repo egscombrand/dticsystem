@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { availableWorkflowActions, checkWorkflowAction, completionNeedsNote, HANDOVER_CHANNEL_LABEL, handoverProblem, SELECTABLE_HANDOVER_CHANNELS, type QcActor, type QcContext } from "@/lib/qc";
+import { availableWorkflowActions, checkWorkflowAction, completionNeedsNote, HANDOVER_CHANNEL_LABEL, handoverProblem, SELECTABLE_HANDOVER_CHANNELS, type QcActor, type QcContext , closesWithoutReview, lacksReview } from "@/lib/qc";
 
 const pic: QcActor = { role: "staff", isAssignee: true };
 const otherStaff: QcActor = { role: "staff", isAssignee: false };
@@ -162,5 +162,30 @@ describe("tombol sesuai status & role", () => {
   });
   it("staff lain tidak mendapat tombol", () => {
     expect(availableWorkflowActions(ctx(), otherStaff)).toEqual([]);
+  });
+});
+
+describe("penutupan tanpa review", () => {
+  const base = { status: "in_progress", qcStatus: "none", requesterDecision: "none" } as const;
+  const pic = { role: "staff", isAssignee: true } as const;
+  const manager = { role: "manager", isAssignee: false } as const;
+
+  it("lacksReview: hanya benar bila Manager belum menyetujui DAN hasil belum diserahkan ke pemohon", () => {
+    expect(lacksReview(base)).toBe(true);
+    expect(lacksReview({ ...base, qcStatus: "approved" })).toBe(false);
+    expect(lacksReview({ ...base, requesterDecision: "awaiting" })).toBe(false);
+  });
+
+  it("PIC boleh menutup tanpa review tetapi wajib beralasan, dan ditandai", () => {
+    const noNote = checkWorkflowAction({ action: "complete", ctx: base, actor: pic, note: "" });
+    expect(noNote.ok).toBe(false);
+    expect(!noNote.ok && noNote.message).toMatch(/belum direview Manager maupun pemohon/);
+    expect(checkWorkflowAction({ action: "complete", ctx: base, actor: pic, note: "Disepakati langsung dengan pemohon" }).ok).toBe(true);
+    expect(closesWithoutReview(base, pic)).toBe(true);
+  });
+
+  it("Manager non-PIC menutup tanpa penanda; setelah ada review PIC juga tanpa penanda", () => {
+    expect(closesWithoutReview(base, manager)).toBe(false);
+    expect(closesWithoutReview({ ...base, qcStatus: "approved" }, pic)).toBe(false);
   });
 });

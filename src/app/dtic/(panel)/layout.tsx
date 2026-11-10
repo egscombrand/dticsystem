@@ -1,5 +1,6 @@
 import { Suspense } from "react";
 import { PanelShell } from "@/components/layout/panel-shell";
+import { LoadingHint } from "@/components/ui/loading-hint";
 import { Skeleton } from "@/components/ui/spinner";
 
 export default function PanelLayout({ children }: { children: React.ReactNode }) {
@@ -8,7 +9,10 @@ export default function PanelLayout({ children }: { children: React.ReactNode })
       fallback={
         <div aria-busy="true" className="min-h-screen p-6">
           <span className="sr-only">Memeriksa sesi…</span>
-          <Skeleton className="h-16 w-full max-w-md" />
+          <div className="mx-auto max-w-xl pt-16">
+            <LoadingHint label="Memeriksa sesi Anda…" />
+            <Skeleton className="h-16 w-full" />
+          </div>
         </div>
       }
     >

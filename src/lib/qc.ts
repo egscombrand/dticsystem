@@ -42,6 +42,12 @@ export type WorkflowEventKind =
   | "feedback_recorded"
   | "completed"
   | "whatsapp_opened"
+  // Order Collaboration (migrasi 20261110000000).
+  | "reference_uploaded"
+  | "brief_change_requested"
+  | "brief_change_accepted"
+  | "brief_change_rejected"
+  | "brief_change_withdrawn"
   // SLA (lihat migrasi 20261104000000) — sebelumnya tidak ada di tipe ini padahal sudah ada di database.
   | "sla_auto_closed"
   | "sla_resumed"
@@ -162,6 +168,16 @@ const HANDOVER: readonly OrderStatus[] = ["in_progress", "awaiting_requester"];
 /** Catatan penyelesaian wajib KECUALI pemohon sudah benar-benar menyetujui hasil (requesterDecision
  *  "approved") — menutup tanpa persetujuan pemohon yang tercatat tetap memerlukan keterangan kesepakatan
  *  di luar aplikasi, sama seperti sebelumnya, tapi sekarang berdasarkan keputusan NYATA bukan sekadar status. */
+/** Belum ada review NYATA sama sekali: Manager belum menyetujui dan hasil belum pernah diserahkan ke pemohon. */
+export function lacksReview(ctx: QcContext): boolean {
+  return ctx.qcStatus !== "approved" && ctx.requesterDecision === "none";
+}
+
+/** Penutupan ini diberi penanda "tanpa review": belum ada review, dan penutupnya bukan Manager/Super Admin non-PIC. */
+export function closesWithoutReview(ctx: QcContext, actor: QcActor): boolean {
+  return lacksReview(ctx) && !(isQcRole(actor.role) && !actor.isAssignee);
+}
+
 export function completionNeedsNote(ctx: QcContext): boolean {
   return ctx.requesterDecision !== "approved";
 }
@@ -234,6 +250,7 @@ export function checkWorkflowAction(input: { action: WorkflowAction; ctx: QcCont
       }
       if (!HANDOVER.includes(ctx.status) && ctx.status !== "internal_revision") return { ok: false, status: 409, message: "Pekerjaan dapat diselesaikan setelah mulai dikerjakan." };
       if (completionNeedsNote(ctx) && note.length < COMPLETION_NOTE_MIN) {
+        if (lacksReview(ctx)) return { ok: false, status: 422, message: `Pekerjaan ini belum direview Manager maupun pemohon. Tulis alasan penutupan (minimal ${COMPLETION_NOTE_MIN} karakter); pekerjaan akan diberi penanda "Ditutup tanpa review".`, field: "note" };
         return { ok: false, status: 422, message: `Belum ada pengiriman yang tercatat. Tulis keterangan penyelesaian (minimal ${COMPLETION_NOTE_MIN} karakter), mis. "Hasil sudah dikirim lewat WhatsApp".`, field: "note" };
       }
       return { ok: true };

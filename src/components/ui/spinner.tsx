@@ -10,5 +10,5 @@ export function Spinner({ className }: { className?: string }) {
 }
 
 export function Skeleton({ className }: { className?: string }) {
-  return <div className={cn("animate-pulse rounded-md bg-[#eceef1]", className)} aria-hidden="true" />;
+  return <div className={cn("dtic-shimmer rounded-md bg-[#eceef1]", className)} aria-hidden="true" />;
 }

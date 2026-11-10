@@ -66,7 +66,8 @@ export function Modal({
               </button>
             )}
           </div>
-          {children && <div className={cn("min-h-0 flex-1 overflow-y-auto px-5 pt-4 pb-5", size === "wide" && "sm:px-7 sm:pt-5")}>{children}</div>}
+          {/* `relative` wajib: input file sr-only (absolute) di dalam sini kalau tidak akan menggulirkan <dialog> saat difokuskan. */}
+          {children && <div className={cn("relative min-h-0 flex-1 overflow-y-auto px-5 pt-4 pb-5", size === "wide" && "sm:px-7 sm:pt-5")}>{children}</div>}
           {footer && <div className={cn("flex shrink-0 justify-end gap-2 border-t border-line bg-subtle px-5 py-3", size === "wide" && "sm:px-7")}>{footer}</div>}
         </div>
       )}

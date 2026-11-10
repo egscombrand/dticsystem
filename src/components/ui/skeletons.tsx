@@ -1,4 +1,5 @@
 import { Card, CardHeader } from "@/components/ui/card";
+import { LoadingHint } from "@/components/ui/loading-hint";
 import { Skeleton } from "@/components/ui/spinner";
 
 /** Fallback <Suspense> per halaman — bentuknya mengikuti konten asli agar layout tidak melompat. */
@@ -7,6 +8,7 @@ function Busy({ label, children }: { label: string; children: React.ReactNode })
   return (
     <div aria-busy="true" aria-live="polite">
       <span className="sr-only">{label}</span>
+      <LoadingHint label={label} />
       {children}
     </div>
   );

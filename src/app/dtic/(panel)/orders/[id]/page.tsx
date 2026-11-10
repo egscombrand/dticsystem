@@ -1,6 +1,6 @@
 import { canAccessOrder, requireSession } from "@/lib/server/auth";
 import { can } from "@/lib/auth/permissions";
-import { AlarmClock, BellOff, CalendarClock, ExternalLink, FileCheck2, Highlighter, KeyRound, FileText, ListChecks, Paperclip, Pencil, Send, ShieldCheck, Undo2, Users } from "lucide-react";
+import { AlarmClock, BellOff, CalendarClock, ExternalLink, FileCheck2, Highlighter, KeyRound, MessageSquare, FileText, ListChecks, Paperclip, Pencil, Send, ShieldCheck, Undo2, Users } from "lucide-react";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { connection } from "next/server";
@@ -17,6 +17,7 @@ import { WhatsappMessageButton } from "@/components/orders/whatsapp-message";
 import type { WaContext } from "@/lib/smart-whatsapp";
 import { ResultFiles, type ResultFileView } from "@/components/orders/result-files";
 import { ReviewCenter } from "@/components/review/review-center";
+import { ChatPanel } from "@/components/tracking/collab/chat-panel";
 import { awaitingPicClosure, latestResultIds, latestResultLinkIds, resultFileHistory, resultLinksUsed, RESULT_STAGE_LABEL, type ResultStage } from "@/lib/result-status";
 import { listResultFiles, listResultLinks } from "@/lib/server/repositories/results";
 import { ResultLinks, type ResultLinkView } from "@/components/orders/result-links";
@@ -345,6 +346,9 @@ async function OrderDetailContent({ params }: { params: PageProps<"/dtic/orders/
             {completion && (
               <div className="mt-3 rounded-xl bg-ok-soft p-3 text-sm text-ink">
                 <p>Diselesaikan {formatDateTime(completion.at)}{completion.actorName ? ` oleh ${completion.actorName}` : ""}.</p>
+                {completion.detail.withoutReview === true && (
+                  <p className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-warn-soft px-2.5 py-0.5 text-[13px] font-medium text-warn" data-testid="closed-without-review">Ditutup tanpa review</p>
+                )}
                 {completion.summary && <p className="mt-1 whitespace-pre-wrap text-ink-2">{completion.summary}</p>}
               </div>
             )}
@@ -357,6 +361,8 @@ async function OrderDetailContent({ params }: { params: PageProps<"/dtic/orders/
                     orderId={order.id}
                     orderTitle={order.title}
                     orderNumber={order.orderNumber}
+                    senderName={session.name}
+                    reviewed={qcStatus === "approved" || requesterDecision !== "none"}
                     actions={actions}
                     qcStatus={qcStatus}
                     requester={{ name: order.requesterName, whatsapp: order.requesterWhatsapp }}
@@ -509,6 +515,13 @@ async function OrderDetailContent({ params }: { params: PageProps<"/dtic/orders/
                 <DriveArchiveStatus orderId={order.id} state={driveArchiveView} />
               </div>
             )}
+          </Section>
+
+          <Section title="Diskusi dengan Pemohon" icon={<MessageSquare className="size-5 text-accent" aria-hidden="true" />} id="diskusi" testId="internal-chat-section">
+            <p className="-mt-2 mb-4 text-sm text-ink-2">
+              Percakapan ini juga tampil di Riwayat Request pemohon. Pesan pemohon baru muncul otomatis; lampiran gambar atau PDF didukung.
+            </p>
+            <ChatPanel orderNumber={order.orderNumber} orderId={order.id} />
           </Section>
 
           <Section title="Review Center" icon={<Highlighter className="size-5 text-accent" aria-hidden="true" />} id="review" testId="review-center-section">

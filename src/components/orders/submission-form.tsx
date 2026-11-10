@@ -3,6 +3,7 @@
 import { ArrowLeft, ArrowRight, Briefcase, CalendarClock, Camera, Check, CheckCircle2, ClipboardCheck, Copy, ExternalLink, FileText, KeyRound, Link2, Monitor, Palette, Paperclip, Send, Upload, UserRound, Users, Video, X } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
+import { rememberMyRequest } from "@/lib/client/collab-api";
 import { Alert } from "@/components/ui/alert";
 import { cn } from "@/components/ui/cn";
 import { Button } from "@/components/ui/button";
@@ -120,6 +121,9 @@ function ReviewField({ label, value }: { label: string; value: string }) {
 }
 
 /** Field form client. Timestamp, nomor order & status Close diatur sistem/tim DTIC. */
+/** Pesan bila jenis "Lainnya (tulis sendiri)" dipilih tetapi kolom isiannya kosong. */
+const OTHER_TYPE_ERROR = "Sebutkan jenis pekerjaan yang dibutuhkan.";
+
 const TEXT_FIELDS = [
   "requesterName",
   "requesterWhatsapp",
@@ -152,6 +156,10 @@ export function SubmissionReceipt({
 }) {
   const [copied, setCopied] = useState<"idle" | "ok" | "fail">("idle");
   const trackHref = `/riwayat?order=${encodeURIComponent(receipt.orderNumber)}`;
+  // Simpan nomor di browser ini agar muncul di "Request saya" pada halaman Riwayat Request.
+  useEffect(() => {
+    rememberMyRequest(receipt.orderNumber);
+  }, [receipt.orderNumber]);
   async function copy() {
     try {
       await navigator.clipboard.writeText(receipt.orderNumber);
@@ -575,8 +583,10 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
     }
     if (brief && brief.text.trim()) raw.briefDoc = JSON.stringify(brief.json);
     const parsed = orderSubmissionSchema.safeParse({ ...raw, picIds });
-    if (!parsed.success) {
-      const fe = toFieldErrors(parsed.error);
+    // Aturan "Lainnya wajib ditulis" hanya diperiksa server (butuh data jenis) — ditegakkan juga di sini.
+    const fe: FieldErrors = parsed.success ? {} : toFieldErrors(parsed.error);
+    if (requiresDetail && !(raw.designTypeOther ?? "").trim()) Object.assign(fe, { designTypeOther: OTHER_TYPE_ERROR });
+    if (Object.keys(fe).length > 0) {
       setErrors((prev) => (prev.attachments ? { ...fe, attachments: prev.attachments } : fe));
       setPhase({ kind: "error", message: "Ada isian yang perlu diperbaiki. Periksa field bertanda merah." });
       const firstKey = Object.keys(fe)[0];
@@ -784,8 +794,8 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
   const e = errors;
   const totalSize = files.reduce((s, f) => s + f.size, 0);
   const STEP_FIELDS: string[][] = [
-    ["teamId", "designTypeId"],
-    ["requesterName", "requesterWhatsapp", "brandId", "department", "title", "sizePreset", "customWidth", "customHeight", "designTypeOther", "briefDoc", "driveUrl", "attachments"],
+    ["teamId", "designTypeId", "designTypeOther"],
+    ["requesterName", "requesterWhatsapp", "brandId", "department", "title", "sizePreset", "customWidth", "customHeight", "briefDoc", "driveUrl", "attachments"],
     ["picIds", "deadline", "deadlineTime", "priority"],
   ];
   const TEAM_ICON: Record<string, typeof Palette> = { "graphic-design": Palette, "it-system-management": Monitor, "dokumentasi-event": Camera, "editing-kelas-greenskill-id": Video };
@@ -808,9 +818,10 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
   function stepErrors(i: number): FieldErrors {
     const form = formRef.current;
     if (!form) return {};
-    const parsed = orderSubmissionSchema.safeParse({ ...readRaw(form), picIds });
-    if (parsed.success) return {};
-    const all = toFieldErrors(parsed.error) as FieldErrors;
+    const raw = readRaw(form);
+    const parsed = orderSubmissionSchema.safeParse({ ...raw, picIds });
+    const all: FieldErrors = parsed.success ? {} : (toFieldErrors(parsed.error) as FieldErrors);
+    if (requiresDetail && !(raw.designTypeOther ?? "").trim()) Object.assign(all, { designTypeOther: OTHER_TYPE_ERROR });
     return Object.fromEntries(Object.entries(all).filter(([k]) => STEP_FIELDS[i].includes(k))) as FieldErrors;
   }
 
@@ -990,6 +1001,11 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
                 {typesForTeam.map((t) => <option key={t.id} value={t.id}>{t.requiresDetail ? `${t.name} (tulis sendiri)` : t.name}</option>)}
               </Select>
             </Field>
+            {requiresDetail && (
+              <Field label="Sebutkan jenis pekerjaan" htmlFor="designTypeOther" required error={e.designTypeOther} hint="Tuliskan jenis pekerjaan yang Anda butuhkan.">
+                <Input id="designTypeOther" name="designTypeOther" maxLength={60} placeholder="mis. Desain merchandise kaos" autoFocus invalid={!!e.designTypeOther} className="h-11" />
+              </Field>
+            )}
           </fieldset>
         </section>
 
@@ -1030,11 +1046,6 @@ export function SubmissionForm({ brands, orderTypes, priorities, defaultPriority
               </Field>
             ) : (
               team && <input type="hidden" name="sizePreset" value="na" />
-            )}
-            {requiresDetail && (
-              <Field label="Sebutkan jenis desain" htmlFor="designTypeOther" required error={e.designTypeOther}>
-                <Input id="designTypeOther" name="designTypeOther" maxLength={60} placeholder="mis. Desain merchandise kaos" autoFocus invalid={!!e.designTypeOther} className="h-11" />
-              </Field>
             )}
             {sizePreset === "custom" && (
               <div className="grid grid-cols-2 gap-4 sm:col-span-2">

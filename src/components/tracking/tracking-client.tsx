@@ -1,15 +1,23 @@
 "use client";
 
 import { AlertCircle, CheckCircle2, Clock3, Download, Eye, Search, Undo2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { ReviewCenter } from "@/components/review/review-center";
+import { ActivityPanel } from "@/components/tracking/collab/activity-panel";
+import { BriefPanel } from "@/components/tracking/collab/brief-panel";
+import { ChatPanel } from "@/components/tracking/collab/chat-panel";
+import { MyRequests } from "@/components/tracking/collab/my-requests";
+import { ReferencesPanel } from "@/components/tracking/collab/references-panel";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { Field, Input, Textarea } from "@/components/ui/form";
 import { Modal } from "@/components/ui/modal";
 import { ApiError, internalRequest } from "@/lib/client/api";
+import { collabGet, rememberMyRequest } from "@/lib/client/collab-api";
+import { badgeLabels, type OrderBadges } from "@/lib/collab";
 import { formatDateTime, formatLongDate } from "@/lib/dates";
+import type { CollabSection } from "@/lib/server/services/collab";
 import { PREVIEWABLE_MIME } from "@/lib/files";
 import type { OrderStatus } from "@/lib/status";
 import { clientStatusLabel, trackingStages } from "@/lib/tracking-labels";
@@ -374,6 +382,232 @@ function DeliveriesSection({ view, onDecided }: { view: TrackingView; onDecided:
   );
 }
 
+type TabId = "summary" | "brief" | "chat" | "deadline" | "files" | "activity";
+
+const TABS: { id: TabId; label: string }[] = [
+  { id: "summary", label: "Ringkasan" },
+  { id: "brief", label: "Brief" },
+  { id: "chat", label: "Diskusi dengan PIC" },
+  { id: "deadline", label: "Deadline & Kesepakatan" },
+  { id: "files", label: "File & Hasil" },
+  { id: "activity", label: "Aktivitas" },
+];
+
+/** Tab awal yang paling berguna: ada keputusan menunggu Pemohon → langsung ke sana (tombol aksi tidak tersembunyi). */
+function initialTab(view: TrackingView): TabId {
+  if (view.deadlineAgreement.pending) return "deadline";
+  if (view.deliveries.some((d) => d.decision === "awaiting")) return "files";
+  return "summary";
+}
+
+const BADGE_POLL_MS = 30_000;
+
+function TrackingDetail({ view, onView, onRefresh, onBack }: { view: TrackingView; onView: (v: TrackingView) => void; onRefresh: () => void; onBack: () => void }) {
+  const [tab, setTab] = useState<TabId>(() => initialTab(view));
+  const [badges, setBadges] = useState<OrderBadges | null>(null);
+  const [collab, setCollab] = useState<CollabSection | null>(null);
+  const [collabError, setCollabError] = useState<string | null>(null);
+  const tabRefs = useRef<Partial<Record<TabId, HTMLButtonElement | null>>>({});
+  const order = view.orderNumber;
+
+  const loadBadges = useCallback(async () => {
+    try {
+      const res = await collabGet<{ badges: OrderBadges[] }>(`/api/public/tracking/badges?orders=${encodeURIComponent(order)}`);
+      setBadges(res.badges[0] ?? null);
+    } catch {
+      // penanda hanya pelengkap
+    }
+  }, [order]);
+
+  const loadCollab = useCallback(async () => {
+    try {
+      setCollab(await collabGet<CollabSection>(`/api/public/tracking/collab?order=${encodeURIComponent(order)}`));
+      setCollabError(null);
+    } catch (e) {
+      setCollabError(e instanceof Error ? e.message : "Data belum dapat dimuat.");
+    }
+  }, [order]);
+
+  // Penanda tab (pesan baru, deadline menunggu, hasil baru): polling pelan, berhenti saat tab browser tersembunyi.
+  useEffect(() => {
+    let stopped = false;
+    let timer: number | undefined;
+    async function tick() {
+      if (stopped) return;
+      if (!document.hidden) await loadBadges();
+      if (!stopped) timer = window.setTimeout(() => void tick(), BADGE_POLL_MS);
+    }
+    timer = window.setTimeout(() => void tick(), 0);
+    return () => {
+      stopped = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [loadBadges]);
+
+  // Brief/berkas/aktivitas dimuat saat tab terkait dibuka (dan dimuat ulang setiap kali dibuka kembali).
+  useEffect(() => {
+    if (tab !== "brief" && tab !== "files" && tab !== "activity") return;
+    const t = window.setTimeout(() => void loadCollab(), 0);
+    return () => window.clearTimeout(t);
+  }, [tab, loadCollab]);
+
+  // Membuka "File & Hasil" menandai hasil/draf baru sebagai sudah dilihat.
+  useEffect(() => {
+    if (tab !== "files") return;
+    const t = window.setTimeout(() => {
+      void internalRequest("/api/public/tracking/collab", "POST", { order, action: "results_seen" }).then(() => loadBadges()).catch(() => undefined);
+    }, 0);
+    return () => window.clearTimeout(t);
+  }, [tab, order, loadBadges]);
+
+  function onTabKey(e: KeyboardEvent<HTMLButtonElement>, i: number) {
+    const dir = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+    if (!dir && e.key !== "Home" && e.key !== "End") return;
+    e.preventDefault();
+    const next = e.key === "Home" ? 0 : e.key === "End" ? TABS.length - 1 : (i + dir + TABS.length) % TABS.length;
+    setTab(TABS[next].id);
+    tabRefs.current[TABS[next].id]?.focus();
+  }
+
+  const tabBadge = (id: TabId): number => (!badges ? 0 : id === "chat" ? badges.unreadMessages : id === "deadline" ? (badges.awaitingDeadline ? 1 : 0) : id === "files" ? badges.newResults + (badges.awaitingClarification ? 1 : 0) : 0);
+  const attention = badges ? badgeLabels(badges) : [];
+
+  let panel: ReactNode;
+  if (tab === "summary") {
+    panel = (
+      <div className="flex flex-col gap-6">
+        {attention.length > 0 && (
+          <section className="rounded-2xl border border-teal/30 bg-teal/5 p-4 sm:p-5" data-testid="attention-summary" aria-label="Perlu perhatian Anda">
+            <p className="text-[13px] font-semibold text-navy">Perlu perhatian Anda</p>
+            <ul className="mt-2 flex flex-wrap gap-2">
+              {attention.map((a) => (
+                <li key={a} className="rounded-full bg-surface px-3 py-1 text-[12.5px] text-ink shadow-sm">{a}</li>
+              ))}
+            </ul>
+          </section>
+        )}
+        <section data-tour="riwayat-status" className="rounded-2xl border border-line bg-surface p-5 shadow-card sm:p-7" aria-labelledby="progress-title">
+          <div className="mb-5 flex flex-wrap items-center justify-between gap-2">
+            <h2 id="progress-title" className="text-[15px] font-semibold text-navy">Progres request</h2>
+            <span className="rounded-full bg-teal/10 px-3 py-1 text-xs font-semibold text-teal">{clientStatusLabel(view.status, view.awaitingSubmissionToRequester).label}</span>
+          </div>
+          <Timeline view={view} />
+        </section>
+
+        {view.awaitingSubmissionToRequester && (
+          <Alert kind="info">Hasil sudah disetujui secara internal. Tim DTIC akan mengajukan hasil final kepada Anda sebentar lagi.</Alert>
+        )}
+
+        {view.awaitingClosure && (
+          <Alert kind="info">Anda sudah menyetujui hasil ini — tim DTIC sedang menyelesaikan proses penutupan pekerjaan.</Alert>
+        )}
+
+        {view.requesterMessage && (
+          <section className="rounded-2xl border border-teal/25 bg-teal/5 p-5 sm:p-6" aria-labelledby="msg-title">
+            <h2 id="msg-title" className="text-[15px] font-semibold text-navy">Pesan dari tim DTIC</h2>
+            <p className="mt-2 text-sm leading-relaxed whitespace-pre-wrap text-ink">{view.requesterMessage}</p>
+          </section>
+        )}
+
+        {view.resultUrl && (
+          <section className="rounded-2xl border border-line bg-surface p-5 shadow-card sm:p-6" aria-labelledby="result-title">
+            <h2 id="result-title" className="text-[15px] font-semibold text-navy">Hasil pekerjaan</h2>
+            <a href={view.resultUrl} target="_blank" rel="noopener noreferrer nofollow" referrerPolicy="no-referrer" className="mt-2 inline-block break-all text-sm font-medium text-teal hover:underline">
+              Buka hasil pekerjaan
+            </a>
+          </section>
+        )}
+      </div>
+    );
+  } else if (tab === "chat") {
+    panel = <ChatPanel orderNumber={order} onRead={loadBadges} />;
+  } else if (tab === "deadline") {
+    panel = <DeadlineAgreementSection view={view} onDecided={(next) => { onView(next); void loadBadges(); }} />;
+  } else if (tab === "files") {
+    panel = (
+      <div className="flex flex-col gap-6">
+        {collab ? (
+          <ReferencesPanel orderNumber={order} references={collab.references} closed={view.isClosed} onChanged={() => void loadCollab()} />
+        ) : (
+          <p className="text-sm text-ink-3">{collabError ?? "Memuat berkas…"}</p>
+        )}
+        <DeliveriesSection view={view} onDecided={(next) => { onView(next); void loadBadges(); }} />
+        {view.deliveries.length > 0 && (
+          <section data-testid="review-section" data-tour="riwayat-review" className="rounded-2xl border border-line bg-surface p-5 shadow-card sm:p-7" aria-labelledby="review-title">
+            <h2 id="review-title" className="text-[15px] font-semibold text-navy">Review Center</h2>
+            <p className="mt-1 mb-4 text-[13px] text-ink-2">
+              Buka hasil di sini, beri highlight dan komentar pada bagian yang perlu diperbaiki, lalu ajukan sebagai Request Revisi. Anda juga dapat berdiskusi dengan PIC pada setiap highlight.
+            </p>
+            <ReviewCenter key={view.deliveries.some((d) => d.decision === "approved") ? "approved" : "open"} mode="requester" orderRef={order} onOrderChanged={onRefresh} />
+          </section>
+        )}
+      </div>
+    );
+  } else if (!collab) {
+    panel = <p className="text-sm text-ink-3" data-testid="collab-loading">{collabError ?? "Memuat…"}</p>;
+  } else if (tab === "brief") {
+    panel = <BriefPanel orderNumber={order} data={collab} onChanged={() => void loadCollab()} />;
+  } else {
+    panel = <ActivityPanel items={collab.activity} />;
+  }
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div className="rounded-2xl border border-line bg-surface p-5 shadow-card sm:p-7">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-xs font-medium tracking-wide text-ink-3 uppercase">Nomor order</p>
+            <p className="mt-1 font-mono text-xl font-semibold text-navy">{view.orderNumber}</p>
+          </div>
+          <Button variant="ghost" size="sm" onClick={onBack}>Cari nomor lain</Button>
+        </div>
+        <dl className="mt-5 grid grid-cols-2 gap-x-6 gap-y-3 text-[13px] sm:grid-cols-5">
+          <div><dt className="text-ink-3">Tanggal pengajuan</dt><dd className="font-medium text-ink">{formatDateTime(view.createdAt)}</dd></div>
+          <div><dt className="text-ink-3">Brand pemohon</dt><dd className="font-medium text-ink">{view.brandName}</dd></div>
+          <div><dt className="text-ink-3">Jenis order</dt><dd className="font-medium text-ink">{view.designType}</dd></div>
+          <div><dt className="text-ink-3">Deadline</dt><dd className="font-medium text-ink">{formatLongDate(view.deadlineAt)}</dd></div>
+          <div><dt className="text-ink-3">PIC</dt><dd className="font-medium text-ink">{view.picNames.length ? view.picNames.join(", ") : "Belum ada PIC"}</dd></div>
+        </dl>
+      </div>
+
+      <div role="tablist" aria-label="Bagian request" className="-mx-1 flex gap-1 overflow-x-auto px-1 pb-1" data-testid="tracking-tabs">
+        {TABS.map((t, i) => {
+          const n = tabBadge(t.id);
+          const active = tab === t.id;
+          return (
+            <button
+              key={t.id}
+              ref={(el) => { tabRefs.current[t.id] = el; }}
+              type="button"
+              role="tab"
+              id={`tab-${t.id}`}
+              aria-selected={active}
+              aria-controls="tracking-panel"
+              tabIndex={active ? 0 : -1}
+              data-testid={`tab-${t.id}`}
+              onClick={() => setTab(t.id)}
+              onKeyDown={(e) => onTabKey(e, i)}
+              className={cn(
+                "inline-flex shrink-0 items-center gap-2 rounded-full border px-4 py-2 text-[13px] font-semibold whitespace-nowrap transition-colors",
+                active ? "border-navy bg-navy text-white" : "border-line bg-surface text-ink-2 hover:border-teal/50 hover:text-ink",
+              )}
+            >
+              {t.label}
+              {n > 0 && (
+                <span data-testid={`tab-badge-${t.id}`} className="inline-flex min-w-5 items-center justify-center rounded-full bg-bad px-1.5 text-[11px] leading-5 font-bold text-white" aria-label={`${n} baru`}>{n}</span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      <div role="tabpanel" id="tracking-panel" aria-labelledby={`tab-${tab}`} tabIndex={-1}>
+        {panel}
+      </div>
+    </div>
+  );
+}
+
 export function TrackingClient({ initialOrderNumber }: { initialOrderNumber?: string }) {
   const [orderNumber, setOrderNumber] = useState(initialOrderNumber ?? "");
   const [pending, setPending] = useState(false);
@@ -397,6 +631,7 @@ export function TrackingClient({ initialOrderNumber }: { initialOrderNumber?: st
       const data = await internalRequest<TrackingView>("/api/public/tracking", "POST", { orderNumber: o });
       setView(data);
       setOrderNumber(o);
+      rememberMyRequest(o);
     } catch (err) {
       setView(null);
       setError(
@@ -415,74 +650,18 @@ export function TrackingClient({ initialOrderNumber }: { initialOrderNumber?: st
 
   if (view) {
     return (
-      <div className="flex flex-col gap-6">
-        <div className="rounded-2xl border border-line bg-surface p-5 shadow-card sm:p-7">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <p className="text-xs font-medium tracking-wide text-ink-3 uppercase">Nomor order</p>
-              <p className="mt-1 font-mono text-xl font-semibold text-navy">{view.orderNumber}</p>
-            </div>
-            <Button variant="ghost" size="sm" onClick={() => { setView(null); setError(null); }}>Cari nomor lain</Button>
-          </div>
-          <dl className="mt-5 grid grid-cols-2 gap-x-6 gap-y-3 text-[13px] sm:grid-cols-5">
-            <div><dt className="text-ink-3">Tanggal pengajuan</dt><dd className="font-medium text-ink">{formatDateTime(view.createdAt)}</dd></div>
-            <div><dt className="text-ink-3">Brand pemohon</dt><dd className="font-medium text-ink">{view.brandName}</dd></div>
-            <div><dt className="text-ink-3">Jenis order</dt><dd className="font-medium text-ink">{view.designType}</dd></div>
-            <div><dt className="text-ink-3">Deadline</dt><dd className="font-medium text-ink">{formatLongDate(view.deadlineAt)}</dd></div>
-            <div><dt className="text-ink-3">PIC</dt><dd className="font-medium text-ink">{view.picNames.length ? view.picNames.join(", ") : "Belum ada PIC"}</dd></div>
-          </dl>
-        </div>
-
-        <section data-tour="riwayat-status" className="rounded-2xl border border-line bg-surface p-5 shadow-card sm:p-7" aria-labelledby="progress-title">
-          <div className="mb-5 flex flex-wrap items-center justify-between gap-2">
-            <h2 id="progress-title" className="text-[15px] font-semibold text-navy">Progres request</h2>
-            <span className="rounded-full bg-teal/10 px-3 py-1 text-xs font-semibold text-teal">{clientStatusLabel(view.status, view.awaitingSubmissionToRequester).label}</span>
-          </div>
-          <Timeline view={view} />
-        </section>
-
-        {view.awaitingSubmissionToRequester && (
-          <Alert kind="info">Hasil sudah disetujui secara internal. Tim DTIC akan mengajukan hasil final kepada Anda sebentar lagi.</Alert>
-        )}
-
-        {view.awaitingClosure && (
-          <Alert kind="info">Anda sudah menyetujui hasil ini — tim DTIC sedang menyelesaikan proses penutupan pekerjaan.</Alert>
-        )}
-
-        <DeadlineAgreementSection view={view} onDecided={setView} />
-
-        <DeliveriesSection view={view} onDecided={setView} />
-
-        {view.deliveries.length > 0 && (
-          <section data-testid="review-section" data-tour="riwayat-review" className="rounded-2xl border border-line bg-surface p-5 shadow-card sm:p-7" aria-labelledby="review-title">
-            <h2 id="review-title" className="text-[15px] font-semibold text-navy">Review Center</h2>
-            <p className="mt-1 mb-4 text-[13px] text-ink-2">
-              Buka hasil di sini, beri highlight dan komentar pada bagian yang perlu diperbaiki, lalu ajukan sebagai Request Revisi. Anda juga dapat berdiskusi dengan PIC pada setiap highlight.
-            </p>
-            <ReviewCenter key={view.deliveries.some((d) => d.decision === "approved") ? "approved" : "open"} mode="requester" orderRef={view.orderNumber} onOrderChanged={() => void lookup(view.orderNumber)} />
-          </section>
-        )}
-
-        {view.requesterMessage && (
-          <section className="rounded-2xl border border-teal/25 bg-teal/5 p-5 sm:p-6" aria-labelledby="msg-title">
-            <h2 id="msg-title" className="text-[15px] font-semibold text-navy">Pesan dari tim DTIC</h2>
-            <p className="mt-2 text-sm leading-relaxed whitespace-pre-wrap text-ink">{view.requesterMessage}</p>
-          </section>
-        )}
-
-        {view.resultUrl && (
-          <section className="rounded-2xl border border-line bg-surface p-5 shadow-card sm:p-6" aria-labelledby="result-title">
-            <h2 id="result-title" className="text-[15px] font-semibold text-navy">Hasil pekerjaan</h2>
-            <a href={view.resultUrl} target="_blank" rel="noopener noreferrer nofollow" referrerPolicy="no-referrer" className="mt-2 inline-block break-all text-sm font-medium text-teal hover:underline">
-              Buka hasil pekerjaan
-            </a>
-          </section>
-        )}
-      </div>
+      <TrackingDetail
+        key={view.orderNumber}
+        view={view}
+        onView={setView}
+        onRefresh={() => void lookup(view.orderNumber)}
+        onBack={() => { setView(null); setError(null); }}
+      />
     );
   }
 
   return (
+    <>
     <form
       className="mx-auto max-w-xl rounded-2xl border border-line bg-surface p-5 shadow-card sm:p-7"
       onSubmit={(e) => {
@@ -519,5 +698,7 @@ export function TrackingClient({ initialOrderNumber }: { initialOrderNumber?: st
       </div>
       {!view && !error && !pending && <Alert kind="info" className="mt-5">Data diambil langsung dari sistem DTIC. Riwayat tampil setelah nomor order ditemukan.</Alert>}
     </form>
+    <MyRequests onOpen={(n) => { setOrderNumber(n); void lookup(n); }} />
+    </>
   );
 }

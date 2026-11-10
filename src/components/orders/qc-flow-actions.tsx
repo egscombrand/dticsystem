@@ -1,6 +1,6 @@
 "use client";
 
-import { CheckCircle2, ExternalLink, FileUp, FolderOpen, KeyRound, Link2, MessageCircle, MessageSquareReply, Paperclip, Plus, Send, ShieldCheck, Undo2, UserCheck, Users } from "lucide-react";
+import { CheckCircle2, Copy, FileUp, FolderOpen, KeyRound, Link2, MessageCircle, MessageSquareReply, Paperclip, Plus, Send, ShieldCheck, Undo2, UserCheck, Users } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useId, useRef, useState } from "react";
 import { Alert } from "@/components/ui/alert";
@@ -9,7 +9,7 @@ import { cn } from "@/components/ui/cn";
 import { Field, Input, Select, Textarea } from "@/components/ui/form";
 import { Modal } from "@/components/ui/modal";
 import { ApiError, internalRequest } from "@/lib/client/api";
-import { ACTION_LABEL, COMPLETION_NOTE_MIN, DELIVERY_STAGE_LABEL, EXTERNAL_NOTE_MIN, HANDOVER_CHANNEL_LABEL, HANDOVER_CHANNELS, QC_STATUS_LABEL, type DeliveryStage, type HandoverChannel, type QcStatus, type WorkflowAction } from "@/lib/qc";
+import { ACTION_LABEL, COMPLETION_NOTE_MIN, EXTERNAL_NOTE_MIN, HANDOVER_CHANNEL_LABEL, HANDOVER_CHANNELS, QC_STATUS_LABEL, SELECTABLE_HANDOVER_CHANNELS, type DeliveryStage, type HandoverChannel, type QcStatus, type WorkflowAction } from "@/lib/qc";
 import { formatWhatsappDisplay, whatsappLink } from "@/lib/whatsapp";
 import { formatFileSize } from "@/lib/files";
 import { ResultUploader, type UploadedResult } from "@/components/orders/result-uploader";
@@ -49,6 +49,8 @@ export function QcFlowActions({
   orderId,
   orderTitle,
   orderNumber,
+  senderName,
+  reviewed,
   actions,
   qcStatus,
   requester,
@@ -64,6 +66,10 @@ export function QcFlowActions({
   orderId: string;
   orderTitle: string;
   orderNumber: string;
+  /** Nama akun yang login — dicantumkan sebagai pengirim pesan WhatsApp ke pemohon. */
+  senderName: string;
+  /** Sudah ada review nyata: Manager menyetujui atau hasil sudah diserahkan ke pemohon. */
+  reviewed: boolean;
   actions: WorkflowAction[];
   qcStatus: QcStatus;
   requester: { name: string; whatsapp: string | null };
@@ -90,9 +96,11 @@ export function QcFlowActions({
   const [dest, setDest] = useState<Destination | null>(null);
   const [note, setNote] = useState("");
   const [link, setLink] = useState("");
-  const [stage, setStage] = useState<DeliveryStage | "">("");
+  const [messageDraft, setMessageDraft] = useState<string | null>(null);
+  const [closingDraft, setClosingDraft] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [origin, setOrigin] = useState("");
   const [handedAt, setHandedAt] = useState("");
-  const [confirmSent, setConfirmSent] = useState(false);
   const [needsRevision, setNeedsRevision] = useState<boolean | null>(null);
   // Checklist penyelesaian (dialog "complete") — SEMUA harus dicentang sebelum pekerjaan benar-benar
   // ditutup, supaya PIC tidak menutup hanya karena QC sudah disetujui (lihat CLOSURE_CHECKLIST di bawah).
@@ -143,6 +151,41 @@ export function QcFlowActions({
   const canManager = actions.includes("submit_qc");
   const canRequester = actions.includes("record_delivery");
 
+  /** Tahap hasil ditentukan sistem dari status QC — PIC tidak perlu memilih. */
+  const stage: DeliveryStage = qcStatus === "approved" ? "final" : qcStatus === "revision" ? "revision" : "draft";
+  const waNumber = requester.whatsapp;
+  /** File yang ikut diserahkan — tautan unduhnya disisipkan ke pesan (WhatsApp tidak bisa melampirkan file dari tautan). */
+  const sendFiles: { id: string; fileName: string }[] =
+    attachMode === "existing" ? existingResults.filter((r) => picked.has(r.id)) : attachMode === "upload" ? uploaded : [];
+  const defaultMessage = [
+    `Halo ${requester.name}, hasil pekerjaan "${orderTitle}" (${orderNumber}) sudah siap.`,
+    ...(sendFiles.length > 0 && origin ? [["File hasil:", ...sendFiles.map((f) => `• ${f.fileName}: ${origin}/api/public/tracking/files/${f.id}?order=${encodeURIComponent(orderNumber)}`)].join("\n")] : []),
+    ...(links.some((l) => pickedLinks.has(l.id)) ? [["Tautan hasil:", ...links.filter((l) => pickedLinks.has(l.id)).map((l) => `• ${l.title}: ${l.url}`)].join("\n")] : []),
+    ...(origin ? [`Lihat riwayat dan beri tanggapan di: ${origin}/riwayat?order=${encodeURIComponent(orderNumber)}`] : []),
+    "Silakan diperiksa. Bila ada masukan atau revisi, kabari kami lewat riwayat pengajuan atau balas pesan ini. Terima kasih.",
+    `— ${senderName}, Tim DTIC`,
+  ].join("\n\n");
+  const message = messageDraft ?? defaultMessage;
+  const defaultClosing = [
+    `Halo ${requester.name}, pekerjaan "${orderTitle}" (${orderNumber}) sudah kami selesaikan.`,
+    "Terima kasih atas kerja samanya. Bila masih ada yang dibutuhkan, silakan ajukan request baru atau hubungi kami kembali.",
+    `— ${senderName}, Tim DTIC`,
+  ].join("\n\n");
+  const closingMessage = closingDraft ?? defaultClosing;
+
+  async function copyClosing() {
+    try {
+      await navigator.clipboard.writeText(closingMessage.trim());
+    } catch {
+      // Cadangan untuk konteks tanpa Clipboard API: pilih teks di kotak agar bisa disalin manual.
+      document.getElementById(`${uid}-closing`)?.focus();
+      (document.getElementById(`${uid}-closing`) as HTMLTextAreaElement | null)?.select();
+      return;
+    }
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 2000);
+  }
+
   function open(next: Exclude<Dialog, null>) {
     keyRef.current = crypto.randomUUID();
     setError(null);
@@ -150,10 +193,12 @@ export function QcFlowActions({
     setClosureChecks(CLOSURE_CHECKLIST.map(() => false));
     setFlash(null);
     setNote("");
-    setLink(next === "handover" || next === "complete" ? (lastLink ?? "") : "");
-    setStage("");
+    setLink(next === "complete" || (next === "handover" && canManager) ? (lastLink ?? "") : "");
+    setMessageDraft(null);
+    setClosingDraft(null);
+    setCopied(false);
+    setOrigin(window.location.origin);
     setHandedAt("");
-    setConfirmSent(false);
     setNeedsRevision(null);
     setUploaded([]);
     setUploading(false);
@@ -178,6 +223,14 @@ export function QcFlowActions({
     if (!busy) setDialog(null);
   }
 
+  /** WhatsApp dibuka SEKARANG (di dalam klik) agar tidak diblokir popup, lalu penyerahan dicatat. */
+  function confirm() {
+    if (dialog === "handover" && dest === "requester" && waNumber) {
+      window.open(`${whatsappLink(waNumber)}?text=${encodeURIComponent(message.trim())}`, "_blank", "noopener,noreferrer");
+    }
+    void submit();
+  }
+
   async function submit() {
     if (!dialog) return;
     setBusy(true);
@@ -186,13 +239,13 @@ export function QcFlowActions({
     let body: Record<string, unknown>;
     let done: string;
     if (dialog === "handover") {
-      const common = { link: link.trim() || undefined, note: note.trim() || undefined, stage: stage || undefined };
+      const common = { link: link.trim() || undefined, note: note.trim() || undefined, stage };
       body =
         dest === "manager"
           ? resultIds.length > 0 || linkIds.length > 0
             ? { action: "submit_qc", method: "in_app", resultFileIds: resultIds, resultLinkIds: linkIds, handedAt: wibToIso(handedAt), ...common }
             : { action: "submit_qc", method: "external", channel: channel || undefined, recipient: recipient.trim() || undefined, handedAt: wibToIso(handedAt), ...common }
-          : { action: "record_delivery", confirmSent, channel: channel || undefined, resultFileIds: resultIds, resultLinkIds: linkIds, sentAt: wibToIso(handedAt), ...common };
+          : { action: "record_delivery", confirmSent: true, channel: waNumber ? "whatsapp" : channel || undefined, resultFileIds: resultIds, resultLinkIds: linkIds, ...common };
       done = dest === "manager" ? "Hasil diajukan ke Manager untuk diperiksa." : "Penyerahan ke pemohon tercatat.";
     } else if (dialog === "record_feedback") {
       body = { action: dialog, needsRevision, note: note.trim() };
@@ -229,7 +282,7 @@ export function QcFlowActions({
         // keduanya → keterangan penyerahan di luar aplikasi wajib.
         return resultIds.length > 0 || linkIds.length > 0 || (channel !== "" && note.trim().length >= EXTERNAL_NOTE_MIN);
       }
-      if (dest === "requester") return confirmSent && linkOk;
+      if (dest === "requester") return linkOk && (!waNumber || message.trim().length > 0);
       return false;
     }
     if (dialog === "request_revision" || dialog === "request_access") return note.trim().length > 0;
@@ -239,7 +292,7 @@ export function QcFlowActions({
   })();
 
   const titles: Record<Exclude<Dialog, null>, { title: string; description: string; confirm: string }> = {
-    handover: { title: "Pilih Tujuan Penyerahan Hasil", description: "Catat penyerahan hasil sesuai tujuan sebenarnya. File tidak harus diunggah ulang jika sudah diserahkan melalui media lain.", confirm: dest === "requester" ? "Konfirmasi Penyerahan" : dest === "manager" ? "Ajukan QC" : "Pilih tujuan" },
+    handover: { title: "Pilih Tujuan Penyerahan Hasil", description: "Siapkan hasil dan pesan untuk pemohon, periksa pratinjaunya, lalu kirim. Penyerahan tercatat saat Anda menekan tombol kirim.", confirm: dest === "requester" ? (waNumber ? "Kirim lewat WhatsApp" : "Catat Penyerahan") : dest === "manager" ? "Ajukan QC" : "Pilih tujuan" },
     withdraw_qc: { title: "Tarik pengajuan QC?", description: "Pengajuan dibatalkan dan pekerjaan kembali ke Sedang Dikerjakan. Riwayat pengajuan tetap tersimpan.", confirm: "Tarik Pengajuan" },
     approve_qc: { title: "Setujui hasil?", description: "Persetujuan tercatat atas nama Anda. PIC dapat melanjutkan pengiriman ke pemohon atau menyelesaikan pekerjaan.", confirm: "Ya, Setujui" },
     request_access: { title: "Minta file atau akses", description: "Gunakan bila hasil belum dapat diperiksa (file belum diterima atau tidak bisa dibuka). Pengajuan dikembalikan ke PIC tanpa keputusan atas hasil.", confirm: "Kirim Permintaan" },
@@ -357,6 +410,9 @@ export function QcFlowActions({
           if (a === "request_revision") return <Button key={a} variant="danger" icon={<Undo2 className="size-4" />} onClick={() => open("request_revision")} className="w-full justify-center">{ACTION_LABEL.request_revision}</Button>;
           if (a === "record_feedback") return <Button key={a} variant="secondary" icon={<MessageSquareReply className="size-4" />} onClick={() => open("record_feedback")} className="w-full justify-center">{ACTION_LABEL.record_feedback}</Button>;
           if (a === "withdraw_qc") return <Button key={a} variant="ghost" size="sm" icon={<Undo2 className="size-4" />} onClick={() => open("withdraw_qc")} className="justify-center">{ACTION_LABEL.withdraw_qc}</Button>;
+          // Belum ada review: jalur utama adalah Ajukan QC / serahkan ke pemohon; menutup langsung dibuat
+          // kurang menonjol dan diberi label jujur agar tidak ditekan karena mengira "sudah selesai".
+          if (!reviewed) return <Button key={a} variant="ghost" size="sm" icon={<CheckCircle2 className="size-4" />} onClick={() => open("complete")} className="justify-center">Selesaikan tanpa review</Button>;
           return <Button key={a} variant="secondary" icon={<CheckCircle2 className="size-4" />} onClick={() => open("complete")} className="w-full justify-center">{ACTION_LABEL.complete}</Button>;
         })}
         {!canManager && canRequester && (
@@ -377,7 +433,7 @@ export function QcFlowActions({
         footer={
           <>
             <Button variant="secondary" onClick={close} disabled={busy}>Batal</Button>
-            <Button onClick={submit} loading={busy} disabled={!canConfirm} variant={dialog === "request_revision" ? "danger" : "primary"}>{t?.confirm}</Button>
+            <Button onClick={confirm} loading={busy} disabled={!canConfirm} variant={dialog === "request_revision" ? "danger" : "primary"}>{t?.confirm}</Button>
           </>
         }
       >
@@ -425,22 +481,14 @@ export function QcFlowActions({
                       <p className="text-[13px] text-ink-2 sm:col-span-2">Mengajukan QC belum berarti disetujui. Manager dapat menyetujui, meminta revisi, atau meminta file/akses bila belum bisa memeriksa.</p>
                     </div>
                   ) : (
-                    <div className="flex flex-col gap-2">
-                      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-                        <p><span className="text-ink-2">Pemohon:</span> <span className="font-medium text-ink">{requester.name}</span></p>
-                        {requester.whatsapp ? (
-                          <p className="flex flex-wrap items-center gap-2">
-                            <span className="font-mono text-ink">{formatWhatsappDisplay(requester.whatsapp)}</span>
-                            <a href={whatsappLink(requester.whatsapp)} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 rounded-md border border-line-strong bg-surface px-2 py-0.5 text-[13px] font-medium text-accent hover:bg-accent-soft">
-                              <MessageCircle className="size-3.5" aria-hidden="true" /> Buka WhatsApp <ExternalLink className="size-3" aria-hidden="true" />
-                            </a>
-                          </p>
-                        ) : (
-                          <p className="text-ink-2">Nomor WhatsApp pemohon belum tersedia (pengajuan lama).</p>
-                        )}
-                        <p><span className="text-ink-2">Status QC:</span> <span className="font-medium text-ink">{QC_STATUS_LABEL[qcStatus]}</span></p>
-                      </div>
-                      <p className="text-[13px] text-ink-2">Membuka WhatsApp tidak mengirim pesan dan tidak mencatat penyerahan.{qcStatus !== "approved" ? " Penyerahan langsung tidak berarti QC Manager disetujui." : ""}</p>
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                      <p><span className="text-ink-2">Pemohon:</span> <span className="font-medium text-ink">{requester.name}</span></p>
+                      {waNumber ? (
+                        <p className="font-mono text-ink">{formatWhatsappDisplay(waNumber)}</p>
+                      ) : (
+                        <p className="text-ink-2">Nomor WhatsApp pemohon belum tersedia (pengajuan lama).</p>
+                      )}
+                      <p><span className="text-ink-2">Status QC:</span> <span className="font-medium text-ink">{QC_STATUS_LABEL[qcStatus]}</span></p>
                     </div>
                   )}
                 </section>
@@ -492,45 +540,29 @@ export function QcFlowActions({
 
               {dest === "requester" && (
                 <section className="flex flex-col gap-4" aria-labelledby={`${uid}-info`}>
-                  <h3 id={`${uid}-info`} className="text-sm font-semibold text-ink">Informasi penyerahan</h3>
-                  <div className="grid gap-4 sm:grid-cols-2">
-                    <Field label="Tahap hasil" htmlFor={`${uid}-stage`}>
-                      <Select id={`${uid}-stage`} value={stage} onChange={(e) => setStage(e.target.value as DeliveryStage | "")} disabled={busy}>
-                        <option value="">Tidak ditentukan</option>
-                        {(Object.keys(DELIVERY_STAGE_LABEL) as DeliveryStage[]).map((v) => <option key={v} value={v}>{DELIVERY_STAGE_LABEL[v]}</option>)}
-                      </Select>
-                    </Field>
-                    <Field label="Waktu penyerahan (WIB)" htmlFor={`${uid}-at`} error={fieldError.handedAt ?? fieldError.sentAt} hint="Kosongkan bila tidak diketahui. Waktu pencatatan disimpan terpisah.">
-                      <Input id={`${uid}-at`} type="datetime-local" value={handedAt} onChange={(e) => setHandedAt(e.target.value)} disabled={busy} />
-                    </Field>
-                    <Field label="Media penyerahan" htmlFor={`${uid}-ch`} error={fieldError.channel} hint="Opsional.">
+                  <h3 id={`${uid}-info`} className="text-sm font-semibold text-ink">Pratinjau pesan{waNumber ? " WhatsApp" : ""}</h3>
+                  {waNumber ? (
+                    <div className="rounded-xl bg-[#e7f5ec] p-3" data-testid="wa-preview">
+                      <p className="mb-2 flex items-center gap-1.5 text-xs font-medium text-ink-2"><MessageCircle className="size-3.5" aria-hidden="true" /> Ke {requester.name} · {formatWhatsappDisplay(waNumber)}</p>
+                      <Textarea aria-label="Isi pesan WhatsApp" value={message} onChange={(e) => setMessageDraft(e.target.value)} maxLength={1500} disabled={busy} className="min-h-40 bg-white" />
+                      <p className="mt-2 text-[13px] text-ink-2">Anda dapat mengubah pesan. WhatsApp akan terbuka dengan pesan ini; tekan kirim di WhatsApp untuk menyelesaikannya.</p>
+                    </div>
+                  ) : (
+                    <Field label="Media penyerahan" htmlFor={`${uid}-ch`} error={fieldError.channel}>
                       <Select id={`${uid}-ch`} value={channel} onChange={(e) => setChannel(e.target.value as HandoverChannel | "")} disabled={busy}>
                         <option value="">Pilih media</option>
-                        {HANDOVER_CHANNELS.map((c) => <option key={c} value={c}>{c === "direct" ? "Langsung kepada pemohon" : HANDOVER_CHANNEL_LABEL[c]}</option>)}
+                        {SELECTABLE_HANDOVER_CHANNELS.map((c) => <option key={c} value={c}>{c === "direct" ? "Langsung kepada pemohon" : HANDOVER_CHANNEL_LABEL[c]}</option>)}
                       </Select>
                     </Field>
-                    <div className="hidden sm:block" />
-                    <Field label="Tautan eksternal yang diserahkan" htmlFor={`${uid}-link`} error={fieldError.link} hint="Opsional." className="sm:col-span-2">
-                      <Input id={`${uid}-link`} type="url" inputMode="url" placeholder="https://" value={link} onChange={(e) => setLink(e.target.value)} disabled={busy} />
-                    </Field>
-                    <Field label="Catatan penyerahan (internal)" htmlFor={`${uid}-note`} error={fieldError.note} hint="Tidak terlihat oleh pemohon." className="sm:col-span-2">
-                      <Textarea id={`${uid}-note`} value={note} onChange={(e) => setNote(e.target.value)} maxLength={1000} disabled={busy} className="min-h-20" />
-                    </Field>
-                  </div>
+                  )}
+                  <Field label="Catatan penyerahan (internal)" htmlFor={`${uid}-note`} error={fieldError.note} hint="Opsional. Tidak terlihat oleh pemohon.">
+                    <Textarea id={`${uid}-note`} value={note} onChange={(e) => setNote(e.target.value)} maxLength={1000} disabled={busy} className="min-h-16" />
+                  </Field>
                 </section>
               )}
 
               {dest && resultsBlock}
 
-              {dest === "requester" && (
-                <div className="flex flex-col gap-2">
-                  <label className="flex items-start gap-2.5 rounded-xl border border-line p-3 text-sm text-ink">
-                    <input type="checkbox" checked={confirmSent} onChange={(e) => setConfirmSent(e.target.checked)} disabled={busy} className="mt-0.5 size-4 accent-[#0f766e]" />
-                    <span>Saya sudah benar-benar mengirim hasil ini kepada pemohon.</span>
-                  </label>
-                  <p className="text-[13px] text-ink-2">Belum mengirim? Tekan Batal — tidak ada penyerahan yang dicatat. File yang sudah diunggah tetap tersimpan sebagai draf.</p>
-                </div>
-              )}
             </>
           )}
 
@@ -548,6 +580,9 @@ export function QcFlowActions({
 
           {dialog === "complete" && (
             <>
+              {!reviewed && (
+                <div data-testid="complete-no-review"><Alert kind="warning">Pekerjaan ini belum direview Manager maupun pemohon. Sebaiknya ajukan QC ke Manager atau serahkan ke pemohon lebih dulu. Bila tetap ditutup, tulis alasannya; pekerjaan akan diberi penanda &quot;Ditutup tanpa review&quot; yang terlihat oleh Manager.</Alert></div>
+              )}
               {completionNeedsNote && (
                 <Alert kind="info">Pemohon belum tercatat menyetujui hasil ini (baik karena belum ada pengiriman yang tercatat, maupun sudah dikirim tapi belum ada keputusan pemohon). Tuliskan keterangan sesuai kondisi sebenarnya, mis. &quot;Hasil sudah dikirim melalui WhatsApp&quot; atau &quot;Penyelesaian sudah disepakati langsung dengan pemohon&quot;. Penyelesaian tidak membuat catatan pengiriman atau persetujuan baru.</Alert>
               )}
@@ -566,6 +601,19 @@ export function QcFlowActions({
                 ))}
               </fieldset>
               {resultsBlock}
+              <section className="flex flex-col gap-2 rounded-xl bg-[#e7f5ec] p-3" aria-label="Pesan penutup untuk pemohon" data-testid="closing-message">
+                <h3 className="flex items-center gap-1.5 text-sm font-semibold text-ink"><MessageCircle className="size-4" aria-hidden="true" /> Pesan penutup untuk pemohon (opsional)</h3>
+                <Textarea id={`${uid}-closing`} aria-label="Isi pesan penutup" value={closingMessage} onChange={(e) => setClosingDraft(e.target.value)} maxLength={1500} disabled={busy} className="min-h-32 bg-white" />
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button size="sm" variant="secondary" icon={<Copy className="size-3.5" aria-hidden="true" />} onClick={copyClosing} disabled={busy || !closingMessage.trim()}>{copied ? "Tersalin" : "Salin pesan"}</Button>
+                  {requester.whatsapp && (
+                    <a href={`${whatsappLink(requester.whatsapp)}?text=${encodeURIComponent(closingMessage.trim())}`} target="_blank" rel="noopener noreferrer" className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-line-strong bg-surface px-3 text-[13px] font-medium text-accent hover:bg-accent-soft">
+                      <MessageCircle className="size-3.5" aria-hidden="true" /> Kirim lewat WhatsApp
+                    </a>
+                  )}
+                </div>
+                <p className="text-[13px] text-ink-2">Salin atau kirim pesan ini ke pemohon bila perlu. Pekerjaan baru dianggap selesai setelah Anda menekan &quot;Ya, Selesaikan&quot;.</p>
+              </section>
               <p className="text-[13px] text-ink-2">Upload file tidak wajib bila pekerjaan tidak menghasilkan file. Penyelesaian tidak menandai file sebagai terkirim.</p>
               <Field label="Tautan referensi hasil" htmlFor={`${uid}-clink`} error={fieldError.link} hint="Opsional.">
                 <Input id={`${uid}-clink`} type="url" inputMode="url" placeholder="https://" value={link} onChange={(e) => setLink(e.target.value)} disabled={busy} />

@@ -1,7 +1,7 @@
 import "server-only";
 import type postgres from "postgres";
 import type { Role } from "@/lib/auth/permissions";
-import { checkWorkflowAction, deriveRequesterDecision, handoverProblem, type DeliveryStatus, type HandoverChannel, type QcContext, type QcStatus, type WorkflowEventKind } from "@/lib/qc";
+import { checkWorkflowAction, closesWithoutReview, deriveRequesterDecision, handoverProblem, type DeliveryStatus, type HandoverChannel, type QcContext, type QcStatus, type WorkflowEventKind } from "@/lib/qc";
 import { sql } from "@/lib/server/db";
 import { AppError, NotFoundError } from "@/lib/server/errors";
 import { enqueueOrderNotification } from "@/lib/server/repositories/notifications";
@@ -255,7 +255,7 @@ export async function applyWorkflowAction(orderId: string, input: WorkflowAction
       case "complete":
         // Tidak membuat catatan pengiriman/persetujuan: hanya penyelesaian beserta keterangannya.
         to = "completed"; kind = "completed"; notify = true;
-        ev = { link: input.link, detail: { deliveryRecorded: o.status === "awaiting_requester", qcStatusAtCompletion: o.qc_status, fromStatus: o.status, resultFileIds: fileIds, resultLinkIds: linkIds } };
+        ev = { link: input.link, detail: { withoutReview: closesWithoutReview(ctx, { role: actor.role, isAssignee }), deliveryRecorded: o.status === "awaiting_requester", qcStatusAtCompletion: o.qc_status, fromStatus: o.status, resultFileIds: fileIds, resultLinkIds: linkIds } };
         // Penyelesaian tanpa persetujuan QC Manager (mis. diserahkan langsung ke pemohon) — file yang
         // dirujuk saat menyelesaikan tetap dipindahkan ke Hasil Final; tidak menimpa pemindahan approve_qc
         // di atas bila kedua aksi sama-sama merujuk file yang sama (idempoten di moveResultFilesToCategory).
